@@ -135,7 +135,7 @@ async function resolveRecipientPhones(
 
   const { data: leads, error } = await supabase
     .from('leads')
-    .select('id, telefone')
+    .select('id, phone')
     .eq('user_id', row.user_id)
     .in('id', ids)
 
@@ -144,7 +144,7 @@ async function resolveRecipientPhones(
   }
 
   const targets = (leads ?? [])
-    .map((l: { telefone: string | null }) => (l.telefone ?? '').trim())
+    .map((l: { phone: string | null }) => (l.phone ?? '').trim())
     .filter(Boolean)
 
   if (targets.length === 0) {

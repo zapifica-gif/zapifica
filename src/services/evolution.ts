@@ -55,6 +55,64 @@ export function instanceNameFromUserId(userId: string): string {
 }
 
 /**
+ * Monta a URL pública da nossa Edge Function que recebe eventos da Evolution.
+ * Ex.: https://<ref>.supabase.co/functions/v1/evolution-whatsapp-webhook
+ */
+export function evolutionWebhookUrl(supabaseUrl: string): string {
+  const base = supabaseUrl.replace(/\/+$/, '')
+  return `${base}/functions/v1/evolution-whatsapp-webhook`
+}
+
+function evolutionWebhookUrlFromVite(): string | null {
+  const url = import.meta.env.VITE_SUPABASE_URL?.trim() ?? ''
+  if (!url) return null
+  return evolutionWebhookUrl(url)
+}
+
+/** Eventos que queremos escutar — por enquanto, apenas mensagens recebidas. */
+export const EVOLUTION_WEBHOOK_EVENTS = ['MESSAGES_UPSERT'] as const
+
+/**
+ * Registra (ou atualiza) o webhook de uma instância existente na Evolution.
+ * Usa a rota oficial `POST /webhook/set/{instance}`.
+ */
+export async function setInstanceWebhook(
+  cfg: EvolutionHttpConfig,
+  instanceName: string,
+  webhookTargetUrl: string,
+  events: readonly string[] = EVOLUTION_WEBHOOK_EVENTS,
+): Promise<{ ok: boolean; error: string | null; status: number }> {
+  const payload = {
+    webhook: {
+      enabled: true,
+      url: webhookTargetUrl,
+      webhookByEvents: false,
+      webhookBase64: false,
+      events: [...events],
+    },
+  }
+
+  const res = await evolutionFetch(
+    cfg,
+    `/webhook/set/${encodeURIComponent(instanceName)}`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    },
+  )
+
+  if (res.ok) {
+    return { ok: true, error: null, status: res.status }
+  }
+  return {
+    ok: false,
+    error: formatHttpError(res.status, res.data),
+    status: res.status,
+  }
+}
+
+/**
  * Normaliza destino para Evolution: número (apenas dígitos) ou JID de grupo (@g.us).
  * - Já contém `@g.us` → envia o identificador como veio (grupo).
  * - JID `...@s.whatsapp.net` → extrai a parte numérica antes do `@`.
@@ -543,14 +601,27 @@ export async function createInstanceAndGetQr(
       return extractQrFromPayload(connect.data)
     }
 
+    const webhookTargetUrl = evolutionWebhookUrlFromVite()
+
+    const createPayload: Record<string, unknown> = {
+      instanceName,
+      integration: 'WHATSAPP-BAILEYS',
+      qrcode: true,
+    }
+    if (webhookTargetUrl) {
+      createPayload.webhook = {
+        enabled: true,
+        url: webhookTargetUrl,
+        webhookByEvents: false,
+        webhookBase64: false,
+        events: [...EVOLUTION_WEBHOOK_EVENTS],
+      }
+    }
+
     const create = await evolutionFetch(cfg, '/instance/create', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        instanceName,
-        integration: 'WHATSAPP-BAILEYS',
-        qrcode: true,
-      }),
+      body: JSON.stringify(createPayload),
     })
 
     let qr = extractQrFromPayload(create.data)
@@ -570,6 +641,16 @@ export async function createInstanceAndGetQr(
         dataUrl: null,
         error: formatHttpError(create.status, create.data),
         instanceName,
+      }
+    }
+
+    // Garante o webhook mesmo em versões da Evolution que ignoram o campo
+    // `webhook` no /instance/create, ou quando a instância já existia.
+    if (webhookTargetUrl) {
+      try {
+        await setInstanceWebhook(cfg, instanceName, webhookTargetUrl)
+      } catch {
+        // não bloqueia o fluxo do QR Code se o set-webhook falhar aqui
       }
     }
 

@@ -1,0 +1,26 @@
+---
+description: Sempre falar com o usuário em português do Brasil (pt-BR), nunca em português de Portugal
+alwaysApply: true
+---
+
+# Idioma: português do Brasil
+
+- **Todas** as respostas ao usuário (explicações, comentários, mensagens, commits sugeridos, erros) devem ser em **português do Brasil (pt-BR)**.
+- **Não** use português de Portugal: vocabulário, conjugação ou expressões de PT-PT.
+- Em dúvida, prefira o registro usado no Brasil (segunda pessoa "você", não "tu"; imperativos e pronomes no padrão brasileiro).
+
+## O que evitar (PT-PT) → preferir (pt-BR)
+
+| Evitar (Portugal) | Usar (Brasil) |
+|-------------------|---------------|
+| se quiseres, se puderes | se quiser, se puder |
+| ficheiro | arquivo |
+| guardar (no sentido de salvar) | salvar, gravar |
+| utilizar, necessitar de (forçado) | usar, precisar de |
+| correio, posto (no sentido IT de “mail”) | e-mail, mensagem, conforme o contexto |
+
+- **Não** misturar: uma frase em PT-PT e outra em pt-BR.
+
+## Código e nomes técnicos
+
+- Identificadores em inglês no código: permitido. Comentários e documentação **para o usuário** em **pt-BR** quando a conversa for em português.

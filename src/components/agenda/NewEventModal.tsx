@@ -10,10 +10,11 @@ import {
   Users,
   X,
 } from 'lucide-react'
+import { toEvolutionDigits } from '../../lib/phoneBrazil'
 import { supabase } from '../../lib/supabase'
 import { instanceNameFromUserId } from '../../services/evolution'
 
-type LeadOption = { id: string; nome: string; telefone: string }
+type LeadOption = { id: string; name: string; phone: string }
 
 type NewEventModalProps = {
   open: boolean
@@ -33,25 +34,6 @@ type NewEventModalProps = {
   onPersonalPhoneChange?: (raw: string | null) => void
   /** Recarrega a agenda no pai; pode ser async para aguardar o fetch antes de fechar o modal. */
   onSaved: () => void | Promise<void>
-}
-
-/**
- * Canoniza número BR para o formato que a Evolution API espera (dígitos puros com DDI 55).
- * Aceita variações com/sem máscara, com ou sem 55, e também JIDs (@s.whatsapp.net / @g.us).
- * Retorna null se for impossível extrair algo razoável.
- */
-function toEvolutionDigits(raw: string | null | undefined): string | null {
-  if (!raw) return null
-  const t = raw.trim()
-  if (!t) return null
-  if (t.includes('@g.us')) return t
-  const core = t.includes('@') ? (t.split('@')[0] ?? '') : t
-  const digits = core.replace(/\D/g, '')
-  if (!digits) return null
-  if (digits.startsWith('55') && digits.length >= 12) return digits
-  if (digits.length === 10 || digits.length === 11) return `55${digits}`
-  if (digits.length >= 12) return digits
-  return null
 }
 
 const CATEGORIAS: { value: string; label: string }[] = [
@@ -177,8 +159,8 @@ export function NewEventModal({
     void (async () => {
       const { data } = await supabase
         .from('leads')
-        .select('id, nome, telefone')
-        .order('nome', { ascending: true })
+        .select('id, name, phone')
+        .order('name', { ascending: true })
       setLeads((data ?? []) as LeadOption[])
     })()
   }, [open, initialDate, initialHour, reinicializarCamposDoModal])
@@ -195,7 +177,7 @@ export function NewEventModal({
   }
 
   function selectAllSegment() {
-    const withPhone = leads.filter((l) => l.telefone?.trim())
+    const withPhone = leads.filter((l) => l.phone?.trim())
     setSegmentIds(new Set(withPhone.map((l) => l.id)))
   }
 
@@ -426,7 +408,7 @@ export function NewEventModal({
     onClose()
   }
 
-  const leadsWithPhone = leads.filter((l) => l.telefone?.trim())
+  const leadsWithPhone = leads.filter((l) => l.phone?.trim())
 
   return (
     <div
@@ -534,7 +516,7 @@ export function NewEventModal({
                   <option value="">Nenhum</option>
                   {leads.map((l) => (
                     <option key={l.id} value={l.id}>
-                      {l.nome}
+                      {l.name}
                     </option>
                   ))}
                 </select>
@@ -751,7 +733,7 @@ export function NewEventModal({
                                   className="rounded border-zinc-300 text-brand-600 focus:ring-brand-600/30"
                                 />
                                 <span className="truncate text-zinc-800">
-                                  {l.nome}
+                                  {l.name}
                                 </span>
                               </label>
                             </li>

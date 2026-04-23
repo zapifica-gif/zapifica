@@ -3,3 +3,9 @@ project_id = "zapifica"
 
 [functions.process-scheduled-messages]
 verify_jwt = false
+
+[functions.evolution-whatsapp-webhook]
+verify_jwt = false
+
+[functions.inbox-ai-reply]
+verify_jwt = false

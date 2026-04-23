@@ -29,11 +29,14 @@ import {
   verticalListSortingStrategy,
 } from '@dnd-kit/sortable'
 import { CSS } from '@dnd-kit/utilities'
-import { Phone } from 'lucide-react'
+import { GripVertical, Phone } from 'lucide-react'
+import { toEvolutionDigits } from '../../lib/phoneBrazil'
 import { supabase } from '../../lib/supabase'
+import { ChatWindow } from './ChatWindow'
 import { NewLeadModal } from './NewLeadModal'
 
-export type ColumnId = 'novo' | 'atendimento' | 'negociacao' | 'fechado'
+/** Alinhado ao enum/texto do campo `status` em `public.leads`. */
+export type ColumnId = 'novo' | 'em_atendimento' | 'negociacao' | 'fechado'
 
 export type LeadTemperature = 'frio' | 'morno' | 'quente'
 
@@ -46,22 +49,21 @@ export type Lead = {
 
 type LeadRow = {
   id: string
-  nome: string
-  telefone: string
-  temperatura: LeadTemperature
-  status_coluna: string
+  name: string
+  phone: string
+  status: string
 }
 
 const COLUMN_ORDER: ColumnId[] = [
   'novo',
-  'atendimento',
+  'em_atendimento',
   'negociacao',
   'fechado',
 ]
 
 const COLUMN_TITLES: Record<ColumnId, string> = {
   novo: 'Novo Lead',
-  atendimento: 'Em Atendimento',
+  em_atendimento: 'Em Atendimento',
   negociacao: 'Negociação',
   fechado: 'Fechado',
 }
@@ -69,7 +71,7 @@ const COLUMN_TITLES: Record<ColumnId, string> = {
 function emptyColumns(): Record<ColumnId, string[]> {
   return {
     novo: [],
-    atendimento: [],
+    em_atendimento: [],
     negociacao: [],
     fechado: [],
   }
@@ -79,18 +81,25 @@ function isColumnId(v: string): v is ColumnId {
   return COLUMN_ORDER.includes(v as ColumnId)
 }
 
-function isTemperature(v: string): v is LeadTemperature {
-  return v === 'frio' || v === 'morno' || v === 'quente'
-}
-
-function rowToLead(row: LeadRow): Lead | null {
-  if (!isTemperature(row.temperatura)) return null
+/**
+ * A tabela atual não possui coluna de temperatura; o cartão exibe "Frio" por padrão
+ * (evolução futura pode reintroduzir o dado vindo do banco).
+ */
+function rowToLead(row: LeadRow): Lead {
   return {
     id: row.id,
-    name: row.nome,
-    phone: row.telefone,
-    temperature: row.temperatura,
+    name: row.name?.trim() || 'Sem nome',
+    phone: row.phone ?? '',
+    temperature: 'frio',
   }
+}
+
+/** Converte `status` do PostgREST para a coluna do board (inclui legado `atendimento`). */
+function statusToColumnId(status: string | null | undefined): ColumnId {
+  const s = (status ?? '').trim()
+  if (s === 'atendimento') return 'em_atendimento'
+  if (isColumnId(s)) return s
+  return 'novo'
 }
 
 function groupRowsIntoBoard(rows: LeadRow[]): {
@@ -101,9 +110,9 @@ function groupRowsIntoBoard(rows: LeadRow[]): {
   const leadsMap: Record<string, Lead> = {}
 
   for (const row of rows) {
+    if (!row.id) continue
     const lead = rowToLead(row)
-    if (!lead) continue
-    const col = isColumnId(row.status_coluna) ? row.status_coluna : 'novo'
+    const col = statusToColumnId(row.status)
     leadsMap[lead.id] = lead
     columns[col].push(lead.id)
   }
@@ -161,10 +170,18 @@ const tempStyles: Record<
   },
 }
 
-function LeadCardFace({ lead }: { lead: Lead }) {
+function LeadCardFace({
+  lead,
+  className = '',
+}: {
+  lead: Lead
+  className?: string
+}) {
   const temp = tempStyles[lead.temperature]
   return (
-    <article className="rounded-xl border border-zinc-200/90 bg-white p-4 shadow-sm ring-1 ring-zinc-100/80 transition hover:border-zinc-300 hover:shadow-md">
+    <article
+      className={`rounded-xl border border-zinc-200/90 bg-white p-4 shadow-sm ring-1 ring-zinc-100/80 transition hover:border-zinc-300 hover:shadow-md ${className}`}
+    >
       <div className="min-w-0">
         <div className="flex flex-wrap items-center gap-2">
           <h3 className="text-sm font-semibold tracking-tight text-zinc-900">
@@ -188,11 +205,18 @@ function LeadCardFace({ lead }: { lead: Lead }) {
   )
 }
 
-function SortableLeadCard({ lead }: { lead: Lead }) {
+function SortableLeadCard({
+  lead,
+  onOpenChat,
+}: {
+  lead: Lead
+  onOpenChat: (lead: Lead) => void
+}) {
   const {
     attributes,
     listeners,
     setNodeRef,
+    setActivatorNodeRef,
     transform,
     transition,
     isDragging,
@@ -207,11 +231,34 @@ function SortableLeadCard({ lead }: { lead: Lead }) {
     <div
       ref={setNodeRef}
       style={style}
-      className={`touch-none ${isDragging ? 'z-10 opacity-50' : 'cursor-grab active:cursor-grabbing'}`}
-      {...attributes}
-      {...listeners}
+      className={`flex touch-none gap-0.5 ${isDragging ? 'z-10 opacity-50' : ''}`}
     >
-      <LeadCardFace lead={lead} />
+      <button
+        type="button"
+        ref={setActivatorNodeRef}
+        className="mt-1 flex h-8 w-7 shrink-0 items-center justify-center self-start rounded-lg border border-transparent text-zinc-400 transition hover:border-zinc-200 hover:bg-zinc-50 hover:text-zinc-600"
+        aria-label="Arrastar cartão"
+        {...attributes}
+        {...listeners}
+      >
+        <GripVertical className="h-4 w-4" />
+      </button>
+      <div className="min-w-0 flex-1">
+        <div
+          role="button"
+          tabIndex={0}
+          className="cursor-pointer outline-none focus-visible:ring-2 focus-visible:ring-brand-500/40"
+          onClick={() => onOpenChat(lead)}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter' || e.key === ' ') {
+              e.preventDefault()
+              onOpenChat(lead)
+            }
+          }}
+        >
+          <LeadCardFace lead={lead} className="!rounded-l-md" />
+        </div>
+      </div>
     </div>
   )
 }
@@ -231,6 +278,7 @@ export function CrmKanbanBoard() {
   const [loadError, setLoadError] = useState<string | null>(null)
   const [activeId, setActiveId] = useState<UniqueIdentifier | null>(null)
   const [modalOpen, setModalOpen] = useState(false)
+  const [chatLead, setChatLead] = useState<Lead | null>(null)
   const [persistError, setPersistError] = useState<string | null>(null)
 
   const columnsRef = useRef(columns)
@@ -246,30 +294,79 @@ export function CrmKanbanBoard() {
 
   const activeLead = activeId ? leadsMap[String(activeId)] : null
 
-  const fetchLeads = useCallback(async () => {
-    setLoading(true)
-    setLoadError(null)
-    const { data, error } = await supabase
-      .from('leads')
-      .select('id, nome, telefone, temperatura, status_coluna')
-      .order('created_at', { ascending: true })
+  const fetchLeads = useCallback(
+    async (options?: { background?: boolean }) => {
+      const background = options?.background === true
+      if (!background) {
+        setLoading(true)
+      }
+      if (!background) {
+        setLoadError(null)
+      }
+      const { data, error } = await supabase
+        .from('leads')
+        .select('id, name, phone, status')
+        .order('created_at', { ascending: true })
 
-    if (error) {
-      setLoadError('Não foi possível carregar os leads. Tente de novo.')
-      setLoading(false)
-      return
-    }
+      if (error) {
+        if (!background) {
+          setLoadError('Não foi possível carregar os leads. Tente de novo.')
+          setLoading(false)
+        }
+        return
+      }
 
-    const rows = (data ?? []) as LeadRow[]
-    const { columns: nextCols, leadsMap: nextLeads } = groupRowsIntoBoard(rows)
-    columnsRef.current = nextCols
-    setColumns(nextCols)
-    setLeadsMap(nextLeads)
-    setLoading(false)
-  }, [])
+      const rows = (data ?? []) as LeadRow[]
+      const { columns: nextCols, leadsMap: nextLeads } = groupRowsIntoBoard(rows)
+      columnsRef.current = nextCols
+      setColumns(nextCols)
+      setLeadsMap(nextLeads)
+      if (!background) {
+        setLoading(false)
+      }
+    },
+    [],
+  )
 
   useEffect(() => {
     void fetchLeads()
+  }, [fetchLeads])
+
+  useEffect(() => {
+    let channel: ReturnType<typeof supabase.channel> | null = null
+    let cancelled = false
+
+    const subscribe = async () => {
+      const {
+        data: { user },
+      } = await supabase.auth.getUser()
+      if (!user || cancelled) return
+
+      channel = supabase
+        .channel(`leads-realtime-${user.id}`)
+        .on(
+          'postgres_changes',
+          {
+            event: '*',
+            schema: 'public',
+            table: 'leads',
+            filter: `user_id=eq.${user.id}`,
+          },
+          () => {
+            void fetchLeads({ background: true })
+          },
+        )
+        .subscribe()
+    }
+
+    void subscribe()
+
+    return () => {
+      cancelled = true
+      if (channel) {
+        void supabase.removeChannel(channel)
+      }
+    }
   }, [fetchLeads])
 
   const handleDragOver = useCallback((event: DragOverEvent) => {
@@ -379,7 +476,7 @@ export function CrmKanbanBoard() {
       const { error } = await supabase
         .from('leads')
         .update({
-          status_coluna: endCol,
+          status: endCol,
           updated_at: new Date().toISOString(),
         })
         .eq('id', dragStart.leadId)
@@ -431,16 +528,23 @@ export function CrmKanbanBoard() {
       return { error: 'Sessão inválida. Entre novamente.' }
     }
 
+    const phoneDigits = toEvolutionDigits(telefone)
+    if (!phoneDigits) {
+      return {
+        error:
+          'Informe um número válido com DDD. O 55 (Brasil) é adicionado automaticamente se você digitar só DDD + número.',
+      }
+    }
+
     const { data, error } = await supabase
       .from('leads')
       .insert({
-        nome,
-        telefone,
-        temperatura: 'frio',
-        status_coluna: 'novo',
+        name: nome,
+        phone: phoneDigits,
+        status: 'novo',
         user_id: user.id,
       })
-      .select('id, nome, telefone, temperatura, status_coluna')
+      .select('id, name, phone, status')
       .single()
 
     if (error || !data) {
@@ -449,9 +553,6 @@ export function CrmKanbanBoard() {
 
     const row = data as LeadRow
     const lead = rowToLead(row)
-    if (!lead) {
-      return { error: 'Resposta inválida do servidor.' }
-    }
 
     setLeadsMap((prev) => ({ ...prev, [lead.id]: lead }))
     setColumns((prev) => {
@@ -539,7 +640,13 @@ export function CrmKanbanBoard() {
                     {ids.map((id) => {
                       const lead = leadsMap[id]
                       if (!lead) return null
-                      return <SortableLeadCard key={id} lead={lead} />
+                      return (
+                        <SortableLeadCard
+                          key={id}
+                          lead={lead}
+                          onOpenChat={(l) => setChatLead(l)}
+                        />
+                      )
                     })}
                   </div>
                 </SortableContext>
@@ -561,6 +668,12 @@ export function CrmKanbanBoard() {
         open={modalOpen}
         onClose={() => setModalOpen(false)}
         onSave={handleSaveNewLead}
+      />
+
+      <ChatWindow
+        open={chatLead != null}
+        onClose={() => setChatLead(null)}
+        lead={chatLead}
       />
     </>
   )

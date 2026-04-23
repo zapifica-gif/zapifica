@@ -204,12 +204,12 @@ serve(async () => {
       ) {
         const { data: leads } = await supabase
           .from('leads')
-          .select('telefone')
+          .select('phone')
           .eq('user_id', msg.user_id)
           .in('id', msg.segment_lead_ids)
         phones = (leads ?? [])
-          .map((l: { telefone: string | null }) =>
-            toEvolutionDigits(l.telefone),
+          .map((l: { phone: string | null }) =>
+            toEvolutionDigits(l.phone),
           )
           .filter((x): x is string => Boolean(x))
       }
