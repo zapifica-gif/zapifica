@@ -11,6 +11,7 @@ import {
   X,
 } from 'lucide-react'
 import { supabase } from '../../lib/supabase'
+import { instanceNameFromUserId } from '../../services/evolution'
 
 type LeadOption = { id: string; nome: string; telefone: string }
 
@@ -28,8 +29,29 @@ type NewEventModalProps = {
    * Gravado em `scheduled_messages.recipient_phone` para o worker não depender de auth.
    */
   personalPhoneRaw: string | null
+  /** Atualiza o pai quando o usuário cadastra/muda o número pessoal pelo modal. */
+  onPersonalPhoneChange?: (raw: string | null) => void
   /** Recarrega a agenda no pai; pode ser async para aguardar o fetch antes de fechar o modal. */
   onSaved: () => void | Promise<void>
+}
+
+/**
+ * Canoniza número BR para o formato que a Evolution API espera (dígitos puros com DDI 55).
+ * Aceita variações com/sem máscara, com ou sem 55, e também JIDs (@s.whatsapp.net / @g.us).
+ * Retorna null se for impossível extrair algo razoável.
+ */
+function toEvolutionDigits(raw: string | null | undefined): string | null {
+  if (!raw) return null
+  const t = raw.trim()
+  if (!t) return null
+  if (t.includes('@g.us')) return t
+  const core = t.includes('@') ? (t.split('@')[0] ?? '') : t
+  const digits = core.replace(/\D/g, '')
+  if (!digits) return null
+  if (digits.startsWith('55') && digits.length >= 12) return digits
+  if (digits.length === 10 || digits.length === 11) return `55${digits}`
+  if (digits.length >= 12) return digits
+  return null
 }
 
 const CATEGORIAS: { value: string; label: string }[] = [
@@ -90,8 +112,10 @@ export function NewEventModal({
   initialHour,
   personalPhoneDisplay,
   personalPhoneRaw,
+  onPersonalPhoneChange,
   onSaved,
 }: NewEventModalProps) {
+  const [manualPersonalPhone, setManualPersonalPhone] = useState('')
   const [title, setTitle] = useState('')
   const [category, setCategory] = useState('reuniao')
   const [clientId, setClientId] = useState<string>('')
@@ -142,6 +166,7 @@ export function NewEventModal({
     setContentType('text')
     setMessageBody('Olá! Lembrete da Zapifica…')
     setSegmentIds(new Set())
+    setManualPersonalPhone('')
     setError(null)
   }, [initialDate, initialHour])
 
@@ -176,76 +201,107 @@ export function NewEventModal({
 
   async function handleSubmit(e: FormEvent) {
     e.preventDefault()
-    setError(null)
-    const t = title.trim()
-    if (!t) {
-      setError('Informe o título do evento.')
-      return
-    }
-    const start = parseLocalDateTime(startDate, startTime)
-    const end = parseLocalDateTime(endDate, endTime)
-    if (!start || !end) {
-      setError('Datas e horários inválidos.')
-      return
-    }
-    if (end <= start) {
-      setError('O término deve ser depois do início.')
-      return
-    }
-
-    let dispatchAt: Date | null = null
-    if (dispatchActive) {
-      dispatchAt = parseLocalDateTime(dispatchDate, dispatchTime)
-      if (!dispatchAt) {
-        setError('Preencha a data e o horário do disparo.')
-        return
-      }
-      if (!messageBody.trim() && contentType === 'text') {
-        setError('Escreva a mensagem do lembrete ou desative o disparo.')
-        return
-      }
-      if (
-        recipientType === 'segment' &&
-        segmentIds.size === 0
-      ) {
-        setError('Selecione ao menos um cliente com telefone no segmento.')
-        return
-      }
-      if (
-        recipientType === 'personal' &&
-        !(personalPhoneRaw?.trim())
-      ) {
-        setError(
-          'Não encontramos seu telefone para o lembrete pessoal. Atualize seu perfil ou cadastre o número no app e tente de novo.',
-        )
-        return
-      }
-    }
-
-    const {
-      data: { user },
-      error: userError,
-    } = await supabase.auth.getUser()
-    if (userError || !user) {
-      setError('Sessão inválida. Entre novamente.')
-      return
-    }
-
+    // Guarda anti-duplo-submit no topo: se já há um submit em voo,
+    // descarta o clique atual antes mesmo de validar ou bater no Supabase.
+    if (submitting) return
     setSubmitting(true)
+    setError(null)
 
     try {
+      const t = title.trim()
+      if (!t) {
+        setError('Informe o título do evento.')
+        return
+      }
+      const start = parseLocalDateTime(startDate, startTime)
+      const end = parseLocalDateTime(endDate, endTime)
+      if (!start || !end) {
+        setError('Datas e horários inválidos.')
+        return
+      }
+      if (end <= start) {
+        setError('O término deve ser depois do início.')
+        return
+      }
+
+      // Resolve o telefone pessoal: primeiro o já cadastrado; se faltar,
+      // usa o que foi digitado no próprio modal (e persiste em profiles).
+      const telefonePessoalEvolution =
+        toEvolutionDigits(personalPhoneRaw) ??
+        toEvolutionDigits(manualPersonalPhone)
+
+      let dispatchAt: Date | null = null
+      if (dispatchActive) {
+        dispatchAt = parseLocalDateTime(dispatchDate, dispatchTime)
+        if (!dispatchAt) {
+          setError('Preencha a data e o horário do disparo.')
+          return
+        }
+        if (!messageBody.trim() && contentType === 'text') {
+          setError('Escreva a mensagem do lembrete ou desative o disparo.')
+          return
+        }
+        if (recipientType === 'segment' && segmentIds.size === 0) {
+          setError('Selecione ao menos um cliente com telefone no segmento.')
+          return
+        }
+        if (recipientType === 'personal' && !telefonePessoalEvolution) {
+          setError(
+            'Informe seu número com DDD (ex.: 48 99999-9999). O 55 do Brasil é anexado automaticamente.',
+          )
+          return
+        }
+      }
+
+      const {
+        data: { user },
+        error: userError,
+      } = await supabase.auth.getUser()
+      if (userError || !user) {
+        setError('Sessão inválida. Entre novamente.')
+        return
+      }
+
       const ownerId = user.id
       const startAtUtc = start.toISOString()
       const endAtUtc = end.toISOString()
-      console.log(
-        '[Agenda] Passo 1 — criar evento no calendário (RLS exige user_id =',
-        ownerId,
-        ') start_at/end_at UTC:',
-        startAtUtc,
-        endAtUtc,
-      )
+
+      // Se o usuário digitou o número no modal e ainda não havia um salvo,
+      // persistimos em `profiles` (upsert por id) para que o próximo evento
+      // já ache o telefone sem precisar redigitar.
+      if (
+        dispatchActive &&
+        recipientType === 'personal' &&
+        telefonePessoalEvolution &&
+        !personalPhoneRaw?.trim() &&
+        manualPersonalPhone.trim()
+      ) {
+        const { error: profErr } = await supabase
+          .from('profiles')
+          .upsert(
+            { id: ownerId, whatsapp: telefonePessoalEvolution },
+            { onConflict: 'id' },
+          )
+        if (profErr) {
+          console.warn(
+            '[Agenda] não foi possível persistir profiles.whatsapp:',
+            profErr.message,
+          )
+        } else {
+          onPersonalPhoneChange?.(telefonePessoalEvolution)
+        }
+      }
+
+      // UUID gerado no cliente + upsert → fluxo idempotente.
+      // Se houver retry, clique duplo ou falha na etapa 2, reenviamos a
+      // mesma linha sem colidir com `events_pkey` (23505).
+      const eventoId =
+        typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
+          ? crypto.randomUUID()
+          : `${Date.now()}-${Math.random().toString(16).slice(2)}`
 
       const eventoRow = {
+        id: eventoId,
         user_id: ownerId,
         title: t,
         category,
@@ -255,9 +311,16 @@ export function NewEventModal({
         sync_kanban: syncKanban,
       }
 
+      console.log(
+        '[Agenda] Passo 1 — upsert events | id:',
+        eventoId,
+        '| user_id:',
+        ownerId,
+      )
+
       const { data: eventoCriado, error: evErr } = await supabase
         .from('events')
-        .insert(eventoRow)
+        .upsert(eventoRow, { onConflict: 'id' })
         .select('id, user_id')
         .single()
 
@@ -273,31 +336,17 @@ export function NewEventModal({
 
       if (!eventoCriado?.id) {
         setError(
-          'Passo 1 (events): insert pareceu ok, mas nenhuma linha foi retornada no select. Verifique políticas RLS de SELECT em `events`.',
+          'Passo 1 (events): upsert pareceu ok, mas nenhuma linha foi retornada no select. Verifique políticas RLS de SELECT em `events`.',
         )
         return
       }
 
-      if (eventoCriado.user_id !== ownerId) {
-        console.warn(
-          '[Agenda] Atenção: user_id retornado difere do usuário logado.',
-          eventoCriado.user_id,
-          ownerId,
-        )
-      }
-
-      console.log(
-        '[Agenda] Evento gravado — id:',
-        eventoCriado.id,
-        '| user_id:',
-        eventoCriado.user_id,
-      )
-
       /**
-       * Passo 2 (obrigatório, fluxo tipo transação com o passo 1):
-       * sempre uma linha em `scheduled_messages` ligada ao `event_id`.
-       * Com lembrete Evolution: is_active true + scheduled_at em UTC (.toISOString).
-       * Sem lembrete: stub (is_active false, cancelado) para manter 1:1 sem disparo.
+       * Passo 2: uma linha em `scheduled_messages` ligada ao `event_id`.
+       *
+       * Usamos upsert com onConflict: 'event_id' para o fluxo ser idempotente
+       * também aqui — assim um retry após falha de rede não duplica disparos
+       * (requer índice único em event_id; criado na migração).
        */
       const lembreteEvolutionLigado = Boolean(dispatchActive && dispatchAt)
       const scheduledAtUtcIso = lembreteEvolutionLigado
@@ -306,8 +355,12 @@ export function NewEventModal({
 
       const recipientPhoneRow =
         lembreteEvolutionLigado && recipientType === 'personal'
-          ? personalPhoneRaw?.trim() ?? null
+          ? telefonePessoalEvolution
           : null
+
+      // Mesma convenção do Zap Voice: a instância da Evolution por usuário é
+      // `zapifica_<user_id>`. O 'ZapAgencia' antigo gerava 404 Not Found.
+      const instanceName = instanceNameFromUserId(ownerId)
 
       const mensagemAgendadaRow = lembreteEvolutionLigado
         ? {
@@ -322,7 +375,9 @@ export function NewEventModal({
             segment_lead_ids:
               recipientType === 'segment' ? [...segmentIds] : [],
             recipient_phone: recipientPhoneRow,
-            evolution_instance_name: 'ZapAgencia', // AQUI ENTROU A NOSSA CORREÇÃO
+            evolution_instance_name: instanceName,
+            last_error: null,
+            evolution_message_id: null,
           }
         : {
             event_id: eventoCriado.id,
@@ -335,26 +390,19 @@ export function NewEventModal({
             status: 'cancelled' as const,
             segment_lead_ids: [] as string[],
             recipient_phone: null,
-            evolution_instance_name: null, // AQUI ENTROU A NOSSA CORREÇÃO
+            evolution_instance_name: null,
+            last_error: null,
+            evolution_message_id: null,
           }
-
-      console.log(
-        '[Agenda] Passo 2 — scheduled_messages | event_id:',
-        eventoCriado.id,
-        '| user_id:',
-        ownerId,
-        '| is_active:',
-        mensagemAgendadaRow.is_active,
-        '| scheduled_at (UTC ISO ou null):',
-        scheduledAtUtcIso,
-      )
 
       const { error: erroMsg } = await supabase
         .from('scheduled_messages')
-        .insert(mensagemAgendadaRow)
+        .upsert(mensagemAgendadaRow, { onConflict: 'event_id' })
         .select('id')
 
       if (erroMsg) {
+        // Rollback best-effort do events antes de devolver o controle.
+        // Mesmo que isso falhe, o próximo Salvar gera um novo UUID e não colide.
         await supabase.from('events').delete().eq('id', eventoCriado.id)
         setError(
           `Passo 2 (scheduled_messages): ${textoErroParaUsuario(erroMsg)}`,
@@ -366,20 +414,8 @@ export function NewEventModal({
       reinicializarCamposDoModal()
       onClose()
     } catch (err) {
-      console.error(
-        '================================================================================',
-      )
-      console.error('[Agenda] ERRO FATAL NO SALVAMENTO DO MODAL (catch):', err)
-      console.error(
-        '[Agenda] stack:',
-        err instanceof Error ? err.stack : '(sem stack)',
-      )
-      console.error(
-        '================================================================================',
-      )
-      setError(
-        `Erro ao agendar lembrete: ${textoErroParaUsuario(err)}`,
-      )
+      console.error('[Agenda] erro fatal no salvamento do modal:', err)
+      setError(`Erro ao agendar lembrete: ${textoErroParaUsuario(err)}`)
     } finally {
       setSubmitting(false)
     }
@@ -621,12 +657,41 @@ export function NewEventModal({
                               Meu número (lembrete pessoal)
                             </p>
                             <p className="mt-1 text-xs leading-relaxed text-zinc-500">
-                              Usa o telefone da agência (tenant) ou o número no
-                              seu perfil — sem digitar manualmente.
+                              Usa o número cadastrado no seu perfil. O 55 do
+                              Brasil é anexado automaticamente.
                             </p>
-                            <p className="mt-3 rounded-xl border border-zinc-200 bg-zinc-50 px-3 py-2 text-xs font-medium tabular-nums text-zinc-700">
-                              Enviar para {personalPhoneDisplay}
-                            </p>
+                            {personalPhoneRaw?.trim() ? (
+                              <p className="mt-3 rounded-xl border border-zinc-200 bg-zinc-50 px-3 py-2 text-xs font-medium tabular-nums text-zinc-700">
+                                Enviar para {personalPhoneDisplay}
+                              </p>
+                            ) : (
+                              <div className="mt-3 space-y-1">
+                                <label
+                                  htmlFor="evt-personal-phone"
+                                  className="block text-[11px] font-semibold uppercase tracking-wide text-zinc-500"
+                                >
+                                  Seu WhatsApp (DDD + número)
+                                </label>
+                                <input
+                                  id="evt-personal-phone"
+                                  type="tel"
+                                  inputMode="tel"
+                                  autoComplete="tel"
+                                  value={manualPersonalPhone}
+                                  onChange={(e) =>
+                                    setManualPersonalPhone(e.target.value)
+                                  }
+                                  onClick={(e) => e.stopPropagation()}
+                                  disabled={submitting}
+                                  placeholder="(48) 99999-9999"
+                                  className="h-10 w-full rounded-lg border border-zinc-200 bg-white px-3 text-sm tabular-nums text-zinc-900 outline-none transition focus:border-emerald-500 focus:ring-2 focus:ring-emerald-200 disabled:opacity-60"
+                                />
+                                <p className="text-[10px] leading-snug text-zinc-500">
+                                  Salvamos este número no seu perfil para não
+                                  precisar redigitar no próximo evento.
+                                </p>
+                              </div>
+                            )}
                           </div>
                         </div>
                       </label>

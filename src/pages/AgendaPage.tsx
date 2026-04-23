@@ -832,6 +832,7 @@ export function AgendaPage() {
         initialHour={modalSeed.hour}
         personalPhoneDisplay={personalPhoneDisplay}
         personalPhoneRaw={personalPhoneRaw}
+        onPersonalPhoneChange={setPersonalPhoneRaw}
         onSaved={async () => {
           await fetchEvents()
         }}
