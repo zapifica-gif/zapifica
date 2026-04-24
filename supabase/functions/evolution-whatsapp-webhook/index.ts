@@ -1,16 +1,30 @@
 // ============================================================================
-// Webhook: eventos web da Evolution (ex.: messages.upsert) → public.chat_messages
+// Webhook: Evolution API (messages.upsert) → public.chat_messages
 //
-// 1) Copie a URL pública: https://<ref>.supabase.co/functions/v1/evolution-whatsapp-webhook
-// 2) No painel da Evolution, registe o webhook para o evento "messages.upsert" (ou
-//    Webhook Geral) apontando para essa URL.
-// 3) supabase secrets set EVOLUTION_WEBHOOK_SECRET=... (opcional, recomendado)
+// Regras desta função:
+//   1. Extrai o número do remetente de `key.remoteJid` (ou `remoteJid`) e
+//      remove qualquer sufixo tipo `@s.whatsapp.net`.
+//   2. Normaliza o número pra formato BR com DDI 55 (toEvolutionDigits) e
+//      também gera uma "cauda nacional" (últimos 10/11 dígitos) para casar
+//      com leads salvos sem o 55.
+//   3. Se o número não existir na tabela `leads` para aquele `user_id`,
+//      CRIA o lead automaticamente (status = 'novo').
+//   4. Só depois de garantir que o lead existe, insere a mensagem em
+//      `chat_messages`.
+//   5. Grupos (@g.us) e mensagens "fromMe" (enviadas pela agência) são
+//      ignorados nesta rotina — o envio pelo app já grava a mensagem local.
 //
-// Requer secrets: SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY (já existem no host)
+// Setup no host Supabase:
+//   - secrets SUPABASE_URL e SUPABASE_SERVICE_ROLE_KEY (injetados pelo host)
+//   - EVOLUTION_WEBHOOK_SECRET  (opcional, reforça autenticação)
+//
+// Deploy (a partir da raiz do projeto):
+//   npx supabase functions deploy evolution-whatsapp-webhook \
+//     --project-ref <ref> --no-verify-jwt
 // ============================================================================
 
 import { serve } from 'https://deno.land/std@0.168.0/http/server.ts'
-import { createClient } from 'https://esm.sh/@supabase/supabase-js@2'
+import { createClient, SupabaseClient } from 'https://esm.sh/@supabase/supabase-js@2'
 
 const corsHeaders: Record<string, string> = {
   'Access-Control-Allow-Origin': '*',
@@ -19,6 +33,15 @@ const corsHeaders: Record<string, string> = {
   'Access-Control-Allow-Methods': 'POST, OPTIONS',
 }
 
+// ---------------------------------------------------------------------------
+// Helpers de telefone
+// ---------------------------------------------------------------------------
+
+/**
+ * Converte qualquer representação de número BR para o formato da Evolution
+ * (dígitos puros começando com DDI 55). Grupos (@g.us) são devolvidos como
+ * estão. Retorna null quando não há como extrair algo razoável.
+ */
 function toEvolutionDigits(raw: string | null | undefined): string | null {
   if (!raw) return null
   const t = raw.trim()
@@ -33,6 +56,37 @@ function toEvolutionDigits(raw: string | null | undefined): string | null {
   return null
 }
 
+/**
+ * "Cauda nacional" do número: remove o DDI 55 e devolve os últimos 10 ou 11
+ * dígitos. Usada para comparação flexível com leads salvos sem o 55.
+ */
+function nationalTail(digits: string | null | undefined): string | null {
+  if (!digits) return null
+  if (digits.includes('@')) return null
+  const only = digits.replace(/\D/g, '')
+  if (!only) return null
+  if (only.startsWith('55') && only.length >= 12) {
+    return only.slice(2)
+  }
+  return only.slice(-11)
+}
+
+/** Formata um número em dígitos puros (ex.: 5548999999999) para exibição. */
+function prettifyPhone(digits: string): string {
+  const tail = nationalTail(digits) ?? digits.replace(/\D/g, '')
+  if (tail.length === 11) {
+    return `(${tail.slice(0, 2)}) ${tail.slice(2, 7)}-${tail.slice(7)}`
+  }
+  if (tail.length === 10) {
+    return `(${tail.slice(0, 2)}) ${tail.slice(2, 6)}-${tail.slice(6)}`
+  }
+  return `+${digits.replace(/\D/g, '')}`
+}
+
+// ---------------------------------------------------------------------------
+// Helpers de payload da Evolution
+// ---------------------------------------------------------------------------
+
 function userIdFromZapificaInstance(instance: string): string | null {
   const p = 'zapifica_'
   if (!instance.startsWith(p)) return null
@@ -46,11 +100,11 @@ function extractTextAndType(msg: Record<string, unknown> | null | undefined): {
   content: 'text' | 'audio' | 'image'
 } {
   if (!msg) return { body: '', content: 'text' }
-  if (msg.conversation && typeof msg.conversation === 'string') {
+  if (typeof msg.conversation === 'string' && msg.conversation) {
     return { body: msg.conversation, content: 'text' }
   }
   const ext = msg.extendedTextMessage as Record<string, unknown> | undefined
-  if (ext?.text && typeof ext.text === 'string') {
+  if (ext && typeof ext.text === 'string' && ext.text) {
     return { body: ext.text, content: 'text' }
   }
   if (msg.imageMessage && typeof msg.imageMessage === 'object') {
@@ -59,15 +113,9 @@ function extractTextAndType(msg: Record<string, unknown> | null | undefined): {
       typeof im.caption === 'string' && im.caption.trim() ? im.caption : ''
     return { body: c || '[imagem]', content: 'image' }
   }
-  if (msg.audioMessage) {
-    return { body: '[áudio]', content: 'audio' }
-  }
-  if (msg.videoMessage) {
-    return { body: '[vídeo]', content: 'text' }
-  }
-  if (msg.documentMessage) {
-    return { body: '[documento]', content: 'text' }
-  }
+  if (msg.audioMessage) return { body: '[áudio]', content: 'audio' }
+  if (msg.videoMessage) return { body: '[vídeo]', content: 'text' }
+  if (msg.documentMessage) return { body: '[documento]', content: 'text' }
   return { body: '[mensagem]', content: 'text' }
 }
 
@@ -76,9 +124,12 @@ type UpsertItem = {
   remoteJid: string
   msgId: string
   message: Record<string, unknown> | null
+  pushName: string | null
 }
 
-function normalizeKey(key: unknown): { remoteJid: string; id: string; fromMe: boolean } | null {
+function normalizeKey(
+  key: unknown,
+): { remoteJid: string; id: string; fromMe: boolean } | null {
   if (!key || typeof key !== 'object') return null
   const o = key as Record<string, unknown>
   const remoteJid = typeof o.remoteJid === 'string' ? o.remoteJid : ''
@@ -88,32 +139,142 @@ function normalizeKey(key: unknown): { remoteJid: string; id: string; fromMe: bo
   return { remoteJid, id, fromMe }
 }
 
+/** Aceita o payload vindo de vários formatos da Evolution (v1/v2) e retorna
+ *  a lista plana de mensagens no evento messages.upsert. */
 function collectUpsertItems(data: unknown): UpsertItem[] {
   if (data == null) return []
+
   if (Array.isArray(data)) {
     return data.flatMap((d) =>
       d && typeof d === 'object' ? collectUpsertItems(d) : [],
     )
   }
+
   if (typeof data === 'object') {
     const o = data as Record<string, unknown>
+
     if (o.messages && Array.isArray(o.messages)) {
       return collectUpsertItems(o.messages)
     }
+
     const k = normalizeKey(o.key)
     if (k && o.message) {
+      const pushName =
+        typeof o.pushName === 'string' && o.pushName.trim()
+          ? o.pushName.trim()
+          : null
       return [
         {
           fromMe: k.fromMe,
           remoteJid: k.remoteJid,
           msgId: k.id,
           message: o.message as Record<string, unknown>,
+          pushName,
         },
       ]
     }
   }
   return []
 }
+
+// ---------------------------------------------------------------------------
+// Lookup + auto-criação de lead
+// ---------------------------------------------------------------------------
+
+type LeadRow = { id: string; phone: string | null; name: string | null }
+
+type LeadIndex = {
+  byFull: Map<string, string>
+  byTail: Map<string, string>
+  rows: LeadRow[]
+}
+
+function buildLeadIndex(rows: LeadRow[]): LeadIndex {
+  const byFull = new Map<string, string>()
+  const byTail = new Map<string, string>()
+  for (const r of rows) {
+    const full = toEvolutionDigits(r.phone ?? null)
+    if (full && !byFull.has(full)) byFull.set(full, r.id)
+    const tail = nationalTail(full ?? r.phone ?? null)
+    if (tail && !byTail.has(tail)) byTail.set(tail, r.id)
+  }
+  return { byFull, byTail, rows }
+}
+
+function findLeadId(
+  idx: LeadIndex,
+  fullDigits: string,
+): string | null {
+  const hitFull = idx.byFull.get(fullDigits)
+  if (hitFull) return hitFull
+  const tail = nationalTail(fullDigits)
+  if (tail) {
+    const hitTail = idx.byTail.get(tail)
+    if (hitTail) return hitTail
+  }
+  return null
+}
+
+/**
+ * Cria um lead novo (status = 'novo') para aquele user_id. Em caso de corrida
+ * (dois webhooks simultâneos), volta a procurar no banco antes de desistir.
+ */
+async function ensureLeadId(
+  supabase: SupabaseClient,
+  userId: string,
+  idx: LeadIndex,
+  fullDigits: string,
+  pushName: string | null,
+): Promise<{ id: string | null; created: boolean; error: string | null }> {
+  const existing = findLeadId(idx, fullDigits)
+  if (existing) return { id: existing, created: false, error: null }
+
+  const displayName =
+    (pushName && pushName.slice(0, 80)) ||
+    `Novo Lead ${prettifyPhone(fullDigits)}`
+
+  const { data, error } = await supabase
+    .from('leads')
+    .insert({
+      user_id: userId,
+      name: displayName,
+      phone: fullDigits,
+      status: 'novo',
+    })
+    .select('id, phone, name')
+    .single()
+
+  if (!error && data) {
+    const row = data as LeadRow
+    idx.rows.push(row)
+    idx.byFull.set(fullDigits, row.id)
+    const tail = nationalTail(fullDigits)
+    if (tail) idx.byTail.set(tail, row.id)
+    return { id: row.id, created: true, error: null }
+  }
+
+  // Corrida: outro webhook pode ter criado o mesmo lead no meio-tempo.
+  // Relê o banco e tenta o match de novo antes de reportar erro.
+  const retry = await supabase
+    .from('leads')
+    .select('id, phone, name')
+    .eq('user_id', userId)
+
+  if (!retry.error && Array.isArray(retry.data)) {
+    const refreshed = buildLeadIndex(retry.data as LeadRow[])
+    idx.byFull = refreshed.byFull
+    idx.byTail = refreshed.byTail
+    idx.rows = refreshed.rows
+    const again = findLeadId(idx, fullDigits)
+    if (again) return { id: again, created: false, error: null }
+  }
+
+  return { id: null, created: false, error: error?.message ?? 'insert lead falhou' }
+}
+
+// ---------------------------------------------------------------------------
+// Handler principal
+// ---------------------------------------------------------------------------
 
 serve(async (req) => {
   if (req.method === 'OPTIONS') {
@@ -155,7 +316,9 @@ serve(async (req) => {
   const event = (typeof b.event === 'string' && b.event) || ''
   const instance = (typeof b.instance === 'string' && b.instance) || ''
 
-  if (event && event.toLowerCase() !== 'messages.upsert') {
+  // Só nos interessa messages.upsert (o nome pode vir com ponto ou underscore).
+  const normalizedEvent = event.toLowerCase().replace('_', '.')
+  if (normalizedEvent && normalizedEvent !== 'messages.upsert') {
     return new Response(JSON.stringify({ ok: true, ignored: true, event }), {
       status: 200,
       headers: { 'Content-Type': 'application/json', ...corsHeaders },
@@ -168,7 +331,7 @@ serve(async (req) => {
       JSON.stringify({
         ok: false,
         error:
-          'Instance não segue a convenção zapifica_<user_uuid>. Ajuste o nome da instância no Evolution.',
+          'Instance não segue a convenção zapifica_<user_uuid>. Ajuste o nome da instância na Evolution.',
         instance,
       }),
       { status: 200, headers: { 'Content-Type': 'application/json', ...corsHeaders } },
@@ -196,9 +359,10 @@ serve(async (req) => {
     auth: { persistSession: false, autoRefreshToken: false },
   })
 
+  // Índice inicial de leads do usuário.
   const { data: allLeads, error: leErr } = await supabase
     .from('leads')
-    .select('id, phone')
+    .select('id, phone, name')
     .eq('user_id', userId)
 
   if (leErr) {
@@ -208,58 +372,83 @@ serve(async (req) => {
     })
   }
 
-  const leads = (allLeads ?? []) as { id: string; phone: string | null }[]
-  const leadByPhone = new Map<string, string>()
-  for (const l of leads) {
-    const d = toEvolutionDigits(l.phone ?? null)
-    if (d) leadByPhone.set(d, l.id)
-  }
+  const index = buildLeadIndex((allLeads ?? []) as LeadRow[])
 
   let saved = 0
+  let createdLeads = 0
   const skipped: string[] = []
+  const errors: string[] = []
 
   for (const item of items) {
+    // Ignora grupos por enquanto (@g.us).
+    if (item.remoteJid.includes('@g.us')) {
+      skipped.push(`group:${item.msgId}`)
+      continue
+    }
+    // Mensagens enviadas pela própria agência: ignoradas (o app já grava).
     if (item.fromMe) {
       skipped.push(`fromMe:${item.msgId}`)
       continue
     }
-    const phoneDigits = toEvolutionDigits(item.remoteJid)
-    if (!phoneDigits) {
-      skipped.push(`badJid:${item.remoteJid}`)
-      continue
-    }
-    const leadId = leadByPhone.get(phoneDigits)
-    if (!leadId) {
-      skipped.push(`noLead:${phoneDigits}`)
-      continue
-    }
-    const { body: text, content: contentType } = extractTextAndType(item.message)
     if (!item.msgId) {
       skipped.push('noMsgId')
       continue
     }
+
+    const phoneDigits = toEvolutionDigits(item.remoteJid)
+    if (!phoneDigits || phoneDigits.includes('@')) {
+      skipped.push(`badJid:${item.remoteJid}`)
+      continue
+    }
+
+    const ensured = await ensureLeadId(
+      supabase,
+      userId,
+      index,
+      phoneDigits,
+      item.pushName,
+    )
+    if (!ensured.id) {
+      errors.push(`lead:${phoneDigits}:${ensured.error ?? 'sem id'}`)
+      continue
+    }
+    if (ensured.created) createdLeads++
+
+    const { body: text, content: contentType } = extractTextAndType(item.message)
+
     const { error: insErr } = await supabase.from('chat_messages').insert({
-      lead_id: leadId,
+      lead_id: ensured.id,
       sender_type: 'cliente',
       content_type: contentType,
       message_body: text,
       evolution_message_id: item.msgId,
     })
+
     if (insErr) {
       if (insErr.code === '23505') {
+        // Duplicata por evolution_message_id (retry da Evolution).
         skipped.push(`dup:${item.msgId}`)
         continue
       }
-      return new Response(JSON.stringify({ error: insErr.message, detail: insErr }), {
-        status: 500,
-        headers: { 'Content-Type': 'application/json', ...corsHeaders },
-      })
+      errors.push(`msg:${item.msgId}:${insErr.message}`)
+      continue
     }
     saved++
   }
 
+  const ok = errors.length === 0
   return new Response(
-    JSON.stringify({ ok: true, saved, skipped, count: items.length }),
-    { status: 200, headers: { 'Content-Type': 'application/json', ...corsHeaders } },
+    JSON.stringify({
+      ok,
+      saved,
+      createdLeads,
+      skipped,
+      errors,
+      count: items.length,
+    }),
+    {
+      status: ok ? 200 : 500,
+      headers: { 'Content-Type': 'application/json', ...corsHeaders },
+    },
   )
 })
