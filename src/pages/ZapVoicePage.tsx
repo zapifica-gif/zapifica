@@ -4,6 +4,7 @@ import {
   Megaphone,
   QrCode,
   Radio,
+  RefreshCcw,
   Smartphone,
   Sparkles,
   X,
@@ -14,6 +15,7 @@ import {
   checkConnectionStatus,
   createInstanceAndGetQr,
   sendTextMessage,
+  syncWebhookForCurrentInstance,
 } from '../services/evolution'
 
 export function ZapVoicePage() {
@@ -30,7 +32,9 @@ export function ZapVoicePage() {
 
   const [successToast, setSuccessToast] = useState<string | null>(null)
   const [errorToast, setErrorToast] = useState<string | null>(null)
+  const [infoToast, setInfoToast] = useState<string | null>(null)
   const [disconnectHint, setDisconnectHint] = useState(false)
+  const [webhookSyncing, setWebhookSyncing] = useState(false)
 
   const pollingRef = useRef<ReturnType<typeof setInterval> | null>(null)
 
@@ -190,6 +194,48 @@ export function ZapVoicePage() {
     })()
   }, [])
 
+  const handleSyncWebhook = useCallback(async () => {
+    if (webhookSyncing) return
+
+    setErrorToast(null)
+    setSuccessToast(null)
+    setInfoToast('Sincronizando webhook…')
+    setWebhookSyncing(true)
+
+    try {
+      const {
+        data: { user },
+        error: authErr,
+      } = await supabase.auth.getUser()
+
+      if (authErr || !user) {
+        setInfoToast(null)
+        setErrorToast(
+          'Não foi possível identificar seu usuário. Faça login novamente.',
+        )
+        window.setTimeout(() => setErrorToast(null), 7000)
+        return
+      }
+
+      const result = await syncWebhookForCurrentInstance(user.id)
+      setInfoToast(null)
+
+      if (!result.ok) {
+        setErrorToast(
+          result.error ??
+            'Não foi possível sincronizar o webhook com a Evolution.',
+        )
+        window.setTimeout(() => setErrorToast(null), 8000)
+        return
+      }
+
+      setSuccessToast('Webhook sincronizado com sucesso!')
+      window.setTimeout(() => setSuccessToast(null), 6000)
+    } finally {
+      setWebhookSyncing(false)
+    }
+  }, [webhookSyncing])
+
   return (
     <div className="space-y-8">
       <div className="space-y-3">
@@ -207,6 +253,18 @@ export function ZapVoicePage() {
             className="rounded-xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm font-medium text-rose-900 shadow-sm ring-1 ring-rose-100"
           >
             {errorToast}
+          </div>
+        ) : null}
+        {infoToast ? (
+          <div
+            role="status"
+            className="flex items-center gap-2 rounded-xl border border-brand-200 bg-brand-50 px-4 py-3 text-sm font-medium text-brand-800 shadow-sm ring-1 ring-brand-100"
+          >
+            <span
+              className="h-3.5 w-3.5 animate-spin rounded-full border-2 border-brand-600 border-t-transparent"
+              aria-hidden
+            />
+            {infoToast}
           </div>
         ) : null}
       </div>
@@ -273,6 +331,20 @@ export function ZapVoicePage() {
           </div>
 
           <div className="mt-6 flex flex-1 flex-col justify-end gap-3">
+            <button
+              type="button"
+              onClick={() => void handleSyncWebhook()}
+              disabled={webhookSyncing}
+              className="inline-flex w-full items-center justify-center gap-2 rounded-xl border border-zinc-200 bg-white px-4 py-2.5 text-sm font-semibold text-zinc-800 shadow-sm transition hover:border-brand-300 hover:bg-brand-50 hover:text-brand-700 disabled:cursor-not-allowed disabled:opacity-60"
+              title="Registra na Evolution a URL do webhook que recebe as mensagens (MESSAGES_UPSERT)."
+            >
+              <RefreshCcw
+                className={`h-4 w-4 ${webhookSyncing ? 'animate-spin' : ''}`}
+                aria-hidden
+              />
+              {webhookSyncing ? 'Sincronizando…' : 'Sincronizar Webhook'}
+            </button>
+
             {whatsappConnected ? (
               <>
                 <button

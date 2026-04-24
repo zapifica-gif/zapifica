@@ -112,6 +112,74 @@ export async function setInstanceWebhook(
   }
 }
 
+export type SyncWebhookResult = {
+  ok: boolean
+  error: string | null
+  /** URL que o webhook passou a apontar (útil pra mostrar no toast). */
+  webhookUrl: string | null
+  instanceName: string | null
+}
+
+/**
+ * Atalho pra ser usado no navegador: pega URL da Evolution, Global Key e URL
+ * do Supabase a partir das variáveis VITE_* e aplica o webhook na instância
+ * do usuário logado (`zapifica_<userId>`).
+ */
+export async function syncWebhookForCurrentInstance(
+  userId: string,
+): Promise<SyncWebhookResult> {
+  const cfg = resolveConfig()
+  if (!cfg) {
+    return {
+      ok: false,
+      error:
+        'Configure VITE_EVOLUTION_URL e VITE_EVOLUTION_GLOBAL_KEY no arquivo .env.local.',
+      webhookUrl: null,
+      instanceName: null,
+    }
+  }
+
+  const webhookTargetUrl = evolutionWebhookUrlFromVite()
+  if (!webhookTargetUrl) {
+    return {
+      ok: false,
+      error:
+        'VITE_SUPABASE_URL ausente. Não consegui montar a URL do webhook do Supabase.',
+      webhookUrl: null,
+      instanceName: null,
+    }
+  }
+
+  const instanceName = instanceNameFromUserId(userId)
+
+  try {
+    const result = await setInstanceWebhook(cfg, instanceName, webhookTargetUrl)
+    return {
+      ok: result.ok,
+      error: result.error,
+      webhookUrl: webhookTargetUrl,
+      instanceName,
+    }
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e)
+    if (msg === 'Failed to fetch') {
+      return {
+        ok: false,
+        error:
+          'Não foi possível contatar a Evolution API (rede ou CORS). Verifique VITE_EVOLUTION_URL.',
+        webhookUrl: webhookTargetUrl,
+        instanceName,
+      }
+    }
+    return {
+      ok: false,
+      error: msg || 'Erro inesperado ao sincronizar o webhook.',
+      webhookUrl: webhookTargetUrl,
+      instanceName,
+    }
+  }
+}
+
 /**
  * Normaliza destino para Evolution: número (apenas dígitos) ou JID de grupo (@g.us).
  * - Já contém `@g.us` → envia o identificador como veio (grupo).
