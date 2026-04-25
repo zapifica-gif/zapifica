@@ -1029,6 +1029,108 @@ export async function sendAudioMessageWithConfig(
   }
 }
 
+export type EvolutionMediaType = 'image' | 'video' | 'audio' | 'document'
+
+export type SendMediaParams = {
+  /** URL pública (recomendado) ou base64/dataURL. */
+  media: string
+  mediaType: EvolutionMediaType
+  /** mimeType do arquivo (ex.: image/png). */
+  mimeType: string
+  /** nome do arquivo (ex.: foto.png). */
+  fileName: string
+  /** legenda opcional (para image/video/document). */
+  caption?: string
+}
+
+/**
+ * Envia mídia (imagem/vídeo/documento) via `/message/sendMedia/{instance}`.
+ * Para áudio, a Evolution costuma usar um endpoint separado (`sendWhatsAppAudio`),
+ * então roteamos áudio para o método específico.
+ */
+export async function sendMediaMessageWithConfig(
+  userId: string,
+  recipient: string,
+  params: SendMediaParams,
+  cfg: EvolutionHttpConfig | null,
+): Promise<SendEvolutionResult> {
+  if (!cfg) {
+    return {
+      ok: false,
+      error: 'Credenciais da Evolution não configuradas.',
+      messageId: null,
+    }
+  }
+  const normalized = normalizeEvolutionRecipient(recipient)
+  if ('error' in normalized) {
+    return { ok: false, error: normalized.error, messageId: null }
+  }
+
+  const trimmedMedia = params.media.trim()
+  if (!trimmedMedia) {
+    return { ok: false, error: 'Arquivo de mídia vazio.', messageId: null }
+  }
+  const mimeType = params.mimeType.trim() || 'application/octet-stream'
+  const fileName = params.fileName.trim() || 'arquivo'
+  const caption = params.caption?.trim() || ' '
+
+  // Áudio: motor legacy geralmente pede um endpoint próprio.
+  if (params.mediaType === 'audio') {
+    return await sendAudioMessageWithConfig(userId, recipient, trimmedMedia, cfg)
+  }
+
+  const instanceName = instanceNameFromUserId(userId)
+
+  try {
+    const res = await evolutionFetch(
+      cfg,
+      `/message/sendMedia/${encodeURIComponent(instanceName)}`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          number: normalized.recipient,
+          mediatype: params.mediaType,
+          mimetype: mimeType,
+          caption,
+          media: trimmedMedia,
+          fileName,
+        }),
+      },
+    )
+
+    if (!res.ok) {
+      return {
+        ok: false,
+        error: formatHttpError(res.status, res.data),
+        messageId: null,
+      }
+    }
+
+    return {
+      ok: true,
+      error: null,
+      messageId: extractEvolutionMessageId(res.data),
+    }
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e)
+    return {
+      ok: false,
+      error: msg || 'Erro ao enviar mídia.',
+      messageId: null,
+    }
+  }
+}
+
+export async function sendMediaMessage(
+  userId: string,
+  recipient: string,
+  params: SendMediaParams,
+  httpConfig?: EvolutionHttpConfig | null,
+): Promise<SendEvolutionResult> {
+  return sendMediaMessageWithConfig(userId, recipient, params, resolveConfig(httpConfig))
+}
+
 /**
  * Imagem (ou mídia) — URL ou base64.
  */

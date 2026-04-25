@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react'
-import { FileText, MessageSquare, Send, X } from 'lucide-react'
+import { FileText, Loader2, MessageSquare, Paperclip, Send, TriangleAlert, X } from 'lucide-react'
 import { supabase } from '../../lib/supabase'
-import { sendTextMessage } from '../../services/evolution'
+import { sendMediaMessage, sendTextMessage, type EvolutionMediaType } from '../../services/evolution'
 import type { Lead } from './CrmKanbanBoard'
 
 export type ChatMessageRow = {
@@ -143,6 +143,20 @@ function MessageMedia({ message }: { message: ChatMessageRow }) {
   }
 
   if (message.content_type === 'document') {
+    const url = message.media_url
+    const isVideo = /\.(mp4|webm|mov|m4v|3gp)(\?|#|$)/i.test(url)
+    if (isVideo) {
+      return (
+        <video
+          controls
+          preload="metadata"
+          src={url}
+          className="max-h-80 w-full max-w-full rounded-xl bg-black/90"
+        >
+          Seu navegador não conseguiu reproduzir este vídeo.
+        </video>
+      )
+    }
     return (
       <a
         href={message.media_url}
@@ -180,7 +194,11 @@ export function ChatWindow({ open, onClose, lead }: ChatWindowProps) {
   const [loadError, setLoadError] = useState<string | null>(null)
   const [sendError, setSendError] = useState<string | null>(null)
   const [draft, setDraft] = useState('')
+  const [pendingMedia, setPendingMedia] = useState<
+    Record<string, 'sending' | 'failed'>
+  >({})
   const listRef = useRef<HTMLDivElement | null>(null)
+  const fileInputRef = useRef<HTMLInputElement | null>(null)
 
   const scrollToEnd = useCallback(() => {
     const el = listRef.current
@@ -291,6 +309,107 @@ export function ChatWindow({ open, onClose, lead }: ChatWindowProps) {
     setSending(false)
   }
 
+  function mapFileToMediaType(file: File): {
+    evolution: EvolutionMediaType
+    contentType: ChatMessageRow['content_type']
+  } {
+    const type = file.type || ''
+    if (type.startsWith('image/')) return { evolution: 'image', contentType: 'image' }
+    if (type.startsWith('audio/')) return { evolution: 'audio', contentType: 'audio' }
+    if (type.startsWith('video/')) return { evolution: 'video', contentType: 'document' }
+    return { evolution: 'document', contentType: 'document' }
+  }
+
+  async function handlePickFile(file: File) {
+    if (!lead) return
+    setSendError(null)
+
+    const {
+      data: { user },
+    } = await supabase.auth.getUser()
+    if (!user) {
+      setSendError('Sessão inválida. Entre novamente.')
+      return
+    }
+
+    const { evolution, contentType } = mapFileToMediaType(file)
+
+    // 1) Upload no bucket público (para já aparecer no CRM instantaneamente)
+    const safeName = file.name.replace(/[^a-zA-Z0-9._-]/g, '_')
+    const msgId = crypto.randomUUID()
+    const path = `${user.id}/${lead.id}/${msgId}_${safeName}`
+
+    const { error: upErr } = await supabase.storage
+      .from('chat_media')
+      .upload(path, file, { upsert: true, contentType: file.type || undefined })
+    if (upErr) {
+      setSendError(`Falha ao subir arquivo no Storage: ${upErr.message}`)
+      return
+    }
+
+    const { data: pub } = supabase.storage.from('chat_media').getPublicUrl(path)
+    const publicUrl = pub.publicUrl
+
+    // 2) Grava no banco imediatamente (optimistic persist)
+    const caption = draft.trim()
+    setDraft('')
+    const { data: inserted, error: insErr } = await supabase
+      .from('chat_messages')
+      .insert({
+        lead_id: lead.id,
+        sender_type: 'agencia',
+        content_type: contentType,
+        message_body:
+          caption ||
+          (contentType === 'image'
+            ? '[imagem]'
+            : contentType === 'audio'
+              ? '[áudio]'
+              : evolution === 'video'
+                ? '[vídeo]'
+                : file.name),
+        media_url: publicUrl,
+        evolution_message_id: null,
+      })
+      .select('id')
+      .single()
+
+    if (insErr || !inserted?.id) {
+      setSendError(`Falha ao salvar mensagem no banco: ${insErr?.message ?? 'sem id'}`)
+      return
+    }
+
+    const rowId = inserted.id as string
+    setPendingMedia((prev) => ({ ...prev, [rowId]: 'sending' }))
+
+    // 3) Dispara envio na Evolution usando URL pública (mais leve que base64)
+    const evo = await sendMediaMessage(user.id, lead.phone, {
+      media: publicUrl,
+      mediaType: evolution,
+      mimeType: file.type || 'application/octet-stream',
+      fileName: file.name || safeName,
+      caption,
+    })
+
+    if (!evo.ok) {
+      setPendingMedia((prev) => ({ ...prev, [rowId]: 'failed' }))
+      setSendError(evo.error ?? 'Falha ao enviar mídia pelo WhatsApp.')
+      return
+    }
+
+    // 4) Marca como enviada (salva o messageId da Evolution)
+    await supabase
+      .from('chat_messages')
+      .update({ evolution_message_id: evo.messageId })
+      .eq('id', rowId)
+
+    setPendingMedia((prev) => {
+      const next = { ...prev }
+      delete next[rowId]
+      return next
+    })
+  }
+
   if (!open) return null
 
   return (
@@ -354,10 +473,32 @@ export function ChatWindow({ open, onClose, lead }: ChatWindowProps) {
               className={`flex w-full ${m.sender_type === 'cliente' ? 'justify-start' : 'justify-end'}`}
             >
               <div className="max-w-full">
-                <p className="mb-1 text-[10px] font-medium uppercase tracking-wide text-zinc-400">
-                  {senderLabel(m.sender_type)} ·{' '}
-                  {contentLabel(m.content_type)}
-                </p>
+                <div className="mb-1 flex items-center justify-between gap-2">
+                  <p className="text-[10px] font-medium uppercase tracking-wide text-zinc-400">
+                    {senderLabel(m.sender_type)} · {contentLabel(m.content_type)}
+                  </p>
+                  {pendingMedia[m.id] ? (
+                    <span
+                      className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-semibold ${
+                        pendingMedia[m.id] === 'sending'
+                          ? 'bg-brand-50 text-brand-700 ring-1 ring-brand-200'
+                          : 'bg-rose-50 text-rose-800 ring-1 ring-rose-200'
+                      }`}
+                      title={
+                        pendingMedia[m.id] === 'sending'
+                          ? 'Enviando mídia pelo WhatsApp…'
+                          : 'Falha ao enviar mídia. Tente novamente.'
+                      }
+                    >
+                      {pendingMedia[m.id] === 'sending' ? (
+                        <Loader2 className="h-3 w-3 animate-spin" aria-hidden />
+                      ) : (
+                        <TriangleAlert className="h-3 w-3" aria-hidden />
+                      )}
+                      {pendingMedia[m.id] === 'sending' ? 'Enviando…' : 'Falhou'}
+                    </span>
+                  ) : null}
+                </div>
                 <div
                   className={`space-y-2 whitespace-pre-wrap break-words px-3.5 py-2.5 text-sm leading-relaxed shadow-sm ${bubbleStyle(m.sender_type)}`}
                 >
@@ -387,6 +528,27 @@ export function ChatWindow({ open, onClose, lead }: ChatWindowProps) {
             <label htmlFor="inbox-compose" className="sr-only">
               Nova mensagem
             </label>
+            <input
+              ref={fileInputRef}
+              type="file"
+              className="hidden"
+              onChange={(e) => {
+                const f = e.currentTarget.files?.[0] ?? null
+                e.currentTarget.value = ''
+                if (!f) return
+                void handlePickFile(f)
+              }}
+            />
+            <button
+              type="button"
+              onClick={() => fileInputRef.current?.click()}
+              disabled={!lead || sending}
+              className="inline-flex h-11 w-11 shrink-0 items-center justify-center rounded-xl border border-zinc-200 bg-white text-zinc-700 shadow-sm transition hover:border-brand-300 hover:bg-brand-50 hover:text-brand-700 disabled:cursor-not-allowed disabled:opacity-50"
+              aria-label="Anexar arquivo"
+              title="Anexar arquivo"
+            >
+              <Paperclip className="h-4 w-4" />
+            </button>
             <textarea
               id="inbox-compose"
               value={draft}
