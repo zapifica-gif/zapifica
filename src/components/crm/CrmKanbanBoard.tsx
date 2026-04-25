@@ -282,8 +282,6 @@ export function CrmKanbanBoard() {
   const [persistError, setPersistError] = useState<string | null>(null)
 
   const columnsRef = useRef(columns)
-  columnsRef.current = columns
-
   const dragStartRef = useRef<DragStartInfo | null>(null)
   const columnsSnapshotRef = useRef<Record<ColumnId, string[]> | null>(null)
 
@@ -294,6 +292,10 @@ export function CrmKanbanBoard() {
 
   const activeLead = activeId ? leadsMap[String(activeId)] : null
 
+  useEffect(() => {
+    columnsRef.current = columns
+  }, [columns])
+
   const fetchLeads = useCallback(
     async (options?: { background?: boolean }) => {
       const background = options?.background === true
@@ -303,9 +305,24 @@ export function CrmKanbanBoard() {
       if (!background) {
         setLoadError(null)
       }
+
+      const {
+        data: { user },
+        error: userError,
+      } = await supabase.auth.getUser()
+
+      if (userError || !user) {
+        if (!background) {
+          setLoadError('Sessão inválida. Entre novamente para carregar o CRM.')
+          setLoading(false)
+        }
+        return
+      }
+
       const { data, error } = await supabase
         .from('leads')
         .select('id, name, phone, status')
+        .eq('user_id', user.id)
         .order('created_at', { ascending: true })
 
       if (error) {
@@ -329,7 +346,10 @@ export function CrmKanbanBoard() {
   )
 
   useEffect(() => {
-    void fetchLeads()
+    const timer = window.setTimeout(() => {
+      void fetchLeads()
+    }, 0)
+    return () => window.clearTimeout(timer)
   }, [fetchLeads])
 
   useEffect(() => {
@@ -473,6 +493,26 @@ export function CrmKanbanBoard() {
     if (!endCol || dragStart.column === endCol) return
 
     void (async () => {
+      const {
+        data: { user },
+      } = await supabase.auth.getUser()
+
+      if (!user) {
+        setPersistError('Sessão inválida. Entre novamente para salvar a coluna.')
+        setColumns((prev) => {
+          const next = revertLeadToColumn(
+            prev,
+            dragStart.leadId,
+            endCol,
+            dragStart.column,
+          )
+          columnsRef.current = next
+          return next
+        })
+        setTimeout(() => setPersistError(null), 5000)
+        return
+      }
+
       const { error } = await supabase
         .from('leads')
         .update({
@@ -480,6 +520,7 @@ export function CrmKanbanBoard() {
           updated_at: new Date().toISOString(),
         })
         .eq('id', dragStart.leadId)
+        .eq('user_id', user.id)
 
       if (error) {
         setPersistError('Não foi possível salvar a coluna. Desfazendo movimento.')
