@@ -1,18 +1,5 @@
 // ============================================================================
 // Webhook: Evolution API (messages.upsert) → public.chat_messages
-//
-// Regras desta função:
-//   1. Extrai o número do remetente de `key.remoteJid` (ou `remoteJid`) e
-//      remove qualquer sufixo tipo `@s.whatsapp.net`.
-//   2. Normaliza o número pra formato BR com DDI 55 (toEvolutionDigits) e
-//      também gera uma "cauda nacional" (últimos 10/11 dígitos) para casar
-//      com leads salvos sem o 55.
-//   3. Se o número não existir na tabela `leads` para aquele `user_id`,
-//      CRIA o lead automaticamente (status = 'novo').
-//   4. Só depois de garantir que o lead existe, insere a mensagem em
-//      `chat_messages`.
-//   5. Grupos (@g.us) e mensagens "fromMe" (enviadas pela agência) são
-//      ignorados nesta rotina — o envio pelo app já grava a mensagem local.
 // ============================================================================
 
 import { serve } from 'https://deno.land/std@0.168.0/http/server.ts'
@@ -20,8 +7,7 @@ import { createClient, SupabaseClient } from 'https://esm.sh/@supabase/supabase-
 
 const corsHeaders: Record<string, string> = {
   'Access-Control-Allow-Origin': '*',
-  'Access-Control-Allow-Headers':
-    'authorization, x-webhook-secret, content-type, apikey',
+  'Access-Control-Allow-Headers': 'authorization, x-webhook-secret, content-type, apikey',
   'Access-Control-Allow-Methods': 'POST, OPTIONS',
 }
 
@@ -83,7 +69,6 @@ function extractTextAndType(msg: Record<string, unknown> | null | undefined): {
 } {
   if (!msg) return { body: '', content: 'unknown' }
   
-  // Tratamento mais resiliente para vários formatos da Evolution
   if (typeof msg.conversation === 'string' && msg.conversation) {
     return { body: msg.conversation, content: 'text' }
   }
@@ -103,7 +88,6 @@ function extractTextAndType(msg: Record<string, unknown> | null | undefined): {
   if (msg.videoMessage) return { body: '[vídeo]', content: 'video' }
   if (msg.documentMessage) return { body: '[documento]', content: 'document' }
   
-  // Se ainda não achou, converte o objeto inteiro para string (melhor que falhar)
   return { body: JSON.stringify(msg).substring(0, 200), content: 'text' }
 }
 
@@ -161,12 +145,7 @@ function collectUpsertItems(data: unknown): UpsertItem[] {
 // ---------------------------------------------------------------------------
 
 type LeadRow = { id: string; phone: string | null; name: string | null }
-
-type LeadIndex = {
-  byFull: Map<string, string>
-  byTail: Map<string, string>
-  rows: LeadRow[]
-}
+type LeadIndex = { byFull: Map<string, string>; byTail: Map<string, string>; rows: LeadRow[] }
 
 function buildLeadIndex(rows: LeadRow[]): LeadIndex {
   const byFull = new Map<string, string>()
@@ -191,28 +170,13 @@ function findLeadId(idx: LeadIndex, fullDigits: string): string | null {
   return null
 }
 
-async function ensureLeadId(
-  supabase: SupabaseClient,
-  userId: string,
-  idx: LeadIndex,
-  fullDigits: string,
-  pushName: string | null,
-): Promise<{ id: string | null; created: boolean; error: string | null }> {
+async function ensureLeadId(supabase: SupabaseClient, userId: string, idx: LeadIndex, fullDigits: string, pushName: string | null): Promise<{ id: string | null; created: boolean; error: string | null }> {
   const existing = findLeadId(idx, fullDigits)
   if (existing) return { id: existing, created: false, error: null }
 
   const displayName = (pushName && pushName.slice(0, 80)) || `Novo Lead ${prettifyPhone(fullDigits)}`
 
-  const { data, error } = await supabase
-    .from('leads')
-    .insert({
-      user_id: userId,
-      name: displayName,
-      phone: fullDigits,
-      status: 'novo',
-    })
-    .select('id, phone, name')
-    .single()
+  const { data, error } = await supabase.from('leads').insert({ user_id: userId, name: displayName, phone: fullDigits, status: 'novo' }).select('id, phone, name').single()
 
   if (!error && data) {
     const row = data as LeadRow
@@ -224,7 +188,6 @@ async function ensureLeadId(
   }
 
   const retry = await supabase.from('leads').select('id, phone, name').eq('user_id', userId)
-
   if (!retry.error && Array.isArray(retry.data)) {
     const refreshed = buildLeadIndex(retry.data as LeadRow[])
     idx.byFull = refreshed.byFull
@@ -233,7 +196,6 @@ async function ensureLeadId(
     const again = findLeadId(idx, fullDigits)
     if (again) return { id: again, created: false, error: null }
   }
-
   return { id: null, created: false, error: error?.message ?? 'insert lead falhou' }
 }
 
@@ -242,39 +204,27 @@ async function ensureLeadId(
 // ---------------------------------------------------------------------------
 
 serve(async (req) => {
-  if (req.method === 'OPTIONS') {
-    return new Response('ok', { headers: corsHeaders })
-  }
-  if (req.method !== 'POST') {
-    return new Response(JSON.stringify({ error: 'Method not allowed' }), {
-      status: 405,
-      headers: { 'Content-Type': 'application/json', ...corsHeaders },
-    })
-  }
-
-  // Bloco Try-Catch global para evitar que o worker capote (unhandled promise rejection)
+  if (req.method === 'OPTIONS') return new Response('ok', { headers: corsHeaders })
+  
   try {
+    let body: unknown
+    try {
+      body = await req.json()
+    } catch {
+      return new Response(JSON.stringify({ error: 'Invalid JSON' }), { status: 400, headers: { 'Content-Type': 'application/json', ...corsHeaders } })
+    }
+
+    // MEGAFONE 1: Mostra o que chegou da Evolution
+    console.log("📦 PAYLOAD RECEBIDO:", JSON.stringify(body).substring(0, 800));
+
     const secret = Deno.env.get('EVOLUTION_WEBHOOK_SECRET')?.trim() ?? ''
     if (secret) {
       const h = req.headers.get('x-webhook-secret')?.trim() ?? ''
       const auth = req.headers.get('authorization')?.trim() ?? ''
       const bearer = auth.toLowerCase().startsWith('bearer ') ? auth.slice(7) : ''
       if (h !== secret && bearer !== secret) {
-        return new Response(JSON.stringify({ error: 'Unauthorized' }), {
-          status: 401,
-          headers: { 'Content-Type': 'application/json', ...corsHeaders },
-        })
+        return new Response(JSON.stringify({ error: 'Unauthorized' }), { status: 401, headers: { 'Content-Type': 'application/json', ...corsHeaders } })
       }
-    }
-
-    let body: unknown
-    try {
-      body = await req.json()
-    } catch {
-      return new Response(JSON.stringify({ error: 'Invalid JSON' }), {
-        status: 400,
-        headers: { 'Content-Type': 'application/json', ...corsHeaders },
-      })
     }
 
     const b = (body as Record<string, unknown>) || {}
@@ -283,139 +233,68 @@ serve(async (req) => {
 
     const normalizedEvent = event.toLowerCase().replace('_', '.')
     if (normalizedEvent && normalizedEvent !== 'messages.upsert') {
-      return new Response(JSON.stringify({ ok: true, ignored: true, event }), {
-        status: 200,
-        headers: { 'Content-Type': 'application/json', ...corsHeaders },
-      })
+      return new Response(JSON.stringify({ ok: true, ignored: true, event }), { status: 200, headers: { 'Content-Type': 'application/json', ...corsHeaders } })
     }
 
     const userId = userIdFromZapificaInstance(instance)
     if (!userId) {
-      return new Response(
-        JSON.stringify({
-          ok: false,
-          error: 'Instance não segue a convenção zapifica_<user_uuid>. Ajuste o nome da instância na Evolution.',
-          instance,
-        }),
-        { status: 200, headers: { 'Content-Type': 'application/json', ...corsHeaders } },
-      )
+      console.log("⚠️ ALERTA: Instance incorreta:", instance);
+      return new Response(JSON.stringify({ ok: false, error: 'Instance não segue a convenção zapifica_<user_uuid>.', instance }), { status: 200, headers: { 'Content-Type': 'application/json', ...corsHeaders } })
     }
 
     const items = collectUpsertItems(b.data ?? b)
-    if (items.length === 0) {
-      return new Response(
-        JSON.stringify({ ok: true, message: 'Nenhum item messages.upsert no payload' }),
-        { status: 200, headers: { 'Content-Type': 'application/json', ...corsHeaders } },
-      )
-    }
+    if (items.length === 0) return new Response(JSON.stringify({ ok: true, message: 'Sem itens messages.upsert' }), { status: 200, headers: { 'Content-Type': 'application/json', ...corsHeaders } })
 
     const supabaseUrl = Deno.env.get('SUPABASE_URL') ?? ''
     const serviceKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? ''
-    if (!supabaseUrl || !serviceKey) {
-      return new Response(JSON.stringify({ error: 'Server misconfigured' }), {
-        status: 500,
-        headers: { 'Content-Type': 'application/json', ...corsHeaders },
-      })
-    }
+    const supabase = createClient(supabaseUrl, serviceKey, { auth: { persistSession: false, autoRefreshToken: false } })
 
-    const supabase = createClient(supabaseUrl, serviceKey, {
-      auth: { persistSession: false, autoRefreshToken: false },
-    })
-
-    const { data: allLeads, error: leErr } = await supabase
-      .from('leads')
-      .select('id, phone, name')
-      .eq('user_id', userId)
-
-    if (leErr) {
-      return new Response(JSON.stringify({ error: leErr.message }), {
-        status: 500,
-        headers: { 'Content-Type': 'application/json', ...corsHeaders },
-      })
-    }
+    const { data: allLeads, error: leErr } = await supabase.from('leads').select('id, phone, name').eq('user_id', userId)
+    if (leErr) throw leErr
 
     const index = buildLeadIndex((allLeads ?? []) as LeadRow[])
-
-    let saved = 0
-    let createdLeads = 0
-    const skipped: string[] = []
-    const errors: string[] = []
+    let saved = 0, createdLeads = 0
+    const skipped: string[] = [], errors: string[] = []
 
     for (const item of items) {
       try {
-        if (item.remoteJid.includes('@g.us')) {
-          skipped.push(`group:${item.msgId}`)
-          continue
-        }
-        if (item.fromMe) {
-          skipped.push(`fromMe:${item.msgId}`)
-          continue
-        }
-        if (!item.msgId) {
-          skipped.push('noMsgId')
-          continue
-        }
+        if (item.remoteJid.includes('@g.us')) { skipped.push(`group:${item.msgId}`); continue; }
+        if (item.fromMe) { skipped.push(`fromMe:${item.msgId}`); continue; }
+        if (!item.msgId) { skipped.push('noMsgId'); continue; }
 
         const phoneDigits = toEvolutionDigits(item.remoteJid)
-        if (!phoneDigits || phoneDigits.includes('@')) {
-          skipped.push(`badJid:${item.remoteJid}`)
-          continue
-        }
+        if (!phoneDigits || phoneDigits.includes('@')) { skipped.push(`badJid:${item.remoteJid}`); continue; }
 
         const ensured = await ensureLeadId(supabase, userId, index, phoneDigits, item.pushName)
-        if (!ensured.id) {
-          errors.push(`lead:${phoneDigits}:${ensured.error ?? 'sem id'}`)
-          continue
-        }
+        if (!ensured.id) { errors.push(`lead:${phoneDigits}:${ensured.error ?? 'sem id'}`); continue; }
         if (ensured.created) createdLeads++
 
         const { body: text, content: contentType } = extractTextAndType(item.message)
 
         const { error: insErr } = await supabase.from('chat_messages').insert({
-          lead_id: ensured.id,
-          sender_type: 'cliente',
-          content_type: contentType,
-          message_body: text,
-          evolution_message_id: item.msgId,
+          lead_id: ensured.id, sender_type: 'cliente', content_type: contentType, message_body: text, evolution_message_id: item.msgId
         })
 
         if (insErr) {
-          if (insErr.code === '23505') {
-            skipped.push(`dup:${item.msgId}`)
-            continue
-          }
+          if (insErr.code === '23505') { skipped.push(`dup:${item.msgId}`); continue; }
           errors.push(`msg:${item.msgId}:${insErr.message}`)
           continue
         }
         saved++
       } catch (itemError: any) {
-        // Se der erro numa mensagem específica, registra e vai pra próxima
-        console.error("Erro ao processar item específico:", itemError)
         errors.push(`msgError:${item.msgId}:${itemError.message}`)
       }
     }
 
-    const ok = errors.length === 0
-    return new Response(
-      JSON.stringify({
-        ok,
-        saved,
-        createdLeads,
-        skipped,
-        errors,
-        count: items.length,
-      }),
-      {
-        status: ok ? 200 : 500,
-        headers: { 'Content-Type': 'application/json', ...corsHeaders },
-      },
-    )
+    const resultadoFinal = { ok: errors.length === 0, saved, createdLeads, skipped, errors, count: items.length };
+    
+    // MEGAFONE 2: Mostra a decisão final
+    console.log("📊 RESULTADO DA OPERAÇÃO:", JSON.stringify(resultadoFinal));
+
+    return new Response(JSON.stringify(resultadoFinal), { status: resultadoFinal.ok ? 200 : 500, headers: { 'Content-Type': 'application/json', ...corsHeaders } })
+
   } catch (globalError: any) {
-    // Captura qualquer erro global (O tal do Unhandled Promise Rejection)
-    console.error("Erro Global no Webhook:", globalError)
-    return new Response(JSON.stringify({ error: 'Erro interno no webhook', details: globalError.message }), {
-      status: 500,
-      headers: { 'Content-Type': 'application/json', ...corsHeaders },
-    })
+    console.error("❌ Erro Global no Webhook:", globalError)
+    return new Response(JSON.stringify({ error: 'Erro interno', details: globalError.message }), { status: 500, headers: { 'Content-Type': 'application/json', ...corsHeaders } })
   }
 })
