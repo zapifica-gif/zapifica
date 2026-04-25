@@ -1,33 +1,25 @@
-// ============================================================================
 // Edge Function: process-scheduled-messages
+// Fila: public.scheduled_messages → Evolution API
+// - Agenda tradicional, segmentos, e agendamentos do Chat (lead_id + media_url).
 //
-// Lê a fila de public.scheduled_messages no Supabase e dispara pela Evolution
-// API os lembretes agendados pela Agenda Suprema.
-//
-// Quando roda:
-//   * Idealmente por pg_cron + pg_net (ver README/migrations) a cada minuto.
-//   * Também pode ser chamada manualmente com:
-//       curl -X POST \
-//         "https://<ref>.supabase.co/functions/v1/process-scheduled-messages" \
-//         -H "Authorization: Bearer <SERVICE_ROLE_KEY>"
-//
-// Variáveis de ambiente esperadas (configurar com `supabase secrets set`):
-//   * SUPABASE_URL              (injetada automaticamente pelo Supabase)
-//   * SUPABASE_SERVICE_ROLE_KEY (injetada automaticamente pelo Supabase)
-//   * EVOLUTION_API_URL         (ex.: https://evolution-api-production.up.railway.app)
-//   * EVOLUTION_API_KEY         (apikey global / instance key)
-// ============================================================================
+// Secrets: CHAVE_MESTRA_ZAPIFICA ou SUPABASE_SERVICE_ROLE_KEY, SUPABASE_URL,
+//          EVOLUTION_API_URL, EVOLUTION_API_KEY
 
 import { serve } from 'https://deno.land/std@0.168.0/http/server.ts'
+import { encode as toBase64 } from 'https://deno.land/std@0.168.0/encoding/base64.ts'
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2'
+
+type ContentType = 'text' | 'audio' | 'image' | 'document' | 'video'
 
 type ScheduledRow = {
   id: string
   user_id: string
   event_id: string | null
+  lead_id: string | null
+  media_url: string | null
   is_active: boolean
   recipient_type: 'personal' | 'segment'
-  content_type: 'text' | 'audio' | 'image'
+  content_type: ContentType
   message_body: string | null
   scheduled_at: string | null
   status: string
@@ -36,20 +28,13 @@ type ScheduledRow = {
   evolution_instance_name: string | null
 }
 
-/**
- * Mesma convenção do front (src/services/evolution.ts:instanceNameFromUserId)
- * para que Agenda e Zap Voice compartilhem a mesma instância da Evolution.
- */
+type ChatContentType = 'text' | 'audio' | 'image' | 'document'
+
 function instanceNameFromUserId(userId: string): string {
   const safe = userId.replace(/[^a-zA-Z0-9-]/g, '_')
   return `zapifica_${safe}`.slice(0, 80)
 }
 
-/**
- * Canoniza o número para o formato que a Evolution exige (dígitos + DDI 55).
- *   * Aceita máscara, com ou sem 55, ou JID de grupo (@g.us).
- *   * Se receber 10 ou 11 dígitos (DDD + número), anexa 55 automaticamente.
- */
 function toEvolutionDigits(raw: string | null | undefined): string | null {
   if (!raw) return null
   const t = raw.trim()
@@ -64,50 +49,99 @@ function toEvolutionDigits(raw: string | null | undefined): string | null {
   return null
 }
 
-function endpointForContentType(
-  contentType: ScheduledRow['content_type'],
-): string {
-  switch (contentType) {
-    case 'audio':
-      return 'message/sendWhatsAppAudio'
+function toChatContentType(contentType: ContentType): ChatContentType {
+  if (contentType === 'video') return 'document'
+  if (
+    contentType === 'text' ||
+    contentType === 'audio' ||
+    contentType === 'image' ||
+    contentType === 'document'
+  ) {
+    return contentType
+  }
+  return 'text'
+}
+
+function messageBodyParaChat(row: ScheduledRow): string {
+  const t = row.message_body?.trim()
+  if (t) return t
+  switch (row.content_type) {
     case 'image':
-      return 'message/sendMedia'
-    case 'text':
+      return '[imagem]'
+    case 'audio':
+      return '[áudio]'
+    case 'video':
+      return '[vídeo]'
+    case 'document':
+      return 'Arquivo agendado'
     default:
-      return 'message/sendText'
+      return 'Mensagem agendada'
   }
 }
 
-function bodyForContentType(
-  contentType: ScheduledRow['content_type'],
-  phone: string,
-  messageBody: string,
-): Record<string, unknown> {
-  switch (contentType) {
-    case 'audio':
-      return { number: phone, audio: messageBody }
-    case 'image':
-      return { number: phone, mediatype: 'image', media: messageBody }
-    case 'text':
-    default:
-      return { number: phone, text: messageBody }
+function extractMessageId(data: unknown): string | null {
+  if (!data || typeof data !== 'object') return null
+  const o = data as Record<string, unknown>
+  const messageBlock = o.message as Record<string, unknown> | undefined
+  const keyBlock =
+    (messageBlock?.key as Record<string, unknown> | undefined) ??
+    (o.key as Record<string, unknown> | undefined)
+  if (keyBlock && typeof keyBlock.id === 'string') return keyBlock.id
+  return null
+}
+
+async function downloadMediaAsBase64(url: string): Promise<{
+  base64: string
+  mimeType: string
+  fileName: string
+}> {
+  const res = await fetch(url)
+  if (!res.ok) {
+    throw new Error(
+      `Falha HTTP ${res.status} ao baixar mídia: ${url.slice(0, 200)}`,
+    )
   }
+  const mimeType =
+    res.headers.get('content-type')?.split(';')[0]?.trim() || 'application/octet-stream'
+  const buf = new Uint8Array(await res.arrayBuffer())
+  const fileName = (() => {
+    try {
+      const path = new URL(url).pathname
+      return decodeURIComponent(path.split('/').pop() || 'arquivo') || 'arquivo'
+    } catch {
+      return 'arquivo'
+    }
+  })()
+  return { base64: toBase64(buf), mimeType, fileName }
+}
+
+function stripDataUrlBase64(input: string): string {
+  const t = input.trim()
+  if (t.startsWith('data:')) {
+    const i = t.indexOf('base64,')
+    if (i >= 0) return t.slice(i + 7).trim()
+  }
+  return t
 }
 
 serve(async () => {
-  const supabaseUrl = Deno.env.get('SUPABASE_URL') ?? ''
-  const serviceKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? ''
+  const supabaseUrl = (Deno.env.get('SUPABASE_URL') ?? '').trim()
+  const serviceKey = (
+    Deno.env.get('CHAVE_MESTRA_ZAPIFICA') ??
+    Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ??
+    ''
+  ).trim()
   const evolutionUrl = (Deno.env.get('EVOLUTION_API_URL') ?? '').replace(
     /\/+$/,
     '',
   )
-  const evolutionApiKey = Deno.env.get('EVOLUTION_API_KEY') ?? ''
+  const evolutionApiKey = (Deno.env.get('EVOLUTION_API_KEY') ?? '').trim()
 
   if (!supabaseUrl || !serviceKey) {
     return new Response(
       JSON.stringify({
         error:
-          'Secrets do Supabase ausentes (SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY).',
+          'Defina CHAVE_MESTRA_ZAPIFICA (ou SUPABASE_SERVICE_ROLE_KEY) e SUPABASE_URL nas secrets da função.',
       }),
       { status: 500, headers: { 'Content-Type': 'application/json' } },
     )
@@ -116,7 +150,7 @@ serve(async () => {
     return new Response(
       JSON.stringify({
         error:
-          'Secrets da Evolution ausentes. Rode: supabase secrets set EVOLUTION_API_URL=... EVOLUTION_API_KEY=...',
+          'Secrets da Evolution ausentes. Configure EVOLUTION_API_URL e EVOLUTION_API_KEY.',
       }),
       { status: 500, headers: { 'Content-Type': 'application/json' } },
     )
@@ -131,19 +165,25 @@ serve(async () => {
   })
 
   const nowIso = new Date().toISOString()
+  console.log(
+    '[process-scheduled-messages] Buscando: status=pending, is_active=true, scheduled_at NOT NULL, scheduled_at <=',
+    nowIso,
+  )
 
   const { data: candidates, error: fetchError } = await supabase
     .from('scheduled_messages')
     .select(
-      'id, user_id, event_id, is_active, recipient_type, content_type, message_body, scheduled_at, status, segment_lead_ids, recipient_phone, evolution_instance_name',
+      'id, user_id, event_id, lead_id, media_url, is_active, recipient_type, content_type, message_body, scheduled_at, status, segment_lead_ids, recipient_phone, evolution_instance_name',
     )
     .eq('status', 'pending')
     .eq('is_active', true)
+    .not('scheduled_at', 'is', null)
     .lte('scheduled_at', nowIso)
     .order('scheduled_at', { ascending: true })
     .limit(30)
 
   if (fetchError) {
+    console.error('[process-scheduled-messages] query:', fetchError)
     return new Response(
       JSON.stringify({ error: fetchError.message }),
       { status: 500, headers: { 'Content-Type': 'application/json' } },
@@ -163,7 +203,6 @@ serve(async () => {
   for (const rawMsg of candidates) {
     const msg = rawMsg as ScheduledRow
 
-    // Claim atômico: só segue quem efetivamente mudou de pending -> processing.
     const { data: claimed, error: claimErr } = await supabase
       .from('scheduled_messages')
       .update({ status: 'processing', updated_at: new Date().toISOString() })
@@ -173,26 +212,46 @@ serve(async () => {
       .maybeSingle()
 
     if (claimErr || !claimed) {
-      // Outra execução pegou; pulamos sem errar.
       continue
     }
 
     try {
-      // 1) Resolve a lista de destinatários, sempre normalizando para E.164.
+      // --- 1) Destinatários ---
       let phones: string[] = []
 
-      if (msg.recipient_type === 'personal') {
+      if (msg.lead_id) {
+        if (msg.recipient_phone?.trim()) {
+          const raw = msg.recipient_phone.trim()
+          const d = toEvolutionDigits(raw) ?? (raw.includes('@') ? raw : null)
+          if (d) phones = [d]
+        }
+        if (phones.length === 0) {
+          const { data: lead } = await supabase
+            .from('leads')
+            .select('phone')
+            .eq('id', msg.lead_id)
+            .eq('user_id', msg.user_id)
+            .maybeSingle()
+          const p = toEvolutionDigits(
+            (lead as { phone: string | null } | null)?.phone ?? null,
+          )
+          if (p) phones = [p]
+        }
+      } else if (msg.recipient_type === 'personal') {
         const digits = toEvolutionDigits(msg.recipient_phone)
         if (!digits) {
-          // Fallback: olha profiles.whatsapp/phone do próprio dono.
           const { data: prof } = await supabase
             .from('profiles')
             .select('phone, whatsapp')
             .eq('id', msg.user_id)
             .maybeSingle()
           const fromProfile =
-            toEvolutionDigits(prof?.whatsapp ?? null) ??
-            toEvolutionDigits(prof?.phone ?? null)
+            toEvolutionDigits(
+              (prof as { phone?: string; whatsapp?: string } | null)?.whatsapp,
+            ) ??
+            toEvolutionDigits(
+              (prof as { phone?: string; whatsapp?: string } | null)?.phone,
+            )
           if (fromProfile) phones = [fromProfile]
         } else {
           phones = [digits]
@@ -208,38 +267,147 @@ serve(async () => {
           .eq('user_id', msg.user_id)
           .in('id', msg.segment_lead_ids)
         phones = (leads ?? [])
-          .map((l: { phone: string | null }) =>
-            toEvolutionDigits(l.phone),
-          )
+          .map((l: { phone: string | null }) => toEvolutionDigits(l.phone))
           .filter((x): x is string => Boolean(x))
       }
 
       if (phones.length === 0) {
         throw new Error(
-          'Nenhum telefone válido para envio (lembra: DDI 55 + DDD + número).',
+          'Nenhum telefone válido para envio (DDI 55 + DDD + número, ou JID de grupo).',
         )
       }
 
-      // 2) Instance name: sempre a do usuário; evolution_instance_name legado só
-      //    é usado quando segue a convenção "zapifica_*", senão caímos no fallback.
       const legacyInstance = msg.evolution_instance_name?.trim() ?? ''
       const instanceName =
         legacyInstance && legacyInstance.startsWith('zapifica_')
           ? legacyInstance
           : instanceNameFromUserId(msg.user_id)
 
-      // 3) Dispara para cada telefone encontrado.
-      const endpoint = endpointForContentType(msg.content_type)
+      // --- 2) Monta envio (texto, mídia com URL, ou legado com corpo) ---
+      const caption = (msg.message_body ?? '').trim() || undefined
+      const mediaUrl = msg.media_url?.trim() ?? null
+
+      type DispatchPlan =
+        | { kind: 'text'; text: string }
+        | { kind: 'media'; mediatype: 'image' | 'video' | 'document'; body: Record<string, unknown> }
+        | { kind: 'audio'; body: Record<string, unknown> }
+
+      let plan: DispatchPlan
+
+      if (mediaUrl) {
+        const { base64, mimeType, fileName } = await downloadMediaAsBase64(mediaUrl)
+        const ct = msg.content_type
+        if (ct === 'audio') {
+          plan = {
+            kind: 'audio',
+            body: {
+              audio: stripDataUrlBase64(base64),
+              delay: 1000,
+              encoding: true,
+              ptt: true,
+            },
+          }
+        } else if (ct === 'text') {
+          plan = {
+            kind: 'media',
+            mediatype: 'document',
+            body: {
+              mediatype: 'document',
+              mimetype: mimeType,
+              fileName,
+              media: base64,
+             ...(caption ? { caption } : {}),
+            },
+          }
+        } else if (ct === 'image') {
+          plan = {
+            kind: 'media',
+            mediatype: 'image',
+            body: {
+              mediatype: 'image',
+              media: base64,
+              ...(caption ? { caption } : {}),
+            },
+          }
+        } else if (ct === 'video') {
+          plan = {
+            kind: 'media',
+            mediatype: 'video',
+            body: {
+              mediatype: 'video',
+              media: base64,
+              ...(caption ? { caption } : {}),
+            },
+          }
+        } else {
+          plan = {
+            kind: 'media',
+            mediatype: 'document',
+            body: {
+              mediatype: 'document',
+              mimetype: mimeType,
+              fileName,
+              media: base64,
+              ...(caption ? { caption } : {}),
+            },
+          }
+        }
+      } else {
+        const body = msg.message_body ?? ''
+        if (!body.trim() && msg.content_type === 'text') {
+          throw new Error('Mensagem de texto vazia.')
+        }
+        if (!body.trim() && (msg.content_type === 'document' || msg.content_type === 'video')) {
+          throw new Error(
+            'Documento/vídeo agendado requer a URL pública em `media_url` para o worker baixar o arquivo.',
+          )
+        }
+        if (!body.trim() && (msg.content_type === 'audio' || msg.content_type === 'image')) {
+          throw new Error('Mídia sem conteúdo: preencha `message_body` (legado) ou `media_url`.')
+        }
+        if (msg.content_type === 'text') {
+          plan = { kind: 'text', text: body }
+        } else if (msg.content_type === 'audio') {
+          plan = {
+            kind: 'audio',
+            body: {
+              audio: stripDataUrlBase64(body),
+              delay: 1000,
+              encoding: true,
+              ptt: true,
+            },
+          }
+        } else if (msg.content_type === 'image') {
+          plan = {
+            kind: 'media',
+            mediatype: 'image',
+            body: {
+              mediatype: 'image',
+              media: body.trim(),
+            },
+          }
+        } else {
+          plan = { kind: 'text', text: body }
+        }
+      }
+
       let lastEvolutionId: string | null = null
 
       for (const phone of phones) {
-        const url = `${evolutionUrl}/${endpoint}/${encodeURIComponent(instanceName)}`
-        const payload = bodyForContentType(
-          msg.content_type,
-          phone,
-          msg.message_body ?? '',
-        )
+        let endpoint: string
+        let payload: Record<string, unknown>
+        if (plan.kind === 'text') {
+          endpoint = 'message/sendText'
+          payload = { number: phone, text: plan.text }
+        } else if (plan.kind === 'audio') {
+          endpoint = 'message/sendWhatsAppAudio'
+          payload = { number: phone, ...plan.body }
+        } else {
+          endpoint = 'message/sendMedia'
+          payload = { number: phone, ...plan.body }
+        }
 
+        const url = `${evolutionUrl}/${endpoint}/${encodeURIComponent(instanceName)}`
         const response = await fetch(url, {
           method: 'POST',
           headers: {
@@ -251,10 +419,12 @@ serve(async () => {
 
         const bodyText = await response.text()
         let bodyJson: unknown = null
-        try {
-          bodyJson = JSON.parse(bodyText)
-        } catch {
-          // resposta não-JSON (ex.: 404 HTML do gateway) — mantém texto cru.
+        if (bodyText) {
+          try {
+            bodyJson = JSON.parse(bodyText)
+          } catch {
+            // não-JSON
+          }
         }
 
         if (!response.ok) {
@@ -269,20 +439,13 @@ serve(async () => {
             `Evolution ${response.status} em ${endpoint}/${instanceName}: ${detail}`,
           )
         }
-
-        if (bodyJson && typeof bodyJson === 'object') {
-          const o = bodyJson as Record<string, unknown>
-          const messageBlock = o.message as Record<string, unknown> | undefined
-          const keyBlock =
-            (messageBlock?.key as Record<string, unknown> | undefined) ??
-            (o.key as Record<string, unknown> | undefined)
-          if (keyBlock && typeof keyBlock.id === 'string') {
-            lastEvolutionId = keyBlock.id
-          }
+        if (bodyJson) {
+          const id = extractMessageId(bodyJson)
+          if (id) lastEvolutionId = id
         }
       }
 
-      await supabase
+      const { error: upErr } = await supabase
         .from('scheduled_messages')
         .update({
           status: 'sent',
@@ -291,11 +454,39 @@ serve(async () => {
           updated_at: new Date().toISOString(),
         })
         .eq('id', msg.id)
+      if (upErr) {
+        throw new Error(`Supabase: falha ao marcar sent: ${upErr.message}`)
+      }
+
+      if (msg.lead_id) {
+        const { error: chatErr } = await supabase.from('chat_messages').insert({
+          lead_id: msg.lead_id,
+          sender_type: 'agencia',
+          content_type: toChatContentType(msg.content_type),
+          message_body: messageBodyParaChat(msg),
+          media_url: msg.media_url,
+          evolution_message_id: lastEvolutionId,
+        })
+        if (chatErr) {
+          console.error('[process-scheduled-messages] chat_messages insert:', chatErr)
+          await supabase
+            .from('scheduled_messages')
+            .update({
+              last_error: `Enviado ao WhatsApp, mas o CRM não registrou: ${chatErr.message}`.slice(
+                0,
+                4000,
+              ),
+              updated_at: new Date().toISOString(),
+            })
+            .eq('id', msg.id)
+        }
+      }
 
       sent += 1
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err)
-      await supabase
+      console.error('[process-scheduled-messages] ERRO FATAL NO DISPARO:', err)
+      const { error: e2 } = await supabase
         .from('scheduled_messages')
         .update({
           status: 'error',
@@ -303,13 +494,19 @@ serve(async () => {
           updated_at: new Date().toISOString(),
         })
         .eq('id', msg.id)
+      if (e2) {
+        await supabase
+          .from('scheduled_messages')
+          .update({ status: 'error', updated_at: new Date().toISOString() })
+          .eq('id', msg.id)
+      }
       failed += 1
     }
   }
 
   return new Response(
     JSON.stringify({
-      message: `Processadas ${candidates.length} mensagens.`,
+      message: `Processadas ${candidates.length} mensagens (lote).`,
       sent,
       failed,
     }),

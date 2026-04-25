@@ -1,8 +1,9 @@
 import { createClient, type SupabaseClient } from '@supabase/supabase-js'
-import type { EvolutionHttpConfig } from './evolution'
+import type { EvolutionHttpConfig, EvolutionMediaType } from './evolution'
 import {
   sendAudioMessageWithConfig,
   sendImageMessageWithConfig,
+  sendMediaMessageWithConfig,
   sendTextMessageWithConfig,
 } from './evolution'
 
@@ -53,11 +54,68 @@ export type WorkerRunSummary = {
 type ScheduledRow = {
   id: string
   user_id: string
+  lead_id: string | null
+  media_url: string | null
   recipient_type: 'personal' | 'segment'
-  content_type: 'text' | 'audio' | 'image'
+  content_type: 'text' | 'audio' | 'image' | 'document' | 'video'
   message_body: string | null
   segment_lead_ids: string[] | null
   recipient_phone?: string | null
+}
+
+type ChatContentType = 'text' | 'audio' | 'image' | 'document'
+
+async function downloadMediaAsBase64(
+  publicUrl: string,
+): Promise<{ base64: string; mimeType: string; fileName: string }> {
+  const res = await fetch(publicUrl)
+  if (!res.ok) {
+    throw new Error(`Falha ao baixar mídia (${res.status}): ${publicUrl.slice(0, 200)}`)
+  }
+  const mimeType =
+    res.headers.get('content-type')?.split(';')[0]?.trim() || 'application/octet-stream'
+  const buf = Buffer.from(await res.arrayBuffer())
+  const fileName = (() => {
+    try {
+      const path = new URL(publicUrl).pathname
+      return decodeURIComponent(path.split('/').pop() || 'arquivo') || 'arquivo'
+    } catch {
+      return 'arquivo'
+    }
+  })()
+  return { base64: buf.toString('base64'), mimeType, fileName }
+}
+
+function toChatContentType(
+  contentType: ScheduledRow['content_type'],
+): ChatContentType {
+  if (contentType === 'video') return 'document'
+  if (
+    contentType === 'text' ||
+    contentType === 'audio' ||
+    contentType === 'image' ||
+    contentType === 'document'
+  ) {
+    return contentType
+  }
+  return 'text'
+}
+
+function messageBodyParaChat(row: ScheduledRow): string {
+  const t = row.message_body?.trim()
+  if (t) return t
+  switch (row.content_type) {
+    case 'image':
+      return '[imagem]'
+    case 'audio':
+      return '[áudio]'
+    case 'video':
+      return '[vídeo]'
+    case 'document':
+      return 'Arquivo agendado'
+    default:
+      return 'Mensagem agendada'
+  }
 }
 
 const BATCH_LIMIT = 30
@@ -96,6 +154,27 @@ async function resolveRecipientPhones(
   supabase: SupabaseClient,
   row: ScheduledRow,
 ): Promise<{ targets: string[]; error: string | null }> {
+  if (row.lead_id) {
+    const inline = row.recipient_phone?.trim()
+    if (inline) {
+      return { targets: [inline], error: null }
+    }
+    const { data: lead, error } = await supabase
+      .from('leads')
+      .select('phone')
+      .eq('id', row.lead_id)
+      .eq('user_id', row.user_id)
+      .maybeSingle()
+    if (error) {
+      return { targets: [], error: error.message }
+    }
+    const p = (lead as { phone: string | null } | null)?.phone?.trim()
+    if (p) {
+      return { targets: [p], error: null }
+    }
+    return { targets: [], error: 'Lead sem telefone para o disparo agendado.' }
+  }
+
   if (row.recipient_type === 'personal') {
     const inline = row.recipient_phone?.trim()
     if (inline) {
@@ -165,6 +244,65 @@ async function sendOne(
   const { evolution } = deps
   const uid = row.user_id
   const body = row.message_body ?? ''
+  const caption = body.trim() ? body : undefined
+  const mediaUrl = row.media_url?.trim()
+
+  if (mediaUrl) {
+    let b64: string
+    let mimeType: string
+    let fileName: string
+    try {
+      const d = await downloadMediaAsBase64(mediaUrl)
+      b64 = d.base64
+      mimeType = d.mimeType
+      fileName = d.fileName
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e)
+      return { ok: false, error: msg, messageId: null }
+    }
+
+    const ct = row.content_type
+    if (ct === 'audio') {
+      return sendAudioMessageWithConfig(uid, recipient, b64, evolution)
+    }
+    if (ct === 'text') {
+      return sendMediaMessageWithConfig(
+        uid,
+        recipient,
+        {
+          media: b64,
+          mediaType: 'document',
+          mimeType,
+          fileName,
+          caption,
+        },
+        evolution,
+      )
+    }
+    const mediaTypeMap: Record<string, EvolutionMediaType> = {
+      image: 'image',
+      video: 'video',
+      document: 'document',
+    }
+    const mediaType: EvolutionMediaType = mediaTypeMap[ct] ?? 'document'
+    return sendMediaMessageWithConfig(
+      uid,
+      recipient,
+      {
+        media: b64,
+        mediaType,
+        mimeType,
+        fileName,
+        caption,
+        ptt: false,
+      },
+      evolution,
+    )
+  }
+
+  if (!body.trim()) {
+    return { ok: false, error: 'Mensagem vazia (sem texto e sem mídia).', messageId: null }
+  }
 
   switch (row.content_type) {
     case 'text':
@@ -173,8 +311,16 @@ async function sendOne(
       return sendAudioMessageWithConfig(uid, recipient, body, evolution)
     case 'image':
       return sendImageMessageWithConfig(uid, recipient, body, '', evolution)
+    case 'document':
+    case 'video':
+      return {
+        ok: false,
+        error:
+          'Documento/vídeo agendado exige a coluna `media_url` (URL pública) para o worker baixar o arquivo.',
+        messageId: null,
+      }
     default:
-      return { ok: false, error: 'Tipo de conteúdo desconhecido.', messageId: null }
+      return sendTextMessageWithConfig(uid, recipient, body, evolution)
   }
 }
 
@@ -196,10 +342,11 @@ export async function checkAndSendScheduledMessages(
   const { data, error } = await supabase
     .from('scheduled_messages')
     .select(
-      'id, user_id, recipient_type, content_type, message_body, segment_lead_ids, recipient_phone',
+      'id, user_id, lead_id, media_url, recipient_type, content_type, message_body, segment_lead_ids, recipient_phone',
     )
     .eq('status', 'pending')
     .eq('is_active', true)
+    .not('scheduled_at', 'is', null)
     .lte('scheduled_at', nowUtcIso)
     .order('scheduled_at', { ascending: true })
     .limit(BATCH_LIMIT)
@@ -289,6 +436,30 @@ export async function checkAndSendScheduledMessages(
             updated_at: new Date().toISOString(),
           })
           .eq('id', row.id)
+
+        if (row.lead_id) {
+          const evoId = oks[0]?.messageId ?? (ids[0] ?? null)
+          const { error: chatErr } = await supabase.from('chat_messages').insert({
+            lead_id: row.lead_id,
+            sender_type: 'agencia',
+            content_type: toChatContentType(row),
+            message_body: messageBodyParaChat(row),
+            media_url: row.media_url,
+            evolution_message_id: evoId,
+          })
+          if (chatErr) {
+            await supabase
+              .from('scheduled_messages')
+              .update({
+                last_error: `Enviado ao WhatsApp, mas o CRM não registrou a mensagem: ${chatErr.message}`.slice(
+                  0,
+                  4000,
+                ),
+                updated_at: new Date().toISOString(),
+              })
+              .eq('id', row.id)
+          }
+        }
       } else if (oks.length > 0) {
         const failText = fails
           .map((f) => f.error ?? 'Erro desconhecido')
