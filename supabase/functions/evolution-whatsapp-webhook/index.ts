@@ -290,12 +290,23 @@ async function uploadMedia(
         upsert: true,
       })
 
-    if (error) return { url: null, error: error.message }
+    if (error) {
+      console.error('[Zapifica] Upload no Storage falhou', {
+        bucket: MEDIA_BUCKET,
+        path,
+        contentType: params.media.mimeType,
+        error: error.message,
+      })
+      return { url: null, error: error.message }
+    }
 
     const { data } = supabase.storage.from(MEDIA_BUCKET).getPublicUrl(path)
-    return { url: data.publicUrl, error: null }
+    const publicUrl = data.publicUrl
+    console.log('[Zapifica] URL pública gerada:', publicUrl)
+    return { url: publicUrl, error: null }
   } catch (e) {
     const message = e instanceof Error ? e.message : String(e)
+    console.error('[Zapifica] Upload no Storage explodiu', { error: message })
     return { url: null, error: message }
   }
 }
@@ -428,24 +439,32 @@ async function ensureLeadId(
  * Quando isso acontece, chamamos o endpoint oficial:
  *
  *   POST {EVOLUTION_API_URL}/chat/getBase64FromMediaMessage/{instance}
- *   body: { message: <objeto message original> }
  *   header: apikey: {EVOLUTION_API_KEY}
  *
- * A resposta vem com `{ base64, mimetype, ... }` e nós usamos isso para
+ * O endpoint exige a mensagem COMPLETA (com `key` + `message`). Por isso a
+ * função aceita `rawItem` (o envelope que veio do upsert) e tenta variações
+ * de body conhecidas até a Evolution aceitar:
+ *
+ *   1. { message: <envelope com key+message> }      ← formato oficial v2
+ *   2. <envelope direto>                            ← algumas builds antigas
+ *   3. { message: <só o item.message interno> }     ← último recurso
+ *
+ * A resposta vem como `{ base64, mimetype, ... }` e nós usamos isso para
  * subir o arquivo para o bucket `chat_media` normalmente.
  */
 async function fetchBase64FromEvolution(params: {
   evoUrl: string
   evoKey: string
   instance: string
-  message: Record<string, unknown> | null
+  rawItem: Record<string, unknown>
+  innerMessage: Record<string, unknown> | null
 }): Promise<{
   base64: string | null
   mimeType: string | null
   fileName: string | null
   error: string | null
 }> {
-  const { evoUrl, evoKey, instance, message } = params
+  const { evoUrl, evoKey, instance, rawItem, innerMessage } = params
 
   if (!evoUrl || !evoKey) {
     return {
@@ -457,7 +476,7 @@ async function fetchBase64FromEvolution(params: {
     }
   }
 
-  if (!message) {
+  if (!rawItem && !innerMessage) {
     return {
       base64: null,
       mimeType: null,
@@ -472,68 +491,96 @@ async function fetchBase64FromEvolution(params: {
     `/v1/chat/getBase64FromMediaMessage/${encodeURIComponent(instance)}`,
   ]
 
+  // Variações de body para sobreviver a versões diferentes da Evolution.
+  type BodyShape = { label: string; payload: unknown }
+  const bodyVariants: BodyShape[] = []
+
+  if (rawItem) {
+    bodyVariants.push({ label: 'wrapped-envelope', payload: { message: rawItem } })
+    bodyVariants.push({ label: 'raw-envelope', payload: rawItem })
+  }
+  if (innerMessage) {
+    bodyVariants.push({
+      label: 'inner-message',
+      payload: { message: innerMessage },
+    })
+  }
+
   let lastError: string | null = null
 
   for (const path of candidatePaths) {
-    const url = `${baseUrl}${path}`
-    try {
-      const res = await fetch(url, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          apikey: evoKey,
-        },
-        body: JSON.stringify({ message }),
-      })
+    for (const variant of bodyVariants) {
+      const url = `${baseUrl}${path}`
+      try {
+        const res = await fetch(url, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            apikey: evoKey,
+          },
+          body: JSON.stringify(variant.payload),
+        })
 
-      const raw = await res.text()
-      let data: unknown = null
-      if (raw) {
-        try {
-          data = JSON.parse(raw) as unknown
-        } catch {
-          data = { raw }
+        const raw = await res.text()
+        let data: unknown = null
+        if (raw) {
+          try {
+            data = JSON.parse(raw) as unknown
+          } catch {
+            data = { raw }
+          }
         }
-      }
 
-      if (!res.ok) {
-        if (res.status === 404) {
-          lastError = `HTTP 404 em ${path}`
+        console.log('[Zapifica][reverseFetch] tentativa', {
+          path,
+          variant: variant.label,
+          status: res.status,
+          ok: res.ok,
+          gotBase64:
+            asRecord(data) && typeof asRecord(data)?.base64 === 'string'
+              ? `len=${(asRecord(data)?.base64 as string).length}`
+              : false,
+        })
+
+        if (!res.ok) {
+          if (res.status === 404 || res.status === 400) {
+            lastError = `HTTP ${res.status} em ${path} (${variant.label})`
+            continue
+          }
+          return {
+            base64: null,
+            mimeType: null,
+            fileName: null,
+            error: `HTTP ${res.status} em ${path} (${variant.label}): ${
+              typeof data === 'object' ? JSON.stringify(data) : String(data ?? '')
+            }`,
+          }
+        }
+
+        const root = asRecord(data) ?? {}
+        const base64 =
+          stringValue(root.base64) ??
+          stringValue(root.media) ??
+          stringValue(root.data)
+        const mimeType =
+          stringValue(root.mimetype) ?? stringValue(root.mimeType)
+        const fileName =
+          stringValue(root.fileName) ?? stringValue(root.filename)
+
+        if (!base64) {
+          lastError = `Resposta sem base64 em ${path} (${variant.label})`
           continue
         }
+
         return {
-          base64: null,
-          mimeType: null,
-          fileName: null,
-          error: `HTTP ${res.status} em ${path}: ${
-            typeof data === 'object' ? JSON.stringify(data) : String(data ?? '')
-          }`,
+          base64,
+          mimeType,
+          fileName,
+          error: null,
         }
+      } catch (e) {
+        lastError = e instanceof Error ? e.message : String(e)
       }
-
-      const root = asRecord(data) ?? {}
-      const base64 =
-        stringValue(root.base64) ??
-        stringValue(root.media) ??
-        stringValue(root.data)
-      const mimeType =
-        stringValue(root.mimetype) ?? stringValue(root.mimeType)
-      const fileName =
-        stringValue(root.fileName) ?? stringValue(root.filename)
-
-      if (!base64) {
-        lastError = `Resposta sem base64 em ${path}`
-        continue
-      }
-
-      return {
-        base64,
-        mimeType,
-        fileName,
-        error: null,
-      }
-    } catch (e) {
-      lastError = e instanceof Error ? e.message : String(e)
     }
   }
 
@@ -716,7 +763,8 @@ serve(async (req) => {
         evoUrl,
         evoKey,
         instance,
-        message: item.message,
+        rawItem: item.envelope,
+        innerMessage: item.message,
       })
 
       if (rescue.base64) {

@@ -59,15 +59,56 @@ function contentLabel(contentType: ChatMessageRow['content_type']): string {
   }
 }
 
+/**
+ * Placeholders internos que a Edge Function usa quando a mensagem é mídia,
+ * mas que NUNCA devem aparecer como texto puro no balão.
+ */
+const MEDIA_PLACEHOLDERS = new Set([
+  '[imagem]',
+  '[áudio]',
+  '[audio]',
+  '[documento]',
+  '[vídeo]',
+  '[video]',
+  '[mensagem]',
+])
+
 function shouldShowText(message: ChatMessageRow): boolean {
   const body = message.message_body?.trim()
   if (!body) return false
-  if (!message.media_url) return true
-  return !['[imagem]', '[áudio]', '[documento]', '[vídeo]'].includes(body)
+  if (MEDIA_PLACEHOLDERS.has(body.toLowerCase())) return false
+  return true
+}
+
+/**
+ * Texto amigável para quando a mídia ainda não terminou de ser processada
+ * pelo webhook (ex: a Busca Ativa falhou ou ainda está em curso).
+ */
+function pendingMediaLabel(contentType: ChatMessageRow['content_type']): string {
+  switch (contentType) {
+    case 'image':
+      return 'Imagem em processamento…'
+    case 'audio':
+      return 'Áudio em processamento…'
+    case 'document':
+      return 'Arquivo em processamento…'
+    case 'text':
+    default:
+      return ''
+  }
 }
 
 function MessageMedia({ message }: { message: ChatMessageRow }) {
-  if (!message.media_url) return null
+  // Se for um content_type de mídia mas SEM url, mostramos um placeholder
+  // gentil em vez de despejar "[imagem]" literal no balão.
+  if (!message.media_url) {
+    if (message.content_type === 'text') return null
+    return (
+      <p className="text-xs italic text-zinc-400">
+        {pendingMediaLabel(message.content_type)}
+      </p>
+    )
+  }
 
   if (message.content_type === 'image') {
     return (
@@ -80,8 +121,8 @@ function MessageMedia({ message }: { message: ChatMessageRow }) {
       >
         <img
           src={message.media_url}
-          alt={message.message_body?.trim() || 'Imagem recebida no WhatsApp'}
-          className="max-h-80 w-full object-cover"
+          alt="Mídia"
+          className="block h-auto max-h-80 w-full object-contain"
           loading="lazy"
         />
       </a>
@@ -115,7 +156,13 @@ function MessageMedia({ message }: { message: ChatMessageRow }) {
         </span>
         <span className="min-w-0">
           <span className="block truncate text-sm font-semibold">
-            {message.message_body?.trim() || 'Arquivo recebido'}
+            {(() => {
+              const body = message.message_body?.trim()
+              if (!body || MEDIA_PLACEHOLDERS.has(body.toLowerCase())) {
+                return 'Arquivo recebido'
+              }
+              return body
+            })()}
           </span>
           <span className="block text-xs text-zinc-500">Abrir ou baixar arquivo</span>
         </span>
@@ -316,7 +363,6 @@ export function ChatWindow({ open, onClose, lead }: ChatWindowProps) {
                 >
                   <MessageMedia message={m} />
                   {shouldShowText(m) ? <p>{m.message_body}</p> : null}
-                  {!m.media_url && !shouldShowText(m) ? <p>—</p> : null}
                 </div>
                 <p className="mt-1 text-right text-[10px] text-zinc-400">
                   {new Date(m.created_at).toLocaleString(undefined, {
