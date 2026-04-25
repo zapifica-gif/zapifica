@@ -43,6 +43,41 @@ type UpsertItem = {
 type LeadRow = { id: string; phone: string | null; name: string | null }
 type LeadAiRow = { id: string; ai_enabled: boolean | null }
 
+type CompanyContextRow = { master_prompt: string | null }
+type TrainingTextRow = { content: string | null }
+
+const FALLBACK_MASTER_PROMPT =
+  'Você é o assistente virtual da agência de marketing Floripa Web. Seja direto, gentil, persuasivo e use respostas curtas em português do Brasil. Tente entender a necessidade do cliente.'
+
+function buildDeepSeekSystemPrompt(params: {
+  masterPrompt: string | null
+  trainingTexts: string[]
+}): string {
+  const master = (params.masterPrompt ?? '').trim() || FALLBACK_MASTER_PROMPT
+  const materials = params.trainingTexts
+    .map((t) => t.trim())
+    .filter(Boolean)
+
+  const base =
+    `${master}\n\n--- BASE DE CONHECIMENTO DA EMPRESA ---\n` +
+    `Utilize estritamente as informações abaixo para responder ao cliente. ` +
+    `Se a resposta não estiver no texto, diga que um humano vai assumir o atendimento.\n\n`
+
+  // Defesa contra prompt infinito (token/contexto do modelo). Mantém o pedido do usuário,
+  // mas impõe um teto seguro em caracteres.
+  const MAX_CHARS = 12000
+  let out = base
+  for (const m of materials) {
+    if (out.length >= MAX_CHARS) break
+    const chunk = (m + '\n\n')
+    out += chunk
+  }
+  if (out.length > MAX_CHARS) {
+    out = out.slice(0, MAX_CHARS)
+  }
+  return out.trim()
+}
+
 type DeepSeekChatCompletion = {
   choices?: Array<{
     message?: { content?: string | null }
@@ -52,6 +87,7 @@ type DeepSeekChatCompletion = {
 async function callDeepSeek(params: {
   apiKey: string
   userText: string
+  systemPrompt: string
 }): Promise<{ ok: boolean; text: string | null; error: string | null }> {
   const key = params.apiKey.trim()
   if (!key) {
@@ -70,8 +106,7 @@ async function callDeepSeek(params: {
         messages: [
           {
             role: 'system',
-            content:
-              'Você é o assistente virtual da agência de marketing Floripa Web. Seja direto, gentil, persuasivo e use respostas curtas em português do Brasil. Tente entender a necessidade do cliente.',
+            content: params.systemPrompt,
           },
           { role: 'user', content: params.userText },
         ],
@@ -785,7 +820,42 @@ serve(async (req) => {
           } else if (!evolutionUrl || !evolutionApiKey) {
             console.warn('[IA] EVOLUTION_API_URL/KEY ausentes; não consigo responder.')
           } else {
-            const ai = await callDeepSeek({ apiKey: deepSeekKey, userText: text })
+            const [{ data: ctx, error: ctxErr }, { data: mats, error: matsErr }] =
+              await Promise.all([
+                supabase
+                  .from('ai_company_context')
+                  .select('master_prompt')
+                  .eq('user_id', userId)
+                  .maybeSingle(),
+                supabase
+                  .from('ai_training_materials')
+                  .select('content')
+                  .eq('user_id', userId)
+                  .eq('type', 'text'),
+              ])
+
+            if (ctxErr) {
+              console.error('[IA] Falha ao carregar master_prompt:', ctxErr.message)
+            }
+            if (matsErr) {
+              console.error('[IA] Falha ao carregar materiais de treinamento:', matsErr.message)
+            }
+
+            const masterPrompt = (ctx as CompanyContextRow | null)?.master_prompt ?? null
+            const trainingTexts = ((mats ?? []) as TrainingTextRow[])
+              .map((r) => r.content ?? '')
+              .filter((t) => Boolean(t && t.trim()))
+
+            const systemPrompt = buildDeepSeekSystemPrompt({
+              masterPrompt,
+              trainingTexts,
+            })
+
+            const ai = await callDeepSeek({
+              apiKey: deepSeekKey,
+              userText: text,
+              systemPrompt,
+            })
             if (!ai.ok || !ai.text) {
               console.error('[IA] DeepSeek falhou:', ai.error ?? 'sem erro')
             } else {
