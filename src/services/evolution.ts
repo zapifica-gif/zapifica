@@ -1032,7 +1032,7 @@ export async function sendAudioMessageWithConfig(
 export type EvolutionMediaType = 'image' | 'video' | 'audio' | 'document'
 
 export type SendMediaParams = {
-  /** URL pública (recomendado) ou base64/dataURL. */
+  /** Base64 puro (SEM prefixo `data:*;base64,`). */
   media: string
   mediaType: EvolutionMediaType
   /** mimeType do arquivo (ex.: image/png). */
@@ -1044,9 +1044,13 @@ export type SendMediaParams = {
 }
 
 /**
- * Envia mídia (imagem/vídeo/documento) via `/message/sendMedia/{instance}`.
- * Para áudio, a Evolution costuma usar um endpoint separado (`sendWhatsAppAudio`),
- * então roteamos áudio para o método específico.
+ * Envia mídia via `/message/sendMedia/{instance}` usando BASE64 puro.
+ *
+ * Algumas versões da Evolution falham com URL pública (500). Por isso este
+ * método manda sempre o conteúdo em Base64 no campo `media`.
+ *
+ * Payload estrito:
+ *   { number, mediatype, media, caption? }
  */
 export async function sendMediaMessageWithConfig(
   userId: string,
@@ -1070,39 +1074,43 @@ export async function sendMediaMessageWithConfig(
   if (!trimmedMedia) {
     return { ok: false, error: 'Arquivo de mídia vazio.', messageId: null }
   }
-  const mimeType = params.mimeType.trim() || 'application/octet-stream'
-  const fileName = params.fileName.trim() || 'arquivo'
-  const caption = params.caption?.trim() || ' '
-
-  // Áudio: motor legacy geralmente pede um endpoint próprio.
-  if (params.mediaType === 'audio') {
-    return await sendAudioMessageWithConfig(userId, recipient, trimmedMedia, cfg)
-  }
+  const captionTrim = params.caption?.trim()
+  const caption = captionTrim ? captionTrim : undefined
 
   const instanceName = instanceNameFromUserId(userId)
 
   try {
-    const res = await evolutionFetch(
-      cfg,
-      `/message/sendMedia/${encodeURIComponent(instanceName)}`,
-      {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          number: normalized.recipient,
-          mediatype: params.mediaType,
-          mimetype: mimeType,
-          caption,
-          media: trimmedMedia,
-          fileName,
-        }),
+    const url = `${cfg.baseUrl}/message/sendMedia/${encodeURIComponent(instanceName)}`
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: {
+        apikey: cfg.apiKey,
+        Accept: 'application/json',
+        'Content-Type': 'application/json',
       },
-    )
+      body: JSON.stringify({
+        number: normalized.recipient,
+        mediatype: params.mediaType,
+        media: trimmedMedia,
+        ...(caption ? { caption } : {}),
+      }),
+    })
+
+    const text = await res.text()
+    let data: unknown = null
+    if (text) {
+      try {
+        data = JSON.parse(text) as unknown
+      } catch {
+        data = { raw: text }
+      }
+    }
 
     if (!res.ok) {
+      console.error('[Zapifica] Erro Evolution:', text)
       return {
         ok: false,
-        error: formatHttpError(res.status, res.data),
+        error: formatHttpError(res.status, data),
         messageId: null,
       }
     }
@@ -1110,7 +1118,7 @@ export async function sendMediaMessageWithConfig(
     return {
       ok: true,
       error: null,
-      messageId: extractEvolutionMessageId(res.data),
+      messageId: extractEvolutionMessageId(data),
     }
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e)

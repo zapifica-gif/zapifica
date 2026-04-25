@@ -320,6 +320,20 @@ export function ChatWindow({ open, onClose, lead }: ChatWindowProps) {
     return { evolution: 'document', contentType: 'document' }
   }
 
+  async function fileToBase64Pure(file: File): Promise<string> {
+    const dataUrl = await new Promise<string>((resolve, reject) => {
+      const reader = new FileReader()
+      reader.onerror = () => reject(new Error('Não foi possível ler o arquivo.'))
+      reader.onload = () => resolve(String(reader.result ?? ''))
+      reader.readAsDataURL(file)
+    })
+    const marker = ';base64,'
+    const idx = dataUrl.toLowerCase().indexOf(marker)
+    if (idx >= 0) return dataUrl.slice(idx + marker.length)
+    // fallback: se vier sem prefixo, assume que já é base64
+    return dataUrl
+  }
+
   async function handlePickFile(file: File) {
     if (!lead) return
     setSendError(null)
@@ -353,6 +367,17 @@ export function ChatWindow({ open, onClose, lead }: ChatWindowProps) {
     // 2) Grava no banco imediatamente (optimistic persist)
     const caption = draft.trim()
     setDraft('')
+
+    // 2.5) Base64 para o disparo na Evolution (algumas versões falham com URL)
+    let base64Pure: string
+    try {
+      base64Pure = await fileToBase64Pure(file)
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e)
+      setSendError(`Falha ao converter arquivo para Base64: ${msg}`)
+      return
+    }
+
     const { data: inserted, error: insErr } = await supabase
       .from('chat_messages')
       .insert({
@@ -382,9 +407,9 @@ export function ChatWindow({ open, onClose, lead }: ChatWindowProps) {
     const rowId = inserted.id as string
     setPendingMedia((prev) => ({ ...prev, [rowId]: 'sending' }))
 
-    // 3) Dispara envio na Evolution usando URL pública (mais leve que base64)
+    // 3) Dispara envio na Evolution usando BASE64 puro + legenda (caption)
     const evo = await sendMediaMessage(user.id, lead.phone, {
-      media: publicUrl,
+      media: base64Pure,
       mediaType: evolution,
       mimeType: file.type || 'application/octet-stream',
       fileName: file.name || safeName,
