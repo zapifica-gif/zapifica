@@ -5,6 +5,7 @@ import {
   Mic2,
   Settings2,
   SquareKanban,
+  Brain,
 } from 'lucide-react'
 import logoZapifica from '../assets/logo-zapifica.png'
 import { supabase } from '../lib/supabase'
@@ -13,6 +14,7 @@ export type DashboardNavId =
   | 'home'
   | 'crm'
   | 'agenda'
+  | 'ai-training'
   | 'zap-voice'
   | 'settings'
 
@@ -26,6 +28,7 @@ const items: NavItem[] = [
   { id: 'home', label: 'Início', icon: Home },
   { id: 'crm', label: 'CRM / Funil', icon: SquareKanban },
   { id: 'agenda', label: 'Agenda Suprema', icon: CalendarDays },
+  { id: 'ai-training', label: '🧠 Treinamento IA', icon: Brain },
   { id: 'zap-voice', label: 'Zap Voice', icon: Mic2 },
   { id: 'settings', label: 'Configurações', icon: Settings2 },
 ]

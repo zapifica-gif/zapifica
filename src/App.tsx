@@ -3,6 +3,7 @@ import type { Session } from '@supabase/supabase-js'
 import { DashboardLayout } from './layouts/DashboardLayout'
 import { supabase } from './lib/supabase'
 import { AgendaPage } from './pages/AgendaPage'
+import { AiTrainingPage } from './pages/AiTraining'
 import { CrmPage } from './pages/CrmPage'
 import { HomePage } from './pages/HomePage'
 import { LoginPage } from './pages/LoginPage'
@@ -18,6 +19,8 @@ function navTitle(id: DashboardNavId): string {
       return 'CRM / Funil'
     case 'agenda':
       return 'Agenda Suprema'
+    case 'ai-training':
+      return 'Treinamento IA'
     case 'zap-voice':
       return 'Zap Voice'
     case 'settings':
@@ -35,6 +38,8 @@ function DashboardContent({ activeNav }: { activeNav: DashboardNavId }) {
       return <CrmPage />
     case 'agenda':
       return <AgendaPage />
+    case 'ai-training':
+      return <AiTrainingPage />
     case 'zap-voice':
       return <ZapVoicePage />
     case 'settings':

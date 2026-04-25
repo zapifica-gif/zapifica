@@ -119,6 +119,11 @@ async function sendEvolutionText(params: {
   const baseUrl = params.baseUrl.trim()
   const cleanBaseUrl = baseUrl.endsWith('/') ? baseUrl.slice(0, -1) : baseUrl
   const url = `${cleanBaseUrl}/message/sendText/${encodeURIComponent(params.instanceName)}`
+
+  // Humanização: digitando... por tempo proporcional ao tamanho da resposta.
+  // Min 2s, Max 8s, 40ms por caractere.
+  const typingDelay = Math.min(Math.max(params.text.length * 40, 2000), 8000)
+
   const res = await fetch(url, {
     method: 'POST',
     headers: {
@@ -129,6 +134,8 @@ async function sendEvolutionText(params: {
     body: JSON.stringify({
       number: params.toDigits,
       text: params.text,
+      delay: typingDelay,
+      presence: 'composing',
     }),
   })
 
