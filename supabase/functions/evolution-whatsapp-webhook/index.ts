@@ -1,5 +1,6 @@
 // ============================================================================
 // Webhook: Evolution API (messages.upsert) → public.chat_messages
+// Agora com suporte a Mídias (Imagens, Áudios, Documentos e Vídeos)
 // ============================================================================
 
 import { serve } from 'https://deno.land/std@0.168.0/http/server.ts'
@@ -11,6 +12,7 @@ const corsHeaders: Record<string, string> = {
   'Access-Control-Allow-Methods': 'POST, OPTIONS',
 }
 
+// --- Helpers de Telefone ---
 function toEvolutionDigits(raw: string | null | undefined): string | null {
   if (!raw) return null
   const t = raw.trim()
@@ -49,6 +51,7 @@ function userIdFromZapificaInstance(instance: string): string | null {
   return rest
 }
 
+// --- Helpers de Payload e Mídia ---
 function extractTextAndType(msg: Record<string, unknown> | null | undefined): { body: string; content: 'text' | 'audio' | 'image' | 'video' | 'document' | 'unknown' } {
   if (!msg) return { body: '', content: 'unknown' }
   if (typeof msg.conversation === 'string' && msg.conversation) return { body: msg.conversation, content: 'text' }
@@ -63,6 +66,47 @@ function extractTextAndType(msg: Record<string, unknown> | null | undefined): { 
   if (msg.videoMessage) return { body: '[vídeo]', content: 'video' }
   if (msg.documentMessage) return { body: '[documento]', content: 'document' }
   return { body: JSON.stringify(msg).substring(0, 200), content: 'text' }
+}
+
+// Nova função para extrair e converter o arquivo de mídia
+function extractMediaInfo(msg: any): { base64: string | null; mimeType: string; extension: string } {
+  if (!msg) return { base64: null, mimeType: '', extension: '' }
+  
+  let base64 = typeof msg.base64 === 'string' ? msg.base64 : null;
+  let mimeType = 'application/octet-stream';
+  let extension = 'bin';
+
+  if (msg.imageMessage) {
+    if (!base64 && msg.imageMessage.base64) base64 = msg.imageMessage.base64;
+    mimeType = msg.imageMessage.mimetype || 'image/jpeg';
+  } else if (msg.audioMessage) {
+    if (!base64 && msg.audioMessage.base64) base64 = msg.audioMessage.base64;
+    mimeType = msg.audioMessage.mimetype || 'audio/ogg';
+  } else if (msg.videoMessage) {
+    if (!base64 && msg.videoMessage.base64) base64 = msg.videoMessage.base64;
+    mimeType = msg.videoMessage.mimetype || 'video/mp4';
+  } else if (msg.documentMessage) {
+    if (!base64 && msg.documentMessage.base64) base64 = msg.documentMessage.base64;
+    mimeType = msg.documentMessage.mimetype || 'application/pdf';
+  }
+
+  if (mimeType) {
+    extension = mimeType.split('/')[1]?.split(';')[0] || 'bin';
+    if (extension === 'jpeg') extension = 'jpg';
+  }
+
+  return { base64, mimeType, extension };
+}
+
+// Transforma o texto gigante da Evolution em um arquivo físico
+function decodeBase64(b64: string): Uint8Array {
+  const binString = atob(b64);
+  const size = binString.length;
+  const bytes = new Uint8Array(size);
+  for (let i = 0; i < size; i++) {
+    bytes[i] = binString.charCodeAt(i);
+  }
+  return bytes;
 }
 
 type UpsertItem = { fromMe: boolean; remoteJid: string; msgId: string; message: Record<string, unknown> | null; pushName: string | null }
@@ -139,14 +183,13 @@ async function ensureLeadId(supabase: SupabaseClient, userId: string, idx: LeadI
   return { id: null, created: false, error: error?.message ?? 'insert lead falhou' }
 }
 
+// --- Handler Principal ---
 serve(async (req) => {
   if (req.method === 'OPTIONS') return new Response('ok', { headers: corsHeaders })
   
   try {
     let body: unknown
     try { body = await req.json() } catch { return new Response(JSON.stringify({ error: 'Invalid JSON' }), { status: 400, headers: { 'Content-Type': 'application/json', ...corsHeaders } }) }
-
-    console.log("📦 PAYLOAD RECEBIDO:", JSON.stringify(body).substring(0, 800));
 
     const b = (body as Record<string, unknown>) || {}
     const event = (typeof b.event === 'string' && b.event) || ''
@@ -159,7 +202,6 @@ serve(async (req) => {
 
     const userId = userIdFromZapificaInstance(instance)
     if (!userId) {
-      console.log("⚠️ ALERTA: Instance incorreta:", instance);
       return new Response(JSON.stringify({ ok: false, error: 'Instance não segue a convenção zapifica_<user_uuid>.', instance }), { status: 200, headers: { 'Content-Type': 'application/json', ...corsHeaders } })
     }
 
@@ -191,9 +233,39 @@ serve(async (req) => {
         if (ensured.created) createdLeads++
 
         const { body: text, content: contentType } = extractTextAndType(item.message)
+        
+        // --- Processamento de Mídia ---
+        const mediaInfo = extractMediaInfo(item.message);
+        let finalMediaUrl = null;
 
+        if (mediaInfo.base64) {
+          try {
+            const fileBuffer = decodeBase64(mediaInfo.base64);
+            const fileName = `${item.msgId}.${mediaInfo.extension}`;
+            
+            // Faz o upload para a gaveta do Supabase
+            const { error: uploadErr } = await supabase.storage.from('chat_media').upload(fileName, fileBuffer, {
+              contentType: mediaInfo.mimeType,
+              upsert: true
+            });
+
+            if (!uploadErr) {
+              const { data: publicUrlData } = supabase.storage.from('chat_media').getPublicUrl(fileName);
+              finalMediaUrl = publicUrlData.publicUrl;
+            }
+          } catch (e) {
+            console.error("Erro ao converter ou subir mídia:", e);
+          }
+        }
+
+        // --- Salva a mensagem no banco (agora com media_url) ---
         const { error: insErr } = await supabase.from('chat_messages').insert({
-          lead_id: ensured.id, sender_type: 'cliente', content_type: contentType, message_body: text, evolution_message_id: item.msgId
+          lead_id: ensured.id, 
+          sender_type: 'cliente', 
+          content_type: contentType, 
+          message_body: text, 
+          evolution_message_id: item.msgId,
+          media_url: finalMediaUrl // <-- A mágica entra aqui!
         })
 
         if (insErr) {
@@ -213,7 +285,6 @@ serve(async (req) => {
     return new Response(JSON.stringify(resultadoFinal), { status: resultadoFinal.ok ? 200 : 500, headers: { 'Content-Type': 'application/json', ...corsHeaders } })
 
   } catch (globalError: any) {
-    console.error("❌ Erro Global no Webhook:", globalError)
     return new Response(JSON.stringify({ error: 'Erro interno', details: globalError.message }), { status: 500, headers: { 'Content-Type': 'application/json', ...corsHeaders } })
   }
 })
