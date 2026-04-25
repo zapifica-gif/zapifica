@@ -11,10 +11,6 @@ const corsHeaders: Record<string, string> = {
   'Access-Control-Allow-Methods': 'POST, OPTIONS',
 }
 
-// ---------------------------------------------------------------------------
-// Helpers de telefone
-// ---------------------------------------------------------------------------
-
 function toEvolutionDigits(raw: string | null | undefined): string | null {
   if (!raw) return null
   const t = raw.trim()
@@ -34,26 +30,16 @@ function nationalTail(digits: string | null | undefined): string | null {
   if (digits.includes('@')) return null
   const only = digits.replace(/\D/g, '')
   if (!only) return null
-  if (only.startsWith('55') && only.length >= 12) {
-    return only.slice(2)
-  }
+  if (only.startsWith('55') && only.length >= 12) return only.slice(2)
   return only.slice(-11)
 }
 
 function prettifyPhone(digits: string): string {
   const tail = nationalTail(digits) ?? digits.replace(/\D/g, '')
-  if (tail.length === 11) {
-    return `(${tail.slice(0, 2)}) ${tail.slice(2, 7)}-${tail.slice(7)}`
-  }
-  if (tail.length === 10) {
-    return `(${tail.slice(0, 2)}) ${tail.slice(2, 6)}-${tail.slice(6)}`
-  }
+  if (tail.length === 11) return `(${tail.slice(0, 2)}) ${tail.slice(2, 7)}-${tail.slice(7)}`
+  if (tail.length === 10) return `(${tail.slice(0, 2)}) ${tail.slice(2, 6)}-${tail.slice(6)}`
   return `+${digits.replace(/\D/g, '')}`
 }
-
-// ---------------------------------------------------------------------------
-// Helpers de payload da Evolution
-// ---------------------------------------------------------------------------
 
 function userIdFromZapificaInstance(instance: string): string | null {
   const p = 'zapifica_'
@@ -63,41 +49,23 @@ function userIdFromZapificaInstance(instance: string): string | null {
   return rest
 }
 
-function extractTextAndType(msg: Record<string, unknown> | null | undefined): {
-  body: string
-  content: 'text' | 'audio' | 'image' | 'video' | 'document' | 'unknown'
-} {
+function extractTextAndType(msg: Record<string, unknown> | null | undefined): { body: string; content: 'text' | 'audio' | 'image' | 'video' | 'document' | 'unknown' } {
   if (!msg) return { body: '', content: 'unknown' }
-  
-  if (typeof msg.conversation === 'string' && msg.conversation) {
-    return { body: msg.conversation, content: 'text' }
-  }
-  
+  if (typeof msg.conversation === 'string' && msg.conversation) return { body: msg.conversation, content: 'text' }
   const ext = msg.extendedTextMessage as Record<string, unknown> | undefined
-  if (ext && typeof ext.text === 'string' && ext.text) {
-    return { body: ext.text, content: 'text' }
-  }
-  
-  if (msg.imageMessage && typeof msg.imageMessage === 'object') {
+  if (ext && typeof ext.text === 'string' && ext.text) return { body: ext.text, content: 'text' }
+  if (msg.imageMessage) {
     const im = msg.imageMessage as Record<string, unknown>
     const c = typeof im.caption === 'string' && im.caption.trim() ? im.caption : ''
     return { body: c || '[imagem]', content: 'image' }
   }
-  
   if (msg.audioMessage) return { body: '[áudio]', content: 'audio' }
   if (msg.videoMessage) return { body: '[vídeo]', content: 'video' }
   if (msg.documentMessage) return { body: '[documento]', content: 'document' }
-  
   return { body: JSON.stringify(msg).substring(0, 200), content: 'text' }
 }
 
-type UpsertItem = {
-  fromMe: boolean
-  remoteJid: string
-  msgId: string
-  message: Record<string, unknown> | null
-  pushName: string | null
-}
+type UpsertItem = { fromMe: boolean; remoteJid: string; msgId: string; message: Record<string, unknown> | null; pushName: string | null }
 
 function normalizeKey(key: unknown): { remoteJid: string; id: string; fromMe: boolean } | null {
   if (!key || typeof key !== 'object') return null
@@ -111,45 +79,24 @@ function normalizeKey(key: unknown): { remoteJid: string; id: string; fromMe: bo
 
 function collectUpsertItems(data: unknown): UpsertItem[] {
   if (data == null) return []
-
-  if (Array.isArray(data)) {
-    return data.flatMap((d) => (d && typeof d === 'object' ? collectUpsertItems(d) : []))
-  }
-
+  if (Array.isArray(data)) return data.flatMap((d) => (d && typeof d === 'object' ? collectUpsertItems(d) : []))
   if (typeof data === 'object') {
     const o = data as Record<string, unknown>
-
-    if (o.messages && Array.isArray(o.messages)) {
-      return collectUpsertItems(o.messages)
-    }
-
+    if (o.messages && Array.isArray(o.messages)) return collectUpsertItems(o.messages)
     const k = normalizeKey(o.key)
     if (k && o.message) {
       const pushName = typeof o.pushName === 'string' && o.pushName.trim() ? o.pushName.trim() : null
-      return [
-        {
-          fromMe: k.fromMe,
-          remoteJid: k.remoteJid,
-          msgId: k.id,
-          message: o.message as Record<string, unknown>,
-          pushName,
-        },
-      ]
+      return [{ fromMe: k.fromMe, remoteJid: k.remoteJid, msgId: k.id, message: o.message as Record<string, unknown>, pushName }]
     }
   }
   return []
 }
 
-// ---------------------------------------------------------------------------
-// Lookup + auto-criação de lead
-// ---------------------------------------------------------------------------
-
 type LeadRow = { id: string; phone: string | null; name: string | null }
 type LeadIndex = { byFull: Map<string, string>; byTail: Map<string, string>; rows: LeadRow[] }
 
 function buildLeadIndex(rows: LeadRow[]): LeadIndex {
-  const byFull = new Map<string, string>()
-  const byTail = new Map<string, string>()
+  const byFull = new Map<string, string>(), byTail = new Map<string, string>()
   for (const r of rows) {
     const full = toEvolutionDigits(r.phone ?? null)
     if (full && !byFull.has(full)) byFull.set(full, r.id)
@@ -163,21 +110,15 @@ function findLeadId(idx: LeadIndex, fullDigits: string): string | null {
   const hitFull = idx.byFull.get(fullDigits)
   if (hitFull) return hitFull
   const tail = nationalTail(fullDigits)
-  if (tail) {
-    const hitTail = idx.byTail.get(tail)
-    if (hitTail) return hitTail
-  }
+  if (tail) { const hitTail = idx.byTail.get(tail); if (hitTail) return hitTail }
   return null
 }
 
 async function ensureLeadId(supabase: SupabaseClient, userId: string, idx: LeadIndex, fullDigits: string, pushName: string | null): Promise<{ id: string | null; created: boolean; error: string | null }> {
   const existing = findLeadId(idx, fullDigits)
   if (existing) return { id: existing, created: false, error: null }
-
   const displayName = (pushName && pushName.slice(0, 80)) || `Novo Lead ${prettifyPhone(fullDigits)}`
-
   const { data, error } = await supabase.from('leads').insert({ user_id: userId, name: displayName, phone: fullDigits, status: 'novo' }).select('id, phone, name').single()
-
   if (!error && data) {
     const row = data as LeadRow
     idx.rows.push(row)
@@ -186,7 +127,6 @@ async function ensureLeadId(supabase: SupabaseClient, userId: string, idx: LeadI
     if (tail) idx.byTail.set(tail, row.id)
     return { id: row.id, created: true, error: null }
   }
-
   const retry = await supabase.from('leads').select('id, phone, name').eq('user_id', userId)
   if (!retry.error && Array.isArray(retry.data)) {
     const refreshed = buildLeadIndex(retry.data as LeadRow[])
@@ -199,33 +139,14 @@ async function ensureLeadId(supabase: SupabaseClient, userId: string, idx: LeadI
   return { id: null, created: false, error: error?.message ?? 'insert lead falhou' }
 }
 
-// ---------------------------------------------------------------------------
-// Handler principal
-// ---------------------------------------------------------------------------
-
 serve(async (req) => {
   if (req.method === 'OPTIONS') return new Response('ok', { headers: corsHeaders })
   
   try {
     let body: unknown
-    try {
-      body = await req.json()
-    } catch {
-      return new Response(JSON.stringify({ error: 'Invalid JSON' }), { status: 400, headers: { 'Content-Type': 'application/json', ...corsHeaders } })
-    }
+    try { body = await req.json() } catch { return new Response(JSON.stringify({ error: 'Invalid JSON' }), { status: 400, headers: { 'Content-Type': 'application/json', ...corsHeaders } }) }
 
-    // MEGAFONE 1: Mostra o que chegou da Evolution
     console.log("📦 PAYLOAD RECEBIDO:", JSON.stringify(body).substring(0, 800));
-
-    const secret = Deno.env.get('EVOLUTION_WEBHOOK_SECRET')?.trim() ?? ''
-    if (secret) {
-      const h = req.headers.get('x-webhook-secret')?.trim() ?? ''
-      const auth = req.headers.get('authorization')?.trim() ?? ''
-      const bearer = auth.toLowerCase().startsWith('bearer ') ? auth.slice(7) : ''
-      if (h !== secret && bearer !== secret) {
-        return new Response(JSON.stringify({ error: 'Unauthorized' }), { status: 401, headers: { 'Content-Type': 'application/json', ...corsHeaders } })
-      }
-    }
 
     const b = (body as Record<string, unknown>) || {}
     const event = (typeof b.event === 'string' && b.event) || ''
@@ -287,8 +208,6 @@ serve(async (req) => {
     }
 
     const resultadoFinal = { ok: errors.length === 0, saved, createdLeads, skipped, errors, count: items.length };
-    
-    // MEGAFONE 2: Mostra a decisão final
     console.log("📊 RESULTADO DA OPERAÇÃO:", JSON.stringify(resultadoFinal));
 
     return new Response(JSON.stringify(resultadoFinal), { status: resultadoFinal.ok ? 200 : 500, headers: { 'Content-Type': 'application/json', ...corsHeaders } })
