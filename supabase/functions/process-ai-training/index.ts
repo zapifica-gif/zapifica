@@ -4,13 +4,10 @@
 
 import { serve } from 'https://deno.land/std@0.168.0/http/server.ts'
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2'
-import { Buffer } from 'node:buffer'
-import pdf from 'npm:pdf-parse'
 
 const corsHeaders: Record<string, string> = {
   'Access-Control-Allow-Origin': '*',
-  'Access-Control-Allow-Headers':
-    'authorization, x-client-info, apikey, content-type',
+  'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
   'Access-Control-Allow-Methods': 'POST, OPTIONS',
 }
 
@@ -94,13 +91,12 @@ async function fetchHtmlText(url: URL): Promise<{ ok: true; text: string } | { o
 
 async function extractPdfText(bytes: Uint8Array): Promise<{ ok: true; text: string } | { ok: false; error: string }> {
   try {
-    let pdfData: { text?: string }
-    try {
-      pdfData = await pdf(bytes)
-    } catch {
-      // pdf-parse costuma esperar Buffer no ecossistema Node; Deno npm às vezes só aceita Buffer.
-      pdfData = await pdf(Buffer.from(bytes))
-    }
+    // Import dinâmico para evitar crash no boot do runtime.
+    const mod = await import('npm:pdf-parse')
+    const pdfParse = (mod as { default?: (input: Uint8Array) => Promise<{ text?: string }> }).default
+    if (!pdfParse) return { ok: false, error: 'Biblioteca pdf-parse indisponível neste runtime.' }
+
+    const pdfData = await pdfParse(bytes)
     const text = (pdfData?.text ?? '').replace(/\s+/g, ' ').trim()
     if (!text) return { ok: false, error: 'PDF sem texto extraível (pode ser imagem escaneada).' }
     return { ok: true, text }
@@ -110,26 +106,8 @@ async function extractPdfText(bytes: Uint8Array): Promise<{ ok: true; text: stri
   }
 }
 
-function decodeUtf8(bytes: Uint8Array): string {
-  return new TextDecoder('utf-8', { fatal: false }).decode(bytes)
-}
-
-async function extractFileText(
-  bytes: Uint8Array,
-  lowerName: string,
-): Promise<{ ok: true; text: string } | { ok: false; error: string }> {
-  if (lowerName.endsWith('.txt')) {
-    const text = decodeUtf8(bytes).replace(/\s+/g, ' ').trim()
-    if (!text) return { ok: false, error: 'Arquivo TXT vazio.' }
-    return { ok: true, text }
-  }
-  if (lowerName.endsWith('.pdf')) {
-    return await extractPdfText(bytes)
-  }
-  return {
-    ok: false,
-    error: 'Por enquanto só processamos PDF e TXT nesta função. Converta DOC/DOCX para PDF.',
-  }
+function normalizeSpaces(s: string): string {
+  return s.replace(/\s+/g, ' ').trim()
 }
 
 async function callDeepSeekReasoner(params: {
@@ -194,10 +172,12 @@ function jsonErrorResponse(err: unknown, status = 500): Response {
 }
 
 serve(async (req) => {
+  // Preflight precisa ser a PRIMEIRA coisa (fora do try/catch).
+  if (req.method === 'OPTIONS') {
+    return new Response('ok', { headers: corsHeaders })
+  }
+
   try {
-    if (req.method === 'OPTIONS') {
-      return new Response('ok', { headers: corsHeaders })
-    }
     if (req.method !== 'POST') {
       return jsonResponse({ error: 'Method not allowed' }, 405)
     }
@@ -270,12 +250,23 @@ serve(async (req) => {
         return jsonResponse({ error: dlErr?.message ?? 'Falha ao baixar arquivo do Storage.' }, 400)
       }
 
-      const arrayBuffer = await data.arrayBuffer()
-      const buffer = new Uint8Array(arrayBuffer)
       const lower = filePath.toLowerCase()
-      const extracted = await extractFileText(buffer, lower)
-      if (!extracted.ok) return jsonResponse({ error: extracted.error }, 400)
-      rawText = extracted.text
+      if (lower.endsWith('.txt')) {
+        const text = normalizeSpaces(await data.text())
+        if (!text) return jsonResponse({ error: 'Arquivo TXT vazio.' }, 400)
+        rawText = text
+      } else if (lower.endsWith('.pdf')) {
+        const arrayBuffer = await data.arrayBuffer()
+        const buffer = new Uint8Array(arrayBuffer)
+        const extracted = await extractPdfText(buffer)
+        if (!extracted.ok) return jsonResponse({ error: extracted.error }, 400)
+        rawText = extracted.text
+      } else {
+        return jsonResponse(
+          { error: 'Por enquanto só processamos PDF e TXT nesta função. Converta DOC/DOCX para PDF.' },
+          400,
+        )
+      }
 
       const { data: pub } = supabase.storage.from('training_files').getPublicUrl(filePath)
       materialUrl = pub.publicUrl
