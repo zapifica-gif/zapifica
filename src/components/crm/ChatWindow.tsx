@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react'
-import { MessageSquare, Send, X } from 'lucide-react'
+import { FileText, MessageSquare, Send, X } from 'lucide-react'
 import { supabase } from '../../lib/supabase'
 import { sendTextMessage } from '../../services/evolution'
 import type { Lead } from './CrmKanbanBoard'
@@ -8,8 +8,9 @@ export type ChatMessageRow = {
   id: string
   lead_id: string
   sender_type: 'agencia' | 'cliente' | 'ia'
-  content_type: 'text' | 'audio' | 'image'
+  content_type: 'text' | 'audio' | 'image' | 'document'
   message_body: string | null
+  media_url: string | null
   evolution_message_id: string | null
   created_at: string
 }
@@ -44,6 +45,87 @@ function senderLabel(sender: ChatMessageRow['sender_type']): string {
   }
 }
 
+function contentLabel(contentType: ChatMessageRow['content_type']): string {
+  switch (contentType) {
+    case 'audio':
+      return 'áudio'
+    case 'image':
+      return 'imagem'
+    case 'document':
+      return 'arquivo'
+    case 'text':
+    default:
+      return 'texto'
+  }
+}
+
+function shouldShowText(message: ChatMessageRow): boolean {
+  const body = message.message_body?.trim()
+  if (!body) return false
+  if (!message.media_url) return true
+  return !['[imagem]', '[áudio]', '[documento]', '[vídeo]'].includes(body)
+}
+
+function MessageMedia({ message }: { message: ChatMessageRow }) {
+  if (!message.media_url) return null
+
+  if (message.content_type === 'image') {
+    return (
+      <a
+        href={message.media_url}
+        target="_blank"
+        rel="noreferrer"
+        className="block overflow-hidden rounded-xl border border-white/20 bg-zinc-100"
+        aria-label="Abrir imagem em nova aba"
+      >
+        <img
+          src={message.media_url}
+          alt={message.message_body?.trim() || 'Imagem recebida no WhatsApp'}
+          className="max-h-80 w-full object-cover"
+          loading="lazy"
+        />
+      </a>
+    )
+  }
+
+  if (message.content_type === 'audio') {
+    return (
+      <audio
+        controls
+        preload="metadata"
+        src={message.media_url}
+        className="w-64 max-w-full rounded-xl"
+      >
+        Seu navegador não conseguiu reproduzir este áudio.
+      </audio>
+    )
+  }
+
+  if (message.content_type === 'document') {
+    return (
+      <a
+        href={message.media_url}
+        target="_blank"
+        rel="noreferrer"
+        download
+        className="flex items-center gap-3 rounded-xl border border-zinc-200 bg-white/90 p-3 text-zinc-800 shadow-sm transition hover:border-brand-200 hover:bg-brand-50"
+      >
+        <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-brand-600/10 text-brand-700">
+          <FileText className="h-5 w-5" aria-hidden />
+        </span>
+        <span className="min-w-0">
+          <span className="block truncate text-sm font-semibold">
+            {message.message_body?.trim() || 'Arquivo recebido'}
+          </span>
+          <span className="block text-xs text-zinc-500">Abrir ou baixar arquivo</span>
+        </span>
+      </a>
+    )
+  }
+
+  return null
+}
+
 export function ChatWindow({ open, onClose, lead }: ChatWindowProps) {
   const [messages, setMessages] = useState<ChatMessageRow[]>([])
   const [loading, setLoading] = useState(false)
@@ -61,11 +143,14 @@ export function ChatWindow({ open, onClose, lead }: ChatWindowProps) {
 
   const fetchInitial = useCallback(async (leadId: string) => {
     setLoading(true)
+    setMessages([])
+    setDraft('')
     setLoadError(null)
+    setSendError(null)
     const { data, error } = await supabase
       .from('chat_messages')
       .select(
-        'id, lead_id, sender_type, content_type, message_body, evolution_message_id, created_at',
+        'id, lead_id, sender_type, content_type, message_body, media_url, evolution_message_id, created_at',
       )
       .eq('lead_id', leadId)
       .order('created_at', { ascending: true })
@@ -82,14 +167,11 @@ export function ChatWindow({ open, onClose, lead }: ChatWindowProps) {
   }, [scrollToEnd])
 
   useEffect(() => {
-    if (!open || !lead) {
-      setMessages([])
-      setDraft('')
-      setLoadError(null)
-      setSendError(null)
-      return
-    }
-    void fetchInitial(lead.id)
+    if (!open || !lead) return
+    const timer = window.setTimeout(() => {
+      void fetchInitial(lead.id)
+    }, 0)
+    return () => window.clearTimeout(timer)
   }, [open, lead, fetchInitial])
 
   useEffect(() => {
@@ -227,12 +309,14 @@ export function ChatWindow({ open, onClose, lead }: ChatWindowProps) {
               <div className="max-w-full">
                 <p className="mb-1 text-[10px] font-medium uppercase tracking-wide text-zinc-400">
                   {senderLabel(m.sender_type)} ·{' '}
-                  {m.content_type !== 'text' ? m.content_type : 'texto'}
+                  {contentLabel(m.content_type)}
                 </p>
                 <div
-                  className={`whitespace-pre-wrap break-words px-3.5 py-2.5 text-sm leading-relaxed shadow-sm ${bubbleStyle(m.sender_type)}`}
+                  className={`space-y-2 whitespace-pre-wrap break-words px-3.5 py-2.5 text-sm leading-relaxed shadow-sm ${bubbleStyle(m.sender_type)}`}
                 >
-                  {m.message_body ?? (m.content_type === 'text' ? '—' : '—')}
+                  <MessageMedia message={m} />
+                  {shouldShowText(m) ? <p>{m.message_body}</p> : null}
+                  {!m.media_url && !shouldShowText(m) ? <p>—</p> : null}
                 </div>
                 <p className="mt-1 text-right text-[10px] text-zinc-400">
                   {new Date(m.created_at).toLocaleString(undefined, {

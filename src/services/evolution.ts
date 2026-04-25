@@ -87,7 +87,7 @@ export async function setInstanceWebhook(
       enabled: true,
       url: webhookTargetUrl,
       webhookByEvents: false,
-      webhookBase64: true, // ALTERADO PARA TRUE: Ativa o envio de imagens/áudios
+      webhookBase64: true,
       events: [...events],
     },
   }
@@ -678,7 +678,7 @@ export async function createInstanceAndGetQr(
         enabled: true,
         url: webhookTargetUrl,
         webhookByEvents: false,
-        webhookBase64: true, // ALTERADO PARA TRUE: Ativa mídias na criação da instância
+        webhookBase64: true,
         events: [...EVOLUTION_WEBHOOK_EVENTS],
       }
     }

@@ -1,18 +1,60 @@
 // ============================================================================
-// Webhook: Evolution API (messages.upsert) → public.chat_messages
-// Agora com suporte a Mídias (Imagens, Áudios, Documentos e Vídeos)
+// Webhook: Evolution API (messages.upsert) -> public.chat_messages
+//
+// Recebe mensagens do WhatsApp, cria/sincroniza leads automaticamente e salva
+// mídias Base64 no bucket público `chat_media`.
 // ============================================================================
 
 import { serve } from 'https://deno.land/std@0.168.0/http/server.ts'
 import { createClient, SupabaseClient } from 'https://esm.sh/@supabase/supabase-js@2'
 
+const MEDIA_BUCKET = 'chat_media'
+
 const corsHeaders: Record<string, string> = {
   'Access-Control-Allow-Origin': '*',
-  'Access-Control-Allow-Headers': 'authorization, x-webhook-secret, content-type, apikey',
+  'Access-Control-Allow-Headers':
+    'authorization, x-webhook-secret, content-type, apikey',
   'Access-Control-Allow-Methods': 'POST, OPTIONS',
 }
 
-// --- Helpers de Telefone ---
+type ChatContentType = 'text' | 'audio' | 'image' | 'document'
+
+type TextAndType = {
+  body: string
+  content: ChatContentType
+}
+
+type MediaInfo = {
+  base64: string | null
+  mimeType: string
+  extension: string
+  fileName: string | null
+}
+
+type UpsertItem = {
+  fromMe: boolean
+  remoteJid: string
+  msgId: string
+  message: Record<string, unknown> | null
+  envelope: Record<string, unknown>
+  pushName: string | null
+}
+
+type LeadRow = { id: string; phone: string | null; name: string | null }
+
+type LeadIndex = {
+  byFull: Map<string, string>
+  byTail: Map<string, string>
+  rows: LeadRow[]
+}
+
+function jsonResponse(body: unknown, status = 200): Response {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: { 'Content-Type': 'application/json', ...corsHeaders },
+  })
+}
+
 function toEvolutionDigits(raw: string | null | undefined): string | null {
   if (!raw) return null
   const t = raw.trim()
@@ -32,14 +74,20 @@ function nationalTail(digits: string | null | undefined): string | null {
   if (digits.includes('@')) return null
   const only = digits.replace(/\D/g, '')
   if (!only) return null
-  if (only.startsWith('55') && only.length >= 12) return only.slice(2)
+  if (only.startsWith('55') && only.length >= 12) {
+    return only.slice(2)
+  }
   return only.slice(-11)
 }
 
 function prettifyPhone(digits: string): string {
   const tail = nationalTail(digits) ?? digits.replace(/\D/g, '')
-  if (tail.length === 11) return `(${tail.slice(0, 2)}) ${tail.slice(2, 7)}-${tail.slice(7)}`
-  if (tail.length === 10) return `(${tail.slice(0, 2)}) ${tail.slice(2, 6)}-${tail.slice(6)}`
+  if (tail.length === 11) {
+    return `(${tail.slice(0, 2)}) ${tail.slice(2, 7)}-${tail.slice(7)}`
+  }
+  if (tail.length === 10) {
+    return `(${tail.slice(0, 2)}) ${tail.slice(2, 6)}-${tail.slice(6)}`
+  }
   return `+${digits.replace(/\D/g, '')}`
 }
 
@@ -51,71 +99,214 @@ function userIdFromZapificaInstance(instance: string): string | null {
   return rest
 }
 
-// --- Helpers de Payload e Mídia ---
-function extractTextAndType(msg: Record<string, unknown> | null | undefined): { body: string; content: 'text' | 'audio' | 'image' | 'video' | 'document' | 'unknown' } {
-  if (!msg) return { body: '', content: 'unknown' }
-  if (typeof msg.conversation === 'string' && msg.conversation) return { body: msg.conversation, content: 'text' }
-  const ext = msg.extendedTextMessage as Record<string, unknown> | undefined
-  if (ext && typeof ext.text === 'string' && ext.text) return { body: ext.text, content: 'text' }
-  if (msg.imageMessage) {
-    const im = msg.imageMessage as Record<string, unknown>
-    const c = typeof im.caption === 'string' && im.caption.trim() ? im.caption : ''
-    return { body: c || '[imagem]', content: 'image' }
-  }
-  if (msg.audioMessage) return { body: '[áudio]', content: 'audio' }
-  if (msg.videoMessage) return { body: '[vídeo]', content: 'video' }
-  if (msg.documentMessage) return { body: '[documento]', content: 'document' }
-  return { body: JSON.stringify(msg).substring(0, 200), content: 'text' }
+function asRecord(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === 'object'
+    ? (value as Record<string, unknown>)
+    : null
 }
 
-// Nova função para extrair e converter o arquivo de mídia
-function extractMediaInfo(msg: any): { base64: string | null; mimeType: string; extension: string } {
-  if (!msg) return { base64: null, mimeType: '', extension: '' }
-  
-  let base64 = typeof msg.base64 === 'string' ? msg.base64 : null;
-  let mimeType = 'application/octet-stream';
-  let extension = 'bin';
-
-  if (msg.imageMessage) {
-    if (!base64 && msg.imageMessage.base64) base64 = msg.imageMessage.base64;
-    mimeType = msg.imageMessage.mimetype || 'image/jpeg';
-  } else if (msg.audioMessage) {
-    if (!base64 && msg.audioMessage.base64) base64 = msg.audioMessage.base64;
-    mimeType = msg.audioMessage.mimetype || 'audio/ogg';
-  } else if (msg.videoMessage) {
-    if (!base64 && msg.videoMessage.base64) base64 = msg.videoMessage.base64;
-    mimeType = msg.videoMessage.mimetype || 'video/mp4';
-  } else if (msg.documentMessage) {
-    if (!base64 && msg.documentMessage.base64) base64 = msg.documentMessage.base64;
-    mimeType = msg.documentMessage.mimetype || 'application/pdf';
-  }
-
-  if (mimeType) {
-    extension = mimeType.split('/')[1]?.split(';')[0] || 'bin';
-    if (extension === 'jpeg') extension = 'jpg';
-  }
-
-  return { base64, mimeType, extension };
+function stringValue(value: unknown): string | null {
+  return typeof value === 'string' && value.trim() ? value.trim() : null
 }
 
-// Transforma o texto gigante da Evolution em um arquivo físico
-function decodeBase64(b64: string): Uint8Array {
-  const binString = atob(b64);
-  const size = binString.length;
-  const bytes = new Uint8Array(size);
-  for (let i = 0; i < size; i++) {
-    bytes[i] = binString.charCodeAt(i);
-  }
-  return bytes;
+function nestedRecord(
+  parent: Record<string, unknown> | null | undefined,
+  key: string,
+): Record<string, unknown> | null {
+  if (!parent) return null
+  return asRecord(parent[key])
 }
 
-type UpsertItem = { fromMe: boolean; remoteJid: string; msgId: string; message: Record<string, unknown> | null; pushName: string | null }
+function firstString(...values: unknown[]): string | null {
+  for (const value of values) {
+    const s = stringValue(value)
+    if (s) return s
+  }
+  return null
+}
 
-function normalizeKey(key: unknown): { remoteJid: string; id: string; fromMe: boolean } | null {
-  if (!key || typeof key !== 'object') return null
-  const o = key as Record<string, unknown>
-  const remoteJid = typeof o.remoteJid === 'string' ? o.remoteJid : ''
-  const id = typeof o.id === 'string' ? o.id : ''
+function extractTextAndType(
+  msg: Record<string, unknown> | null | undefined,
+): TextAndType {
+  if (!msg) return { body: '', content: 'text' }
+
+  const conversation = stringValue(msg.conversation)
+  if (conversation) return { body: conversation, content: 'text' }
+
+  const ext = nestedRecord(msg, 'extendedTextMessage')
+  const extendedText = stringValue(ext?.text)
+  if (extendedText) return { body: extendedText, content: 'text' }
+
+  const image = nestedRecord(msg, 'imageMessage')
+  if (image) {
+    return {
+      body: stringValue(image.caption) ?? '[imagem]',
+      content: 'image',
+    }
+  }
+
+  if (nestedRecord(msg, 'audioMessage')) {
+    return { body: '[áudio]', content: 'audio' }
+  }
+
+  const document = nestedRecord(msg, 'documentMessage')
+  if (document) {
+    return {
+      body:
+        firstString(document.title, document.fileName, document.caption) ??
+        '[documento]',
+      content: 'document',
+    }
+  }
+
+  const video = nestedRecord(msg, 'videoMessage')
+  if (video) {
+    return {
+      body: stringValue(video.caption) ?? '[vídeo]',
+      content: 'document',
+    }
+  }
+
+  return { body: '[mensagem]', content: 'text' }
+}
+
+function extensionFromMimeType(mimeType: string): string {
+  const clean = mimeType.split(';')[0]?.trim().toLowerCase() || ''
+  const known: Record<string, string> = {
+    'audio/ogg': 'ogg',
+    'audio/mpeg': 'mp3',
+    'audio/mp4': 'm4a',
+    'audio/aac': 'aac',
+    'image/jpeg': 'jpg',
+    'image/png': 'png',
+    'image/webp': 'webp',
+    'video/mp4': 'mp4',
+    'application/pdf': 'pdf',
+    'application/msword': 'doc',
+    'application/vnd.openxmlformats-officedocument.wordprocessingml.document':
+      'docx',
+  }
+  if (known[clean]) return known[clean]
+  const fallback = clean.split('/')[1]?.replace(/[^a-z0-9]/g, '')
+  return fallback || 'bin'
+}
+
+function extensionFromFileName(fileName: string | null): string | null {
+  if (!fileName) return null
+  const match = /\.([a-zA-Z0-9]{1,8})$/.exec(fileName)
+  return match?.[1]?.toLowerCase() ?? null
+}
+
+function stripBase64Prefix(value: string): string {
+  const trimmed = value.trim()
+  const marker = ';base64,'
+  const markerIndex = trimmed.toLowerCase().indexOf(marker)
+  if (markerIndex >= 0) {
+    return trimmed.slice(markerIndex + marker.length)
+  }
+  return trimmed
+}
+
+function extractMediaInfo(
+  msg: Record<string, unknown> | null,
+  envelope: Record<string, unknown>,
+): MediaInfo {
+  const image = nestedRecord(msg, 'imageMessage')
+  const audio = nestedRecord(msg, 'audioMessage')
+  const document = nestedRecord(msg, 'documentMessage')
+  const video = nestedRecord(msg, 'videoMessage')
+  const mediaNode = image ?? audio ?? document ?? video
+
+  const rawBase64 = firstString(
+    envelope.base64,
+    envelope.media,
+    msg?.base64,
+    mediaNode?.base64,
+  )
+
+  const mimeType =
+    firstString(mediaNode?.mimetype, mediaNode?.mimeType, envelope.mimetype) ??
+    (image
+      ? 'image/jpeg'
+      : audio
+        ? 'audio/ogg'
+        : video
+          ? 'video/mp4'
+          : 'application/octet-stream')
+
+  const fileName = firstString(
+    mediaNode?.fileName,
+    mediaNode?.filename,
+    mediaNode?.title,
+    envelope.fileName,
+    envelope.filename,
+  )
+
+  return {
+    base64: rawBase64 ? stripBase64Prefix(rawBase64) : null,
+    mimeType,
+    extension: extensionFromFileName(fileName) ?? extensionFromMimeType(mimeType),
+    fileName,
+  }
+}
+
+function decodeBase64(base64: string): Uint8Array {
+  const normalized = base64.replace(/\s/g, '')
+  const binary = atob(normalized)
+  const bytes = new Uint8Array(binary.length)
+  for (let i = 0; i < binary.length; i += 1) {
+    bytes[i] = binary.charCodeAt(i)
+  }
+  return bytes
+}
+
+function safePathPart(value: string): string {
+  return value.replace(/[^a-zA-Z0-9._-]/g, '_')
+}
+
+async function uploadMedia(
+  supabase: SupabaseClient,
+  params: {
+    userId: string
+    leadId: string
+    msgId: string
+    media: MediaInfo
+  },
+): Promise<{ url: string | null; error: string | null }> {
+  if (!params.media.base64) return { url: null, error: null }
+
+  try {
+    const bytes = decodeBase64(params.media.base64)
+    const path = [
+      safePathPart(params.userId),
+      safePathPart(params.leadId),
+      `${safePathPart(params.msgId)}.${params.media.extension}`,
+    ].join('/')
+
+    const { error } = await supabase.storage
+      .from(MEDIA_BUCKET)
+      .upload(path, bytes, {
+        contentType: params.media.mimeType,
+        upsert: true,
+      })
+
+    if (error) return { url: null, error: error.message }
+
+    const { data } = supabase.storage.from(MEDIA_BUCKET).getPublicUrl(path)
+    return { url: data.publicUrl, error: null }
+  } catch (e) {
+    const message = e instanceof Error ? e.message : String(e)
+    return { url: null, error: message }
+  }
+}
+
+function normalizeKey(
+  key: unknown,
+): { remoteJid: string; id: string; fromMe: boolean } | null {
+  const o = asRecord(key)
+  if (!o) return null
+  const remoteJid = stringValue(o.remoteJid) ?? ''
+  const id = stringValue(o.id) ?? ''
   const fromMe = o.fromMe === true
   if (!remoteJid || !id) return null
   return { remoteJid, id, fromMe }
@@ -123,30 +314,47 @@ function normalizeKey(key: unknown): { remoteJid: string; id: string; fromMe: bo
 
 function collectUpsertItems(data: unknown): UpsertItem[] {
   if (data == null) return []
-  if (Array.isArray(data)) return data.flatMap((d) => (d && typeof d === 'object' ? collectUpsertItems(d) : []))
-  if (typeof data === 'object') {
-    const o = data as Record<string, unknown>
-    if (o.messages && Array.isArray(o.messages)) return collectUpsertItems(o.messages)
-    const k = normalizeKey(o.key)
-    if (k && o.message) {
-      const pushName = typeof o.pushName === 'string' && o.pushName.trim() ? o.pushName.trim() : null
-      return [{ fromMe: k.fromMe, remoteJid: k.remoteJid, msgId: k.id, message: o.message as Record<string, unknown>, pushName }]
-    }
+
+  if (Array.isArray(data)) {
+    return data.flatMap((d) => collectUpsertItems(d))
   }
+
+  const o = asRecord(data)
+  if (!o) return []
+
+  if (Array.isArray(o.messages)) {
+    return collectUpsertItems(o.messages)
+  }
+
+  const k = normalizeKey(o.key)
+  const message = asRecord(o.message)
+  if (k && message) {
+    return [
+      {
+        fromMe: k.fromMe,
+        remoteJid: k.remoteJid,
+        msgId: k.id,
+        message,
+        envelope: o,
+        pushName: stringValue(o.pushName),
+      },
+    ]
+  }
+
   return []
 }
 
-type LeadRow = { id: string; phone: string | null; name: string | null }
-type LeadIndex = { byFull: Map<string, string>; byTail: Map<string, string>; rows: LeadRow[] }
-
 function buildLeadIndex(rows: LeadRow[]): LeadIndex {
-  const byFull = new Map<string, string>(), byTail = new Map<string, string>()
+  const byFull = new Map<string, string>()
+  const byTail = new Map<string, string>()
+
   for (const r of rows) {
     const full = toEvolutionDigits(r.phone ?? null)
     if (full && !byFull.has(full)) byFull.set(full, r.id)
     const tail = nationalTail(full ?? r.phone ?? null)
     if (tail && !byTail.has(tail)) byTail.set(tail, r.id)
   }
+
   return { byFull, byTail, rows }
 }
 
@@ -154,15 +362,38 @@ function findLeadId(idx: LeadIndex, fullDigits: string): string | null {
   const hitFull = idx.byFull.get(fullDigits)
   if (hitFull) return hitFull
   const tail = nationalTail(fullDigits)
-  if (tail) { const hitTail = idx.byTail.get(tail); if (hitTail) return hitTail }
+  if (tail) {
+    const hitTail = idx.byTail.get(tail)
+    if (hitTail) return hitTail
+  }
   return null
 }
 
-async function ensureLeadId(supabase: SupabaseClient, userId: string, idx: LeadIndex, fullDigits: string, pushName: string | null): Promise<{ id: string | null; created: boolean; error: string | null }> {
+async function ensureLeadId(
+  supabase: SupabaseClient,
+  userId: string,
+  idx: LeadIndex,
+  fullDigits: string,
+  pushName: string | null,
+): Promise<{ id: string | null; created: boolean; error: string | null }> {
   const existing = findLeadId(idx, fullDigits)
   if (existing) return { id: existing, created: false, error: null }
-  const displayName = (pushName && pushName.slice(0, 80)) || `Novo Lead ${prettifyPhone(fullDigits)}`
-  const { data, error } = await supabase.from('leads').insert({ user_id: userId, name: displayName, phone: fullDigits, status: 'novo' }).select('id, phone, name').single()
+
+  const displayName =
+    (pushName && pushName.slice(0, 80)) ||
+    `Novo Lead ${prettifyPhone(fullDigits)}`
+
+  const { data, error } = await supabase
+    .from('leads')
+    .insert({
+      user_id: userId,
+      name: displayName,
+      phone: fullDigits,
+      status: 'novo',
+    })
+    .select('id, phone, name')
+    .single()
+
   if (!error && data) {
     const row = data as LeadRow
     idx.rows.push(row)
@@ -171,7 +402,12 @@ async function ensureLeadId(supabase: SupabaseClient, userId: string, idx: LeadI
     if (tail) idx.byTail.set(tail, row.id)
     return { id: row.id, created: true, error: null }
   }
-  const retry = await supabase.from('leads').select('id, phone, name').eq('user_id', userId)
+
+  const retry = await supabase
+    .from('leads')
+    .select('id, phone, name')
+    .eq('user_id', userId)
+
   if (!retry.error && Array.isArray(retry.data)) {
     const refreshed = buildLeadIndex(retry.data as LeadRow[])
     idx.byFull = refreshed.byFull
@@ -180,111 +416,167 @@ async function ensureLeadId(supabase: SupabaseClient, userId: string, idx: LeadI
     const again = findLeadId(idx, fullDigits)
     if (again) return { id: again, created: false, error: null }
   }
+
   return { id: null, created: false, error: error?.message ?? 'insert lead falhou' }
 }
 
-// --- Handler Principal ---
 serve(async (req) => {
-  if (req.method === 'OPTIONS') return new Response('ok', { headers: corsHeaders })
-  
-  try {
-    let body: unknown
-    try { body = await req.json() } catch { return new Response(JSON.stringify({ error: 'Invalid JSON' }), { status: 400, headers: { 'Content-Type': 'application/json', ...corsHeaders } }) }
-
-    const b = (body as Record<string, unknown>) || {}
-    const event = (typeof b.event === 'string' && b.event) || ''
-    const instance = (typeof b.instance === 'string' && b.instance) || ''
-
-    const normalizedEvent = event.toLowerCase().replace('_', '.')
-    if (normalizedEvent && normalizedEvent !== 'messages.upsert') {
-      return new Response(JSON.stringify({ ok: true, ignored: true, event }), { status: 200, headers: { 'Content-Type': 'application/json', ...corsHeaders } })
-    }
-
-    const userId = userIdFromZapificaInstance(instance)
-    if (!userId) {
-      return new Response(JSON.stringify({ ok: false, error: 'Instance não segue a convenção zapifica_<user_uuid>.', instance }), { status: 200, headers: { 'Content-Type': 'application/json', ...corsHeaders } })
-    }
-
-    const items = collectUpsertItems(b.data ?? b)
-    if (items.length === 0) return new Response(JSON.stringify({ ok: true, message: 'Sem itens messages.upsert' }), { status: 200, headers: { 'Content-Type': 'application/json', ...corsHeaders } })
-
-    const supabaseUrl = Deno.env.get('SUPABASE_URL') ?? ''
-    const serviceKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? ''
-    const supabase = createClient(supabaseUrl, serviceKey, { auth: { persistSession: false, autoRefreshToken: false } })
-
-    const { data: allLeads, error: leErr } = await supabase.from('leads').select('id, phone, name').eq('user_id', userId)
-    if (leErr) throw leErr
-
-    const index = buildLeadIndex((allLeads ?? []) as LeadRow[])
-    let saved = 0, createdLeads = 0
-    const skipped: string[] = [], errors: string[] = []
-
-    for (const item of items) {
-      try {
-        if (item.remoteJid.includes('@g.us')) { skipped.push(`group:${item.msgId}`); continue; }
-        if (item.fromMe) { skipped.push(`fromMe:${item.msgId}`); continue; }
-        if (!item.msgId) { skipped.push('noMsgId'); continue; }
-
-        const phoneDigits = toEvolutionDigits(item.remoteJid)
-        if (!phoneDigits || phoneDigits.includes('@')) { skipped.push(`badJid:${item.remoteJid}`); continue; }
-
-        const ensured = await ensureLeadId(supabase, userId, index, phoneDigits, item.pushName)
-        if (!ensured.id) { errors.push(`lead:${phoneDigits}:${ensured.error ?? 'sem id'}`); continue; }
-        if (ensured.created) createdLeads++
-
-        const { body: text, content: contentType } = extractTextAndType(item.message)
-        
-        // --- Processamento de Mídia ---
-        const mediaInfo = extractMediaInfo(item.message);
-        let finalMediaUrl = null;
-
-        if (mediaInfo.base64) {
-          try {
-            const fileBuffer = decodeBase64(mediaInfo.base64);
-            const fileName = `${item.msgId}.${mediaInfo.extension}`;
-            
-            // Faz o upload para a gaveta do Supabase
-            const { error: uploadErr } = await supabase.storage.from('chat_media').upload(fileName, fileBuffer, {
-              contentType: mediaInfo.mimeType,
-              upsert: true
-            });
-
-            if (!uploadErr) {
-              const { data: publicUrlData } = supabase.storage.from('chat_media').getPublicUrl(fileName);
-              finalMediaUrl = publicUrlData.publicUrl;
-            }
-          } catch (e) {
-            console.error("Erro ao converter ou subir mídia:", e);
-          }
-        }
-
-        // --- Salva a mensagem no banco (agora com media_url) ---
-        const { error: insErr } = await supabase.from('chat_messages').insert({
-          lead_id: ensured.id, 
-          sender_type: 'cliente', 
-          content_type: contentType, 
-          message_body: text, 
-          evolution_message_id: item.msgId,
-          media_url: finalMediaUrl // <-- A mágica entra aqui!
-        })
-
-        if (insErr) {
-          if (insErr.code === '23505') { skipped.push(`dup:${item.msgId}`); continue; }
-          errors.push(`msg:${item.msgId}:${insErr.message}`)
-          continue
-        }
-        saved++
-      } catch (itemError: any) {
-        errors.push(`msgError:${item.msgId}:${itemError.message}`)
-      }
-    }
-
-    const resultadoFinal = { ok: errors.length === 0, saved, createdLeads, skipped, errors, count: items.length };
-    console.log("📊 RESULTADO DA OPERAÇÃO:", JSON.stringify(resultadoFinal));
-
-    return new Response(JSON.stringify(resultadoFinal), { status: resultadoFinal.ok ? 200 : 500, headers: { 'Content-Type': 'application/json', ...corsHeaders } })
-
-  } catch (globalError: any) {
-    return new Response(JSON.stringify({ error: 'Erro interno', details: globalError.message }), { status: 500, headers: { 'Content-Type': 'application/json', ...corsHeaders } })
+  if (req.method === 'OPTIONS') {
+    return new Response('ok', { headers: corsHeaders })
   }
+
+  if (req.method !== 'POST') {
+    return jsonResponse({ error: 'Method not allowed' }, 405)
+  }
+
+  const secret = Deno.env.get('EVOLUTION_WEBHOOK_SECRET')?.trim() ?? ''
+  if (secret) {
+    const h = req.headers.get('x-webhook-secret')?.trim() ?? ''
+    const auth = req.headers.get('authorization')?.trim() ?? ''
+    const bearer = auth.toLowerCase().startsWith('bearer ')
+      ? auth.slice(7)
+      : ''
+    if (h !== secret && bearer !== secret) {
+      return jsonResponse({ error: 'Unauthorized' }, 401)
+    }
+  }
+
+  let body: unknown
+  try {
+    body = await req.json()
+  } catch {
+    return jsonResponse({ error: 'Invalid JSON' }, 400)
+  }
+
+  const b = asRecord(body) ?? {}
+  const event = stringValue(b.event) ?? ''
+  const instance = stringValue(b.instance) ?? ''
+
+  const normalizedEvent = event.toLowerCase().replace('_', '.')
+  if (normalizedEvent && normalizedEvent !== 'messages.upsert') {
+    return jsonResponse({ ok: true, ignored: true, event })
+  }
+
+  const userId = userIdFromZapificaInstance(instance)
+  if (!userId) {
+    return jsonResponse({
+      ok: false,
+      error:
+        'Instance não segue a convenção zapifica_<user_uuid>. Ajuste o nome da instância na Evolution.',
+      instance,
+    })
+  }
+
+  const items = collectUpsertItems(b.data ?? b)
+  if (items.length === 0) {
+    return jsonResponse({ ok: true, message: 'Nenhum item messages.upsert no payload' })
+  }
+
+  const supabaseUrl = Deno.env.get('SUPABASE_URL') ?? ''
+  const serviceKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? ''
+  if (!supabaseUrl || !serviceKey) {
+    return jsonResponse({ error: 'Server misconfigured' }, 500)
+  }
+
+  const supabase = createClient(supabaseUrl, serviceKey, {
+    auth: { persistSession: false, autoRefreshToken: false },
+  })
+
+  const { data: allLeads, error: leErr } = await supabase
+    .from('leads')
+    .select('id, phone, name')
+    .eq('user_id', userId)
+
+  if (leErr) {
+    return jsonResponse({ error: leErr.message }, 500)
+  }
+
+  const index = buildLeadIndex((allLeads ?? []) as LeadRow[])
+
+  let saved = 0
+  let createdLeads = 0
+  const skipped: string[] = []
+  const errors: string[] = []
+
+  for (const item of items) {
+    if (item.remoteJid.includes('@g.us')) {
+      skipped.push(`group:${item.msgId}`)
+      continue
+    }
+
+    if (item.fromMe) {
+      skipped.push(`fromMe:${item.msgId}`)
+      continue
+    }
+
+    if (!item.msgId) {
+      skipped.push('noMsgId')
+      continue
+    }
+
+    const phoneDigits = toEvolutionDigits(item.remoteJid)
+    if (!phoneDigits || phoneDigits.includes('@')) {
+      skipped.push(`badJid:${item.remoteJid}`)
+      continue
+    }
+
+    const ensured = await ensureLeadId(
+      supabase,
+      userId,
+      index,
+      phoneDigits,
+      item.pushName,
+    )
+    if (!ensured.id) {
+      errors.push(`lead:${phoneDigits}:${ensured.error ?? 'sem id'}`)
+      continue
+    }
+    if (ensured.created) createdLeads += 1
+
+    const { body: text, content: contentType } = extractTextAndType(item.message)
+    const media = extractMediaInfo(item.message, item.envelope)
+    const upload = await uploadMedia(supabase, {
+      userId,
+      leadId: ensured.id,
+      msgId: item.msgId,
+      media,
+    })
+
+    if (upload.error) {
+      errors.push(`media:${item.msgId}:${upload.error}`)
+      continue
+    }
+
+    const { error: insErr } = await supabase.from('chat_messages').insert({
+      lead_id: ensured.id,
+      sender_type: 'cliente',
+      content_type: contentType,
+      message_body: text,
+      evolution_message_id: item.msgId,
+      media_url: upload.url,
+    })
+
+    if (insErr) {
+      if (insErr.code === '23505') {
+        skipped.push(`dup:${item.msgId}`)
+        continue
+      }
+      errors.push(`msg:${item.msgId}:${insErr.message}`)
+      continue
+    }
+    saved += 1
+  }
+
+  const ok = errors.length === 0
+  return jsonResponse(
+    {
+      ok,
+      saved,
+      createdLeads,
+      skipped,
+      errors,
+      count: items.length,
+    },
+    ok ? 200 : 500,
+  )
 })
