@@ -1,5 +1,5 @@
-import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react'
-import { FileText, Loader2, MessageSquare, Paperclip, Send, TriangleAlert, X } from 'lucide-react'
+import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from 'react'
+import { FileText, Loader2, MessageSquare, Mic, Paperclip, Send, TriangleAlert, X } from 'lucide-react'
 import { supabase } from '../../lib/supabase'
 import { sendMediaMessage, sendTextMessage, type EvolutionMediaType } from '../../services/evolution'
 import type { Lead } from './CrmKanbanBoard'
@@ -199,6 +199,18 @@ export function ChatWindow({ open, onClose, lead }: ChatWindowProps) {
   >({})
   const listRef = useRef<HTMLDivElement | null>(null)
   const fileInputRef = useRef<HTMLInputElement | null>(null)
+  const recorderRef = useRef<MediaRecorder | null>(null)
+  const recorderChunksRef = useRef<BlobPart[]>([])
+  const recorderStreamRef = useRef<MediaStream | null>(null)
+  const [recording, setRecording] = useState(false)
+  const [recordSeconds, setRecordSeconds] = useState(0)
+  const recordTimerRef = useRef<number | null>(null)
+
+  const recordTimeLabel = useMemo(() => {
+    const mm = String(Math.floor(recordSeconds / 60)).padStart(2, '0')
+    const ss = String(recordSeconds % 60).padStart(2, '0')
+    return `${mm}:${ss}`
+  }, [recordSeconds])
 
   const scrollToEnd = useCallback(() => {
     const el = listRef.current
@@ -272,6 +284,26 @@ export function ChatWindow({ open, onClose, lead }: ChatWindowProps) {
     if (messages.length) scrollToEnd()
   }, [messages.length, scrollToEnd, open])
 
+  useEffect(() => {
+    return () => {
+      if (recordTimerRef.current) {
+        window.clearInterval(recordTimerRef.current)
+        recordTimerRef.current = null
+      }
+      if (recorderRef.current && recorderRef.current.state !== 'inactive') {
+        try {
+          recorderRef.current.stop()
+        } catch {
+          // ignore
+        }
+      }
+      if (recorderStreamRef.current) {
+        recorderStreamRef.current.getTracks().forEach((t) => t.stop())
+        recorderStreamRef.current = null
+      }
+    }
+  }, [])
+
   async function handleSend(e: FormEvent) {
     e.preventDefault()
     if (!lead) return
@@ -334,7 +366,13 @@ export function ChatWindow({ open, onClose, lead }: ChatWindowProps) {
     return dataUrl
   }
 
-  async function handlePickFile(file: File) {
+  async function sendFileAsMedia(params: {
+    file: File
+    caption: string
+    forceType?: EvolutionMediaType
+    forceContentType?: ChatMessageRow['content_type']
+    ptt?: boolean
+  }) {
     if (!lead) return
     setSendError(null)
 
@@ -346,16 +384,24 @@ export function ChatWindow({ open, onClose, lead }: ChatWindowProps) {
       return
     }
 
-    const { evolution, contentType } = mapFileToMediaType(file)
+    const { evolution, contentType } = params.forceType
+      ? {
+          evolution: params.forceType,
+          contentType: params.forceContentType ?? 'document',
+        }
+      : mapFileToMediaType(params.file)
 
     // 1) Upload no bucket público (para já aparecer no CRM instantaneamente)
-    const safeName = file.name.replace(/[^a-zA-Z0-9._-]/g, '_')
+    const safeName = params.file.name.replace(/[^a-zA-Z0-9._-]/g, '_')
     const msgId = crypto.randomUUID()
     const path = `${user.id}/${lead.id}/${msgId}_${safeName}`
 
     const { error: upErr } = await supabase.storage
       .from('chat_media')
-      .upload(path, file, { upsert: true, contentType: file.type || undefined })
+      .upload(path, params.file, {
+        upsert: true,
+        contentType: params.file.type || undefined,
+      })
     if (upErr) {
       setSendError(`Falha ao subir arquivo no Storage: ${upErr.message}`)
       return
@@ -364,20 +410,18 @@ export function ChatWindow({ open, onClose, lead }: ChatWindowProps) {
     const { data: pub } = supabase.storage.from('chat_media').getPublicUrl(path)
     const publicUrl = pub.publicUrl
 
-    // 2) Grava no banco imediatamente (optimistic persist)
-    const caption = draft.trim()
-    setDraft('')
-
-    // 2.5) Base64 para o disparo na Evolution (algumas versões falham com URL)
+    // 2) Base64 para o disparo na Evolution
     let base64Pure: string
     try {
-      base64Pure = await fileToBase64Pure(file)
+      base64Pure = await fileToBase64Pure(params.file)
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e)
       setSendError(`Falha ao converter arquivo para Base64: ${msg}`)
       return
     }
 
+    // 3) Grava no banco imediatamente (optimistic persist)
+    const caption = params.caption.trim()
     const { data: inserted, error: insErr } = await supabase
       .from('chat_messages')
       .insert({
@@ -392,7 +436,7 @@ export function ChatWindow({ open, onClose, lead }: ChatWindowProps) {
               ? '[áudio]'
               : evolution === 'video'
                 ? '[vídeo]'
-                : file.name),
+                : params.file.name),
         media_url: publicUrl,
         evolution_message_id: null,
       })
@@ -400,20 +444,23 @@ export function ChatWindow({ open, onClose, lead }: ChatWindowProps) {
       .single()
 
     if (insErr || !inserted?.id) {
-      setSendError(`Falha ao salvar mensagem no banco: ${insErr?.message ?? 'sem id'}`)
+      setSendError(
+        `Falha ao salvar mensagem no banco: ${insErr?.message ?? 'sem id'}`,
+      )
       return
     }
 
     const rowId = inserted.id as string
     setPendingMedia((prev) => ({ ...prev, [rowId]: 'sending' }))
 
-    // 3) Dispara envio na Evolution usando BASE64 puro + legenda (caption)
+    // 4) Envia na Evolution (Base64 + legenda)
     const evo = await sendMediaMessage(user.id, lead.phone, {
       media: base64Pure,
       mediaType: evolution,
-      mimeType: file.type || 'application/octet-stream',
-      fileName: file.name || safeName,
+      mimeType: params.file.type || 'application/octet-stream',
+      fileName: params.file.name || safeName,
       caption,
+      ptt: params.ptt,
     })
 
     if (!evo.ok) {
@@ -422,7 +469,6 @@ export function ChatWindow({ open, onClose, lead }: ChatWindowProps) {
       return
     }
 
-    // 4) Marca como enviada (salva o messageId da Evolution)
     await supabase
       .from('chat_messages')
       .update({ evolution_message_id: evo.messageId })
@@ -432,6 +478,120 @@ export function ChatWindow({ open, onClose, lead }: ChatWindowProps) {
       const next = { ...prev }
       delete next[rowId]
       return next
+    })
+  }
+
+  async function handlePickFile(file: File) {
+    const caption = draft.trim()
+    setDraft('')
+    await sendFileAsMedia({ file, caption })
+  }
+
+  async function startRecording() {
+    if (recording) return
+    setSendError(null)
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
+      recorderStreamRef.current = stream
+      recorderChunksRef.current = []
+
+      const mimeCandidates = [
+        'audio/ogg;codecs=opus',
+        'audio/webm;codecs=opus',
+        'audio/webm',
+      ]
+      const mimeType = mimeCandidates.find((m) => MediaRecorder.isTypeSupported(m)) || ''
+      const recorder = new MediaRecorder(stream, mimeType ? { mimeType } : undefined)
+      recorderRef.current = recorder
+
+      recorder.ondataavailable = (evt) => {
+        if (evt.data && evt.data.size > 0) {
+          recorderChunksRef.current.push(evt.data)
+        }
+      }
+
+      recorder.onstop = () => {
+        // stream é encerrado por cancel/confirm
+      }
+
+      setRecordSeconds(0)
+      if (recordTimerRef.current) window.clearInterval(recordTimerRef.current)
+      recordTimerRef.current = window.setInterval(() => {
+        setRecordSeconds((s) => s + 1)
+      }, 1000)
+
+      recorder.start()
+      setRecording(true)
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e)
+      setSendError(`Não foi possível acessar o microfone: ${msg}`)
+      setRecording(false)
+    }
+  }
+
+  function cancelRecording() {
+    if (recordTimerRef.current) {
+      window.clearInterval(recordTimerRef.current)
+      recordTimerRef.current = null
+    }
+    setRecording(false)
+    setRecordSeconds(0)
+
+    const rec = recorderRef.current
+    recorderRef.current = null
+    try {
+      if (rec && rec.state !== 'inactive') rec.stop()
+    } catch {
+      // ignore
+    }
+    recorderChunksRef.current = []
+
+    if (recorderStreamRef.current) {
+      recorderStreamRef.current.getTracks().forEach((t) => t.stop())
+      recorderStreamRef.current = null
+    }
+  }
+
+  async function confirmRecording() {
+    if (!recording) return
+    const rec = recorderRef.current
+    if (!rec) return
+
+    // Para garantir que o último chunk entrou.
+    await new Promise<void>((resolve) => {
+      const done = () => resolve()
+      rec.addEventListener('stop', done, { once: true })
+      try {
+        rec.stop()
+      } catch {
+        resolve()
+      }
+    })
+
+    if (recordTimerRef.current) {
+      window.clearInterval(recordTimerRef.current)
+      recordTimerRef.current = null
+    }
+    setRecording(false)
+
+    if (recorderStreamRef.current) {
+      recorderStreamRef.current.getTracks().forEach((t) => t.stop())
+      recorderStreamRef.current = null
+    }
+
+    const blob = new Blob(recorderChunksRef.current, { type: rec.mimeType || 'audio/webm' })
+    recorderChunksRef.current = []
+    recorderRef.current = null
+
+    const ext = blob.type.includes('ogg') ? 'ogg' : 'webm'
+    const voiceFile = new File([blob], `voz_${Date.now()}.${ext}`, { type: blob.type || 'audio/webm' })
+
+    await sendFileAsMedia({
+      file: voiceFile,
+      caption: '',
+      forceType: 'audio',
+      forceContentType: 'audio',
+      ptt: true,
     })
   }
 
@@ -549,7 +709,40 @@ export function ChatWindow({ open, onClose, lead }: ChatWindowProps) {
               {sendError}
             </p>
           ) : null}
-          <form onSubmit={handleSend} className="flex items-end gap-2">
+          {recording ? (
+            <div className="flex items-center gap-2">
+              <div className="flex flex-1 items-center justify-between rounded-xl border border-rose-200 bg-rose-50 px-3 py-2.5">
+                <div className="flex items-center gap-2">
+                  <span className="h-2.5 w-2.5 rounded-full bg-rose-500" />
+                  <span className="text-sm font-semibold text-rose-900">
+                    Gravando…
+                  </span>
+                </div>
+                <span className="font-mono text-sm text-rose-900">
+                  {recordTimeLabel}
+                </span>
+              </div>
+              <button
+                type="button"
+                onClick={cancelRecording}
+                className="inline-flex h-11 w-11 shrink-0 items-center justify-center rounded-xl border border-zinc-200 bg-white text-zinc-700 shadow-sm transition hover:bg-zinc-50"
+                aria-label="Cancelar gravação"
+                title="Cancelar"
+              >
+                <X className="h-4 w-4" />
+              </button>
+              <button
+                type="button"
+                onClick={() => void confirmRecording()}
+                className="inline-flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-gradient-to-r from-brand-600 to-brand-700 text-white shadow-md transition hover:from-brand-500 hover:to-brand-600"
+                aria-label="Enviar áudio"
+                title="Enviar"
+              >
+                <Send className="h-4 w-4" />
+              </button>
+            </div>
+          ) : (
+            <form onSubmit={handleSend} className="flex items-end gap-2">
             <label htmlFor="inbox-compose" className="sr-only">
               Nova mensagem
             </label>
@@ -574,6 +767,16 @@ export function ChatWindow({ open, onClose, lead }: ChatWindowProps) {
             >
               <Paperclip className="h-4 w-4" />
             </button>
+            <button
+              type="button"
+              onClick={() => void startRecording()}
+              disabled={!lead || sending}
+              className="inline-flex h-11 w-11 shrink-0 items-center justify-center rounded-xl border border-zinc-200 bg-white text-zinc-700 shadow-sm transition hover:border-brand-300 hover:bg-brand-50 hover:text-brand-700 disabled:cursor-not-allowed disabled:opacity-50"
+              aria-label="Gravar áudio"
+              title="Gravar áudio"
+            >
+              <Mic className="h-4 w-4" />
+            </button>
             <textarea
               id="inbox-compose"
               value={draft}
@@ -597,7 +800,8 @@ export function ChatWindow({ open, onClose, lead }: ChatWindowProps) {
             >
               <Send className="h-4 w-4" />
             </button>
-          </form>
+            </form>
+          )}
         </footer>
       </aside>
     </>

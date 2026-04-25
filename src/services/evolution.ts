@@ -1041,6 +1041,8 @@ export type SendMediaParams = {
   fileName: string
   /** legenda opcional (para image/video/document). */
   caption?: string
+  /** Força áudio como Push-to-Talk/nota de voz quando suportado pelo motor. */
+  ptt?: boolean
 }
 
 /**
@@ -1076,6 +1078,9 @@ export async function sendMediaMessageWithConfig(
   }
   const captionTrim = params.caption?.trim()
   const caption = captionTrim ? captionTrim : undefined
+  const mimeType = params.mimeType.trim() || 'application/octet-stream'
+  const fileName = params.fileName.trim() || 'arquivo'
+  const ptt = params.ptt === true || params.mediaType === 'audio'
 
   const instanceName = instanceNameFromUserId(userId)
 
@@ -1092,6 +1097,14 @@ export async function sendMediaMessageWithConfig(
         number: normalized.recipient,
         mediatype: params.mediaType,
         media: trimmedMedia,
+        // Documentos geralmente exigem mimetype + fileName (senão dá 400).
+        ...(params.mediaType === 'document'
+          ? { mimetype: mimeType, fileName }
+          : {}),
+        // Áudio como PTT: alguns motores exigem `ptt: true` para virar nota de voz.
+        ...(params.mediaType === 'audio' ? { mimetype: mimeType, fileName, ptt } : {}),
+        // Flags defensivas para algumas builds:
+        ...(params.mediaType === 'audio' ? { alwaysOnline: true } : {}),
         ...(caption ? { caption } : {}),
       }),
     })
