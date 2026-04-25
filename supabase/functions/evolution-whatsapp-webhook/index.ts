@@ -41,6 +41,118 @@ type UpsertItem = {
 }
 
 type LeadRow = { id: string; phone: string | null; name: string | null }
+type LeadAiRow = { id: string; ai_enabled: boolean | null }
+
+type DeepSeekChatCompletion = {
+  choices?: Array<{
+    message?: { content?: string | null }
+  }>
+}
+
+async function callDeepSeek(params: {
+  apiKey: string
+  userText: string
+}): Promise<{ ok: boolean; text: string | null; error: string | null }> {
+  const key = params.apiKey.trim()
+  if (!key) {
+    return { ok: false, text: null, error: 'DEEPSEEK_API_KEY não configurada.' }
+  }
+
+  try {
+    const res = await fetch('https://api.deepseek.com/chat/completions', {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${key}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        model: 'deepseek-chat',
+        messages: [
+          {
+            role: 'system',
+            content:
+              'Você é o assistente virtual da agência de marketing Floripa Web. Seja direto, gentil, persuasivo e use respostas curtas em português do Brasil. Tente entender a necessidade do cliente.',
+          },
+          { role: 'user', content: params.userText },
+        ],
+      }),
+    })
+
+    const raw = await res.text()
+    let data: DeepSeekChatCompletion | null = null
+    try {
+      data = raw ? (JSON.parse(raw) as DeepSeekChatCompletion) : null
+    } catch {
+      data = null
+    }
+
+    if (!res.ok) {
+      return {
+        ok: false,
+        text: null,
+        error: `DeepSeek ${res.status}: ${raw.slice(0, 400) || res.statusText}`,
+      }
+    }
+
+    const text =
+      data?.choices?.[0]?.message?.content?.trim() ??
+      null
+
+    if (!text) {
+      return { ok: false, text: null, error: 'DeepSeek respondeu sem conteúdo.' }
+    }
+
+    return { ok: true, text, error: null }
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e)
+    return { ok: false, text: null, error: msg || 'Falha ao chamar DeepSeek.' }
+  }
+}
+
+async function sendEvolutionText(params: {
+  baseUrl: string
+  apiKey: string
+  instanceName: string
+  toDigits: string
+  text: string
+}): Promise<{ ok: boolean; messageId: string | null; error: string | null }> {
+  const baseUrl = params.baseUrl.trim()
+  const cleanBaseUrl = baseUrl.endsWith('/') ? baseUrl.slice(0, -1) : baseUrl
+  const url = `${cleanBaseUrl}/message/sendText/${encodeURIComponent(params.instanceName)}`
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: {
+      apikey: params.apiKey,
+      Accept: 'application/json',
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      number: params.toDigits,
+      text: params.text,
+    }),
+  })
+
+  const raw = await res.text()
+  let data: unknown = null
+  if (raw) {
+    try {
+      data = JSON.parse(raw)
+    } catch {
+      data = { raw }
+    }
+  }
+
+  if (!res.ok) {
+    return {
+      ok: false,
+      messageId: null,
+      error: `Evolution ${res.status}: ${raw.slice(0, 400) || res.statusText}`,
+    }
+  }
+
+  const msgId = normalizeKey((data as Record<string, unknown> | null)?.key)?.id ?? null
+  return { ok: true, messageId: msgId, error: null }
+}
 
 type LeadIndex = {
   byFull: Map<string, string>
@@ -525,6 +637,10 @@ serve(async (req) => {
     auth: { persistSession: false, autoRefreshToken: false },
   })
 
+  const deepSeekKey = Deno.env.get('DEEPSEEK_API_KEY')?.trim() ?? ''
+  const evolutionUrl = (Deno.env.get('EVOLUTION_API_URL') ?? '').replace(/\/+$/, '')
+  const evolutionApiKey = Deno.env.get('EVOLUTION_API_KEY')?.trim() ?? ''
+
   const { data: allLeads, error: leErr } = await supabase
     .from('leads')
     .select('id, phone, name')
@@ -639,6 +755,61 @@ serve(async (req) => {
       continue
     }
     saved += 1
+
+    // ───────────────────────────────────────────────────────────────────────
+    // IA (DeepSeek) com handover por lead.ai_enabled
+    // Apenas quando for mensagem do cliente (fromMe:false já filtrado) e TEXTO.
+    // ───────────────────────────────────────────────────────────────────────
+    if (contentType === 'text' && text.trim()) {
+      const { data: leadAi, error: aiErr } = await supabase
+        .from('leads')
+        .select('id, ai_enabled')
+        .eq('id', ensured.id)
+        .eq('user_id', userId)
+        .maybeSingle()
+
+      if (aiErr) {
+        console.error('[IA] Falha ao ler ai_enabled do lead:', aiErr.message)
+      } else {
+        const enabled = (leadAi as LeadAiRow | null)?.ai_enabled !== false
+        if (enabled) {
+          if (!deepSeekKey) {
+            console.warn('[IA] DEEPSEEK_API_KEY ausente; ignorando resposta automática.')
+          } else if (!evolutionUrl || !evolutionApiKey) {
+            console.warn('[IA] EVOLUTION_API_URL/KEY ausentes; não consigo responder.')
+          } else {
+            const ai = await callDeepSeek({ apiKey: deepSeekKey, userText: text })
+            if (!ai.ok || !ai.text) {
+              console.error('[IA] DeepSeek falhou:', ai.error ?? 'sem erro')
+            } else {
+              const evo = await sendEvolutionText({
+                baseUrl: evolutionUrl,
+                apiKey: evolutionApiKey,
+                instanceName: instance,
+                toDigits: phoneDigits,
+                text: ai.text,
+              })
+
+              if (!evo.ok) {
+                console.error('[IA] Falha ao enviar via Evolution:', evo.error ?? 'sem erro')
+              } else {
+                const { error: iaInsErr } = await supabase.from('chat_messages').insert({
+                  lead_id: ensured.id,
+                  sender_type: 'ia',
+                  content_type: 'text',
+                  message_body: ai.text,
+                  evolution_message_id: evo.messageId,
+                  media_url: null,
+                })
+                if (iaInsErr) {
+                  console.error('[IA] Falha ao salvar resposta no chat_messages:', iaInsErr.message)
+                }
+              }
+            }
+          }
+        }
+      }
+    }
   }
 
   const ok = errors.length === 0

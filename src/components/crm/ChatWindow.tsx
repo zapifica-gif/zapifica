@@ -217,6 +217,9 @@ export function ChatWindow({ open, onClose, lead }: ChatWindowProps) {
   const [loadError, setLoadError] = useState<string | null>(null)
   const [sendError, setSendError] = useState<string | null>(null)
   const [draft, setDraft] = useState('')
+  const [aiEnabled, setAiEnabled] = useState<boolean>(true)
+  const [loadingAi, setLoadingAi] = useState(false)
+  const [aiError, setAiError] = useState<string | null>(null)
   const [pendingMedia, setPendingMedia] = useState<
     Record<string, 'sending' | 'failed'>
   >({})
@@ -289,6 +292,41 @@ export function ChatWindow({ open, onClose, lead }: ChatWindowProps) {
     }, 0)
     return () => window.clearTimeout(timer)
   }, [open, lead, fetchInitial])
+
+  useEffect(() => {
+    if (!open || !lead) return
+    setAiError(null)
+    setLoadingAi(true)
+    void (async () => {
+      const { data, error } = await supabase
+        .from('leads')
+        .select('ai_enabled')
+        .eq('id', lead.id)
+        .maybeSingle()
+      if (error) {
+        setAiError('Não foi possível carregar o estado da IA.')
+        setLoadingAi(false)
+        return
+      }
+      const enabled = (data as { ai_enabled?: boolean | null } | null)?.ai_enabled
+      setAiEnabled(enabled !== false)
+      setLoadingAi(false)
+    })()
+  }, [open, lead?.id])
+
+  async function toggleAiEnabled() {
+    if (!lead) return
+    setAiError(null)
+    const next = !aiEnabled
+    setAiEnabled(next)
+    setLoadingAi(true)
+    const { error } = await supabase.from('leads').update({ ai_enabled: next }).eq('id', lead.id)
+    setLoadingAi(false)
+    if (error) {
+      setAiEnabled(!next)
+      setAiError(`Falha ao atualizar IA: ${error.message}`)
+    }
+  }
 
   useEffect(() => {
     if (!open || !lead) return
@@ -861,6 +899,24 @@ export function ChatWindow({ open, onClose, lead }: ChatWindowProps) {
               <CalendarClock className="h-3.5 w-3.5" />
               Conversas Futuras
             </button>
+
+            <button
+              type="button"
+              onClick={() => void toggleAiEnabled()}
+              disabled={!lead || loadingAi}
+              className={`mt-2 inline-flex items-center gap-2 rounded-full px-2.5 py-1 text-[11px] font-semibold transition disabled:cursor-not-allowed disabled:opacity-50 ${
+                aiEnabled
+                  ? 'border border-emerald-200 bg-emerald-50 text-emerald-700 hover:bg-emerald-100'
+                  : 'border border-zinc-200 bg-zinc-100 text-zinc-700 hover:bg-zinc-200'
+              }`}
+              title={aiEnabled ? 'Clique para o humano assumir' : 'Clique para ligar a IA'}
+            >
+              {loadingAi ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : null}
+              {aiEnabled ? '🤖 IA Ligada' : '👤 Humano'}
+            </button>
+            {aiError ? (
+              <p className="mt-1 text-[11px] font-medium text-rose-600">{aiError}</p>
+            ) : null}
           </div>
           <button
             type="button"
