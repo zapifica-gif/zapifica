@@ -95,14 +95,24 @@ export type SetInstanceWebhookResult = {
 /**
  * Registra (ou atualiza) o webhook de uma instância existente na Evolution.
  *
- * Faz uma série de tentativas para sobreviver a versões diferentes do motor:
- *   1. `POST /webhook/set/{instance}`  com payload aninhado em `{ webhook: {...} }`
- *   2. mesmo path com payload achatado (Evolution v2 mais nova)
- *   3. fallback com prefixo `/v1` para deploys antigos
+ * O motor é caprichoso: dependendo da versão, ele aceita o payload aninhado em
+ * `{ webhook: {...} }`, ou achatado, ou em paths diferentes. Para sobreviver a
+ * todas as variações conhecidas, esta função tenta uma combinação cruzada de:
  *
- * Garante explicitamente `enabled: true`, `webhookBase64: true` e o evento
- * `MESSAGES_UPSERT` para nunca perder mídias do CRM. Sempre loga no console
- * do navegador o que cada tentativa devolveu, facilitando diagnóstico.
+ *   • Endpoints (em ordem):
+ *       1. `POST /webhook/set/{instance}`
+ *       2. `POST /v1/webhook/set/{instance}`              (deploys antigos)
+ *       3. `POST /instance/setWebhook/{instance}`         (fork legacy)
+ *       4. `POST /v1/instance/setWebhook/{instance}`
+ *
+ *   • Formatos: payload **aninhado** (`{ webhook: {...} }`) e **achatado**.
+ *
+ * E manda TODAS as variações possíveis de chave de mídia ao mesmo tempo:
+ * `base64`, `webhookBase64`, `base64Mime`, `webhookBase64Mime` — a Evolution
+ * ignora as que não conhece e aciona a que reconhecer.
+ *
+ * Sempre loga no console do navegador o que está sendo enviado e o que cada
+ * tentativa devolveu, facilitando o diagnóstico ao vivo.
  */
 export async function setInstanceWebhook(
   cfg: EvolutionHttpConfig,
@@ -110,19 +120,37 @@ export async function setInstanceWebhook(
   webhookTargetUrl: string,
   events: readonly string[] = EVOLUTION_WEBHOOK_EVENTS,
 ): Promise<SetInstanceWebhookResult> {
+  // Chaves agressivas de mídia: mandamos todas para cobrir qualquer versão.
+  const mediaFlags = {
+    base64: true,
+    webhookBase64: true,
+    base64Mime: true,
+    webhookBase64Mime: true,
+  } as const
+
+  console.log('[Zapifica] Enviando chaves de mídia:', {
+    base64: true,
+    webhookBase64: true,
+    base64Mime: true,
+    webhookBase64Mime: true,
+  })
+
   const flatPayload = {
     enabled: true,
     url: webhookTargetUrl,
     webhookByEvents: false,
-    webhookBase64: true,
+    ...mediaFlags,
     events: [...events],
   }
-  const wrappedPayload = { webhook: flatPayload }
+  const wrappedPayload = { webhook: { ...flatPayload } }
 
   const safeInstance = encodeURIComponent(instanceName)
   const candidatePaths = [
     `/webhook/set/${safeInstance}`,
     `/v1/webhook/set/${safeInstance}`,
+    // Forks/legacies que usam o caminho de instância:
+    `/instance/setWebhook/${safeInstance}`,
+    `/v1/instance/setWebhook/${safeInstance}`,
   ] as const
 
   type Attempt = {
@@ -165,6 +193,7 @@ export async function setInstanceWebhook(
         path: attempt.path,
         payloadShape: attempt.payloadShape,
         webhookUrl: webhookTargetUrl,
+        mediaFlags,
       })
       return {
         ok: true,
@@ -182,7 +211,7 @@ export async function setInstanceWebhook(
       data: res.data,
     }
 
-    // Se a Evolution retornou 401/403 (autenticação) não adianta tentar mais.
+    // 401/403 (autenticação) não vai melhorar mudando path/forma — sai já.
     if (res.status === 401 || res.status === 403) {
       break
     }
@@ -361,12 +390,19 @@ function pickWebhookFields(payload: unknown): EvolutionWebhookSummary | null {
 
   const url = typeof node.url === 'string' ? node.url : null
   const enabled = typeof node.enabled === 'boolean' ? node.enabled : null
-  const base64 =
-    typeof node.webhookBase64 === 'boolean'
-      ? node.webhookBase64
-      : typeof node.base64 === 'boolean'
-        ? (node.base64 as boolean)
-        : null
+  // Considera base64 ATIVO se QUALQUER uma das chaves conhecidas estiver true.
+  const candidateKeys = [
+    'webhookBase64',
+    'base64',
+    'webhookBase64Mime',
+    'base64Mime',
+  ] as const
+  const truthyMatches = candidateKeys.filter(
+    (k) => node[k] === true,
+  ) as string[]
+  const explicitlyFalse = candidateKeys.some((k) => node[k] === false)
+  const base64: boolean | null =
+    truthyMatches.length > 0 ? true : explicitlyFalse ? false : null
   const events = Array.isArray(node.events)
     ? (node.events.filter((e) => typeof e === 'string') as string[])
     : null
@@ -1108,7 +1144,11 @@ export async function createInstanceAndGetQr(
         enabled: true,
         url: webhookTargetUrl,
         webhookByEvents: false,
+        // Manda TODAS as variações conhecidas de chave de mídia.
+        base64: true,
         webhookBase64: true,
+        base64Mime: true,
+        webhookBase64Mime: true,
         events: [...EVOLUTION_WEBHOOK_EVENTS],
       }
     }
