@@ -1,5 +1,17 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from 'react'
-import { FileText, Loader2, MessageSquare, Mic, Paperclip, Send, TriangleAlert, X } from 'lucide-react'
+import {
+  CalendarClock,
+  Clock,
+  FileText,
+  Loader2,
+  MessageSquare,
+  Mic,
+  Paperclip,
+  Send,
+  Trash2,
+  TriangleAlert,
+  X,
+} from 'lucide-react'
 import { supabase } from '../../lib/supabase'
 import { sendMediaMessage, sendTextMessage, type EvolutionMediaType } from '../../services/evolution'
 import type { Lead } from './CrmKanbanBoard'
@@ -12,6 +24,17 @@ export type ChatMessageRow = {
   message_body: string | null
   media_url: string | null
   evolution_message_id: string | null
+  created_at: string
+}
+
+type ScheduledChatMessageRow = {
+  id: string
+  lead_id: string | null
+  content_type: 'text' | 'audio' | 'image' | 'document' | 'video'
+  message_body: string | null
+  media_url: string | null
+  scheduled_at: string | null
+  status: string | null
   created_at: string
 }
 
@@ -205,6 +228,22 @@ export function ChatWindow({ open, onClose, lead }: ChatWindowProps) {
   const [recording, setRecording] = useState(false)
   const [recordSeconds, setRecordSeconds] = useState(0)
   const recordTimerRef = useRef<number | null>(null)
+
+  // ─── Agendador de envio (Agenda Suprema acoplada ao chat) ──────────────────
+  const [scheduleModalOpen, setScheduleModalOpen] = useState(false)
+  const [scheduleDate, setScheduleDate] = useState('')
+  const [scheduleTime, setScheduleTime] = useState('')
+  const [scheduleAttachment, setScheduleAttachment] = useState<File | null>(null)
+  const [submittingSchedule, setSubmittingSchedule] = useState(false)
+  const [scheduleError, setScheduleError] = useState<string | null>(null)
+  const [scheduleToast, setScheduleToast] = useState<string | null>(null)
+  const scheduleAttachmentInputRef = useRef<HTMLInputElement | null>(null)
+
+  const [futureModalOpen, setFutureModalOpen] = useState(false)
+  const [futureMessages, setFutureMessages] = useState<ScheduledChatMessageRow[]>([])
+  const [loadingFuture, setLoadingFuture] = useState(false)
+  const [futureError, setFutureError] = useState<string | null>(null)
+  const [deletingFutureId, setDeletingFutureId] = useState<string | null>(null)
 
   const recordTimeLabel = useMemo(() => {
     const mm = String(Math.floor(recordSeconds / 60)).padStart(2, '0')
@@ -595,6 +634,169 @@ export function ChatWindow({ open, onClose, lead }: ChatWindowProps) {
     })
   }
 
+  // ─── Helpers do Agendador ────────────────────────────────────────────────
+  function abrirModalAgendamento() {
+    setScheduleError(null)
+    // pré-preenche com "amanhã, mesma hora", arredondado para minutos cheios
+    const agora = new Date()
+    const amanha = new Date(agora.getTime() + 24 * 60 * 60 * 1000)
+    const yyyy = amanha.getFullYear()
+    const mm = String(amanha.getMonth() + 1).padStart(2, '0')
+    const dd = String(amanha.getDate()).padStart(2, '0')
+    const hh = String(amanha.getHours()).padStart(2, '0')
+    const mi = String(amanha.getMinutes()).padStart(2, '0')
+    setScheduleDate(`${yyyy}-${mm}-${dd}`)
+    setScheduleTime(`${hh}:${mi}`)
+    setScheduleAttachment(null)
+    setScheduleModalOpen(true)
+  }
+
+  function fecharModalAgendamento() {
+    setScheduleModalOpen(false)
+    setScheduleError(null)
+    setScheduleAttachment(null)
+  }
+
+  function classificarAnexo(file: File): ScheduledChatMessageRow['content_type'] {
+    const t = file.type || ''
+    if (t.startsWith('image/')) return 'image'
+    if (t.startsWith('audio/')) return 'audio'
+    if (t.startsWith('video/')) return 'video'
+    return 'document'
+  }
+
+  async function programarEnvio() {
+    if (!lead) return
+    setScheduleError(null)
+
+    const dataStr = scheduleDate.trim()
+    const horaStr = scheduleTime.trim()
+    if (!dataStr || !horaStr) {
+      setScheduleError('Informe a data e a hora do envio.')
+      return
+    }
+
+    // Junta data + hora no fuso local e converte para UTC ISO (worker compara em UTC)
+    const local = new Date(`${dataStr}T${horaStr}:00`)
+    if (Number.isNaN(local.getTime())) {
+      setScheduleError('Data ou hora inválidas.')
+      return
+    }
+    if (local.getTime() <= Date.now()) {
+      setScheduleError('Escolha uma data/hora no futuro.')
+      return
+    }
+
+    const texto = draft.trim()
+    if (!texto && !scheduleAttachment) {
+      setScheduleError('Escreva uma mensagem ou anexe um arquivo para agendar.')
+      return
+    }
+
+    setSubmittingSchedule(true)
+    try {
+      const {
+        data: { user },
+      } = await supabase.auth.getUser()
+      if (!user) {
+        setScheduleError('Sessão inválida. Entre novamente.')
+        return
+      }
+
+      let mediaUrl: string | null = null
+      let contentType: ScheduledChatMessageRow['content_type'] = 'text'
+
+      if (scheduleAttachment) {
+        contentType = classificarAnexo(scheduleAttachment)
+        const safeName = scheduleAttachment.name.replace(/[^a-zA-Z0-9._-]/g, '_')
+        const path = `${user.id}/${lead.id}/agenda_${crypto.randomUUID()}_${safeName}`
+        const { error: upErr } = await supabase.storage
+          .from('chat_media')
+          .upload(path, scheduleAttachment, {
+            upsert: true,
+            contentType: scheduleAttachment.type || undefined,
+          })
+        if (upErr) {
+          setScheduleError(`Falha ao subir anexo: ${upErr.message}`)
+          return
+        }
+        const { data: pub } = supabase.storage.from('chat_media').getPublicUrl(path)
+        mediaUrl = pub.publicUrl
+      }
+
+      const scheduledAtUtc = local.toISOString()
+      const { error: insErr } = await supabase
+        .from('scheduled_messages')
+        .insert({
+          user_id: user.id,
+          lead_id: lead.id,
+          is_active: true,
+          recipient_type: 'personal',
+          content_type: contentType,
+          message_body: texto || null,
+          media_url: mediaUrl,
+          scheduled_at: scheduledAtUtc,
+          status: 'pending',
+          recipient_phone: lead.phone || null,
+        })
+        .select('id')
+
+      if (insErr) {
+        setScheduleError(`Não foi possível agendar: ${insErr.message}`)
+        return
+      }
+
+      setDraft('')
+      setScheduleAttachment(null)
+      setScheduleModalOpen(false)
+      setScheduleToast('Mensagem agendada!')
+      window.setTimeout(() => setScheduleToast(null), 2800)
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e)
+      setScheduleError(`Erro inesperado ao agendar: ${msg}`)
+    } finally {
+      setSubmittingSchedule(false)
+    }
+  }
+
+  // ─── Histórico "Conversas Futuras" ───────────────────────────────────────
+  const fetchFutureMessages = useCallback(async (leadId: string) => {
+    setLoadingFuture(true)
+    setFutureError(null)
+    const { data, error } = await supabase
+      .from('scheduled_messages')
+      .select(
+        'id, lead_id, content_type, message_body, media_url, scheduled_at, status, created_at',
+      )
+      .eq('lead_id', leadId)
+      .order('scheduled_at', { ascending: true })
+      .limit(200)
+    if (error) {
+      setFutureError('Não foi possível carregar as conversas futuras.')
+      setLoadingFuture(false)
+      return
+    }
+    setFutureMessages((data ?? []) as ScheduledChatMessageRow[])
+    setLoadingFuture(false)
+  }, [])
+
+  function abrirConversasFuturas() {
+    if (!lead) return
+    setFutureModalOpen(true)
+    void fetchFutureMessages(lead.id)
+  }
+
+  async function excluirAgendamento(id: string) {
+    setDeletingFutureId(id)
+    const { error } = await supabase.from('scheduled_messages').delete().eq('id', id)
+    setDeletingFutureId(null)
+    if (error) {
+      setFutureError(`Falha ao excluir: ${error.message}`)
+      return
+    }
+    setFutureMessages((prev) => prev.filter((m) => m.id !== id))
+  }
+
   if (!open) return null
 
   return (
@@ -624,6 +826,16 @@ export function ChatWindow({ open, onClose, lead }: ChatWindowProps) {
             <p className="mt-0.5 truncate text-xs text-zinc-500 tabular-nums">
               {lead?.phone ?? '—'}
             </p>
+            <button
+              type="button"
+              onClick={abrirConversasFuturas}
+              disabled={!lead}
+              className="mt-1 inline-flex items-center gap-1.5 rounded-full border border-brand-200 bg-brand-50 px-2.5 py-1 text-[11px] font-semibold text-brand-700 transition hover:border-brand-300 hover:bg-brand-100 disabled:cursor-not-allowed disabled:opacity-50"
+              title="Ver mensagens agendadas para este lead"
+            >
+              <CalendarClock className="h-3.5 w-3.5" />
+              Conversas Futuras
+            </button>
           </div>
           <button
             type="button"
@@ -777,6 +989,16 @@ export function ChatWindow({ open, onClose, lead }: ChatWindowProps) {
             >
               <Mic className="h-4 w-4" />
             </button>
+            <button
+              type="button"
+              onClick={abrirModalAgendamento}
+              disabled={!lead || sending}
+              className="inline-flex h-11 w-11 shrink-0 items-center justify-center rounded-xl border border-zinc-200 bg-white text-zinc-700 shadow-sm transition hover:border-brand-300 hover:bg-brand-50 hover:text-brand-700 disabled:cursor-not-allowed disabled:opacity-50"
+              aria-label="Agendar envio"
+              title="Agendar envio"
+            >
+              <Clock className="h-4 w-4" />
+            </button>
             <textarea
               id="inbox-compose"
               value={draft}
@@ -804,6 +1026,304 @@ export function ChatWindow({ open, onClose, lead }: ChatWindowProps) {
           )}
         </footer>
       </aside>
+
+      {scheduleToast ? (
+        <div
+          role="status"
+          className="fixed bottom-6 right-6 z-[90] inline-flex items-center gap-2 rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-2.5 text-sm font-semibold text-emerald-800 shadow-lg"
+        >
+          <CalendarClock className="h-4 w-4" />
+          {scheduleToast}
+        </div>
+      ) : null}
+
+      {scheduleModalOpen ? (
+        <div className="fixed inset-0 z-[80] flex items-center justify-center bg-zinc-950/50 backdrop-blur-[2px] px-4">
+          <div
+            className="w-full max-w-md overflow-hidden rounded-2xl border border-zinc-200 bg-white shadow-2xl"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="agendar-titulo"
+          >
+            <div className="flex items-center gap-3 border-b border-zinc-200 px-5 py-4">
+              <span className="flex h-10 w-10 items-center justify-center rounded-xl bg-brand-600/10 text-brand-700">
+                <CalendarClock className="h-5 w-5" />
+              </span>
+              <div className="flex-1">
+                <h3 id="agendar-titulo" className="text-sm font-semibold text-zinc-900">
+                  Agendar envio para {lead?.name ?? 'este contato'}
+                </h3>
+                <p className="text-xs text-zinc-500">
+                  A mensagem fica na fila e o robô dispara no horário escolhido.
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={fecharModalAgendamento}
+                className="rounded-lg p-2 text-zinc-400 hover:bg-zinc-100 hover:text-zinc-700"
+                aria-label="Fechar"
+              >
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+
+            <div className="space-y-4 px-5 py-4">
+              <div className="grid grid-cols-2 gap-3">
+                <label className="block">
+                  <span className="mb-1 block text-xs font-semibold text-zinc-700">
+                    Data do envio
+                  </span>
+                  <input
+                    type="date"
+                    value={scheduleDate}
+                    onChange={(e) => setScheduleDate(e.target.value)}
+                    className="w-full rounded-xl border border-zinc-200 bg-zinc-50 px-3 py-2 text-sm outline-none transition focus:border-brand-400 focus:bg-white focus:ring-2 focus:ring-brand-600/20"
+                  />
+                </label>
+                <label className="block">
+                  <span className="mb-1 block text-xs font-semibold text-zinc-700">
+                    Hora do envio
+                  </span>
+                  <input
+                    type="time"
+                    value={scheduleTime}
+                    onChange={(e) => setScheduleTime(e.target.value)}
+                    className="w-full rounded-xl border border-zinc-200 bg-zinc-50 px-3 py-2 text-sm outline-none transition focus:border-brand-400 focus:bg-white focus:ring-2 focus:ring-brand-600/20"
+                  />
+                </label>
+              </div>
+
+              <div className="rounded-xl border border-zinc-200 bg-zinc-50 p-3">
+                <p className="mb-1 text-xs font-semibold text-zinc-700">Conteúdo</p>
+                <p className="line-clamp-3 whitespace-pre-wrap break-words text-sm text-zinc-800">
+                  {draft.trim() ? draft.trim() : (
+                    <span className="italic text-zinc-400">
+                      (Sem texto — anexe um arquivo ou digite no chat antes de agendar)
+                    </span>
+                  )}
+                </p>
+              </div>
+
+              <div>
+                <input
+                  ref={scheduleAttachmentInputRef}
+                  type="file"
+                  className="hidden"
+                  onChange={(e) => {
+                    const f = e.currentTarget.files?.[0] ?? null
+                    e.currentTarget.value = ''
+                    setScheduleAttachment(f)
+                  }}
+                />
+                {scheduleAttachment ? (
+                  <div className="flex items-center justify-between rounded-xl border border-brand-200 bg-brand-50 px-3 py-2">
+                    <div className="min-w-0">
+                      <p className="truncate text-xs font-semibold text-brand-800">
+                        {scheduleAttachment.name}
+                      </p>
+                      <p className="text-[11px] text-brand-700/80">
+                        {(scheduleAttachment.size / 1024).toFixed(1)} KB · {scheduleAttachment.type || 'arquivo'}
+                      </p>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => setScheduleAttachment(null)}
+                      className="rounded-lg p-1.5 text-brand-700 hover:bg-brand-100"
+                      aria-label="Remover anexo"
+                    >
+                      <X className="h-4 w-4" />
+                    </button>
+                  </div>
+                ) : (
+                  <button
+                    type="button"
+                    onClick={() => scheduleAttachmentInputRef.current?.click()}
+                    className="inline-flex items-center gap-2 rounded-xl border border-dashed border-zinc-300 bg-white px-3 py-2 text-xs font-semibold text-zinc-700 transition hover:border-brand-300 hover:bg-brand-50 hover:text-brand-700"
+                  >
+                    <Paperclip className="h-3.5 w-3.5" />
+                    Anexar arquivo (opcional)
+                  </button>
+                )}
+              </div>
+
+              {scheduleError ? (
+                <p className="rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-xs text-rose-700">
+                  {scheduleError}
+                </p>
+              ) : null}
+            </div>
+
+            <div className="flex items-center justify-end gap-2 border-t border-zinc-200 bg-zinc-50 px-5 py-3">
+              <button
+                type="button"
+                onClick={fecharModalAgendamento}
+                className="rounded-xl border border-zinc-200 bg-white px-4 py-2 text-sm font-semibold text-zinc-700 transition hover:bg-zinc-100"
+              >
+                Cancelar
+              </button>
+              <button
+                type="button"
+                onClick={() => void programarEnvio()}
+                disabled={submittingSchedule}
+                className="inline-flex items-center gap-2 rounded-xl bg-gradient-to-r from-brand-600 to-brand-700 px-4 py-2 text-sm font-semibold text-white shadow-md transition hover:from-brand-500 hover:to-brand-600 disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                {submittingSchedule ? (
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                ) : (
+                  <CalendarClock className="h-4 w-4" />
+                )}
+                Programar Envio
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
+
+      {futureModalOpen ? (
+        <div className="fixed inset-0 z-[80] flex items-center justify-center bg-zinc-950/50 backdrop-blur-[2px] px-4">
+          <div
+            className="flex w-full max-w-lg flex-col overflow-hidden rounded-2xl border border-zinc-200 bg-white shadow-2xl"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="futuras-titulo"
+            style={{ maxHeight: '85vh' }}
+          >
+            <div className="flex items-center gap-3 border-b border-zinc-200 px-5 py-4">
+              <span className="flex h-10 w-10 items-center justify-center rounded-xl bg-brand-600/10 text-brand-700">
+                <CalendarClock className="h-5 w-5" />
+              </span>
+              <div className="flex-1">
+                <h3 id="futuras-titulo" className="text-sm font-semibold text-zinc-900">
+                  Conversas futuras
+                </h3>
+                <p className="text-xs text-zinc-500">
+                  Mensagens agendadas para {lead?.name ?? 'este lead'}.
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setFutureModalOpen(false)}
+                className="rounded-lg p-2 text-zinc-400 hover:bg-zinc-100 hover:text-zinc-700"
+                aria-label="Fechar"
+              >
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+
+            <div className="min-h-0 flex-1 overflow-y-auto px-5 py-4">
+              {loadingFuture ? (
+                <p className="text-center text-sm text-zinc-500">Carregando agendamentos…</p>
+              ) : null}
+              {futureError ? (
+                <p className="rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-xs text-rose-700">
+                  {futureError}
+                </p>
+              ) : null}
+              {!loadingFuture && !futureError && futureMessages.length === 0 ? (
+                <p className="text-center text-sm text-zinc-500">
+                  Nenhuma mensagem agendada para este lead ainda.
+                </p>
+              ) : null}
+
+              <ul className="space-y-2">
+                {futureMessages.map((m) => {
+                  const quando = m.scheduled_at
+                    ? new Date(m.scheduled_at).toLocaleString(undefined, {
+                        day: '2-digit',
+                        month: '2-digit',
+                        year: '2-digit',
+                        hour: '2-digit',
+                        minute: '2-digit',
+                      })
+                    : '—'
+                  const resumo = m.message_body?.trim()
+                    ? m.message_body.trim()
+                    : m.media_url
+                      ? `Anexo (${m.content_type})`
+                      : `(${m.content_type})`
+                  const statusLabel =
+                    m.status === 'sent'
+                      ? 'Enviado'
+                      : m.status === 'error' || m.status === 'failed'
+                        ? 'Erro'
+                        : m.status === 'cancelled'
+                          ? 'Cancelado'
+                          : m.status === 'processing'
+                            ? 'Processando'
+                            : 'Pendente'
+                  const statusClass =
+                    m.status === 'sent'
+                      ? 'bg-emerald-50 text-emerald-700 ring-emerald-200'
+                      : m.status === 'error' || m.status === 'failed'
+                        ? 'bg-rose-50 text-rose-700 ring-rose-200'
+                        : m.status === 'cancelled'
+                          ? 'bg-zinc-100 text-zinc-600 ring-zinc-200'
+                          : m.status === 'processing'
+                            ? 'bg-amber-50 text-amber-700 ring-amber-200'
+                            : 'bg-brand-50 text-brand-700 ring-brand-200'
+                  return (
+                    <li
+                      key={m.id}
+                      className="flex items-start gap-3 rounded-xl border border-zinc-200 bg-zinc-50 p-3"
+                    >
+                      <div className="min-w-0 flex-1">
+                        <div className="flex flex-wrap items-center gap-2">
+                          <span className="text-xs font-semibold text-zinc-800 tabular-nums">
+                            {quando}
+                          </span>
+                          <span
+                            className={`inline-flex rounded-full px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide ring-1 ${statusClass}`}
+                          >
+                            {statusLabel}
+                          </span>
+                        </div>
+                        <p className="mt-1 line-clamp-2 whitespace-pre-wrap break-words text-sm text-zinc-700">
+                          {resumo}
+                        </p>
+                        {m.media_url ? (
+                          <a
+                            href={m.media_url}
+                            target="_blank"
+                            rel="noreferrer"
+                            className="mt-1 inline-flex items-center gap-1 text-[11px] font-semibold text-brand-700 hover:underline"
+                          >
+                            <Paperclip className="h-3 w-3" />
+                            Ver anexo
+                          </a>
+                        ) : null}
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => void excluirAgendamento(m.id)}
+                        disabled={deletingFutureId === m.id}
+                        className="inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border border-zinc-200 bg-white text-zinc-500 transition hover:border-rose-200 hover:bg-rose-50 hover:text-rose-700 disabled:opacity-50"
+                        title="Excluir agendamento"
+                        aria-label="Excluir agendamento"
+                      >
+                        {deletingFutureId === m.id ? (
+                          <Loader2 className="h-4 w-4 animate-spin" />
+                        ) : (
+                          <Trash2 className="h-4 w-4" />
+                        )}
+                      </button>
+                    </li>
+                  )
+                })}
+              </ul>
+            </div>
+
+            <div className="flex items-center justify-end gap-2 border-t border-zinc-200 bg-zinc-50 px-5 py-3">
+              <button
+                type="button"
+                onClick={() => setFutureModalOpen(false)}
+                className="rounded-xl border border-zinc-200 bg-white px-4 py-2 text-sm font-semibold text-zinc-700 transition hover:bg-zinc-100"
+              >
+                Fechar
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
     </>
   )
 }

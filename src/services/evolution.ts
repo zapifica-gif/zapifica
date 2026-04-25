@@ -985,10 +985,16 @@ export async function sendAudioMessageWithConfig(
   if ('error' in normalized) {
     return { ok: false, error: normalized.error, messageId: null }
   }
-  const trimmed = audio.trim()
-  if (!trimmed) {
+  const trimmedRaw = audio.trim()
+  if (!trimmedRaw) {
     return { ok: false, error: 'Informe a URL ou o base64 do áudio.', messageId: null }
   }
+
+  // A Evolution exige Base64 puro (sem prefixo `data:audio/...;base64,`).
+  // Se vier com data URL, removemos o prefixo. Se vier limpo, mantemos.
+  const trimmed = trimmedRaw.startsWith('data:')
+    ? trimmedRaw.split(';base64,').pop()?.trim() || trimmedRaw
+    : trimmedRaw
 
   const instanceName = instanceNameFromUserId(userId)
 
@@ -1002,6 +1008,10 @@ export async function sendAudioMessageWithConfig(
         body: JSON.stringify({
           number: normalized.recipient,
           audio: trimmed,
+          // Flags exigidas pela Evolution para nota de voz (PTT)
+          delay: 1000,
+          encoding: true,
+          ptt: true,
         }),
       },
     )
@@ -1080,7 +1090,12 @@ export async function sendMediaMessageWithConfig(
   const caption = captionTrim ? captionTrim : undefined
   const mimeType = params.mimeType.trim() || 'application/octet-stream'
   const fileName = params.fileName.trim() || 'arquivo'
-  const ptt = params.ptt === true || params.mediaType === 'audio'
+
+  // ÁUDIO: a Evolution falha silenciosamente em /sendMedia para mediatype:'audio'.
+  // Forçamos o endpoint dedicado /message/sendWhatsAppAudio com PTT + encoding.
+  if (params.mediaType === 'audio') {
+    return sendAudioMessageWithConfig(userId, recipient, trimmedMedia, cfg)
+  }
 
   const instanceName = instanceNameFromUserId(userId)
 
@@ -1101,10 +1116,6 @@ export async function sendMediaMessageWithConfig(
         ...(params.mediaType === 'document'
           ? { mimetype: mimeType, fileName }
           : {}),
-        // Áudio como PTT: alguns motores exigem `ptt: true` para virar nota de voz.
-        ...(params.mediaType === 'audio' ? { mimetype: mimeType, fileName, ptt } : {}),
-        // Flags defensivas para algumas builds:
-        ...(params.mediaType === 'audio' ? { alwaysOnline: true } : {}),
         ...(caption ? { caption } : {}),
       }),
     })
