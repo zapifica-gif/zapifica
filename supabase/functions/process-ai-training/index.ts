@@ -4,6 +4,8 @@
 
 import { serve } from 'https://deno.land/std@0.168.0/http/server.ts'
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2'
+import { Buffer } from 'node:buffer'
+import pdf from 'npm:pdf-parse'
 
 const corsHeaders: Record<string, string> = {
   'Access-Control-Allow-Origin': '*',
@@ -92,14 +94,14 @@ async function fetchHtmlText(url: URL): Promise<{ ok: true; text: string } | { o
 
 async function extractPdfText(bytes: Uint8Array): Promise<{ ok: true; text: string } | { ok: false; error: string }> {
   try {
-    // pdf-parse (Node) costuma funcionar no Deno Edge com Buffer polyfill implícito em builds recentes
-    const mod = await import('https://esm.sh/pdf-parse@1.1.1')
-    const pdfParse = (mod as { default?: (b: Uint8Array) => Promise<{ text?: string }> }).default
-    if (!pdfParse) {
-      return { ok: false, error: 'Biblioteca pdf-parse indisponível neste runtime.' }
+    let pdfData: { text?: string }
+    try {
+      pdfData = await pdf(bytes)
+    } catch {
+      // pdf-parse costuma esperar Buffer no ecossistema Node; Deno npm às vezes só aceita Buffer.
+      pdfData = await pdf(Buffer.from(bytes))
     }
-    const out = await pdfParse(bytes)
-    const text = (out.text ?? '').replace(/\s+/g, ' ').trim()
+    const text = (pdfData?.text ?? '').replace(/\s+/g, ' ').trim()
     if (!text) return { ok: false, error: 'PDF sem texto extraível (pode ser imagem escaneada).' }
     return { ok: true, text }
   } catch (e) {
@@ -183,6 +185,14 @@ async function callDeepSeekReasoner(params: {
   return { ok: true, summary }
 }
 
+function jsonErrorResponse(err: unknown, status = 500): Response {
+  const message = err instanceof Error ? err.message : String(err)
+  return new Response(JSON.stringify({ error: message }), {
+    status,
+    headers: { 'Content-Type': 'application/json', ...corsHeaders },
+  })
+}
+
 serve(async (req) => {
   try {
     if (req.method === 'OPTIONS') {
@@ -253,17 +263,17 @@ serve(async (req) => {
         return jsonResponse({ error: 'filePath inválido (deve começar com seu user_id/).' }, 400)
       }
 
-      const { data: blob, error: dlErr } = await supabase.storage
+      const { data, error: dlErr } = await supabase.storage
         .from('training_files')
         .download(filePath)
-      if (dlErr || !blob) {
+      if (dlErr || !data) {
         return jsonResponse({ error: dlErr?.message ?? 'Falha ao baixar arquivo do Storage.' }, 400)
       }
 
-      const ab = await blob.arrayBuffer()
-      const bytes = new Uint8Array(ab)
+      const arrayBuffer = await data.arrayBuffer()
+      const buffer = new Uint8Array(arrayBuffer)
       const lower = filePath.toLowerCase()
-      const extracted = await extractFileText(bytes, lower)
+      const extracted = await extractFileText(buffer, lower)
       if (!extracted.ok) return jsonResponse({ error: extracted.error }, 400)
       rawText = extracted.text
 
@@ -295,9 +305,8 @@ serve(async (req) => {
     }
 
     return jsonResponse({ ok: true, material: inserted })
-  } catch (e) {
-    const msg = e instanceof Error ? e.message : String(e)
-    console.error('[process-ai-training] erro inesperado:', e)
-    return jsonResponse({ error: msg }, 500)
+  } catch (err: unknown) {
+    console.error('[process-ai-training] erro inesperado:', err)
+    return jsonErrorResponse(err, 500)
   }
 })

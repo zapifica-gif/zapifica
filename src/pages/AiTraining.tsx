@@ -110,15 +110,36 @@ export function AiTrainingPage() {
     setLoading(false)
   }, [])
 
-  function textoErroInvoke(err: unknown, data: unknown): string {
-    if (err instanceof Error) {
-      const extra =
-        data && typeof data === 'object' && 'error' in data
-          ? String((data as { error: unknown }).error)
-          : ''
-      return extra ? `${err.message}: ${extra}` : err.message
+  /** Monta mensagem legível a partir do corpo JSON da Edge Function ou do Response do cliente. */
+  async function mensagemErroProcessamento(err: unknown, data: unknown): Promise<string> {
+    let backend = ''
+    if (data !== null && data !== undefined && typeof data === 'object' && 'error' in data) {
+      const v = (data as { error: unknown }).error
+      if (typeof v === 'string' && v.trim()) backend = v.trim()
     }
-    return String(err)
+    if (!backend && err !== null && err !== undefined && typeof err === 'object') {
+      const ctx = (err as { context?: { response?: Response } }).context
+      const res = ctx?.response
+      if (res) {
+        try {
+          const text = await res.clone().text()
+          if (text) {
+            try {
+              const j = JSON.parse(text) as { error?: string }
+              if (typeof j?.error === 'string' && j.error.trim()) backend = j.error.trim()
+              else backend = text.slice(0, 400)
+            } catch {
+              backend = text.slice(0, 400)
+            }
+          }
+        } catch {
+          /* ignore */
+        }
+      }
+    }
+    const base = err instanceof Error ? err.message : String(err)
+    if (backend) return `Erro ao processar: ${backend}`
+    return `Erro ao processar: ${base}`
   }
 
   async function processarLink() {
@@ -129,21 +150,30 @@ export function AiTrainingPage() {
     }
     setStudying(true)
     setError(null)
-    const { data, error } = await supabase.functions.invoke('process-ai-training', {
-      body: { type: 'link', url },
-    })
-    setStudying(false)
-    if (error) {
-      setError(textoErroInvoke(error, data))
-      return
+    try {
+      const { data, error } = await supabase.functions.invoke('process-ai-training', {
+        body: { type: 'link', url },
+      })
+      if (error) {
+        const msg = await mensagemErroProcessamento(error, data)
+        setError(msg)
+        window.alert(msg)
+        return
+      }
+      const row = (data as { material?: AiTrainingMaterialRow } | null)?.material
+      if (row) {
+        setMaterials((prev) => [row, ...prev])
+      }
+      setLinkModalOpen(false)
+      setLinkUrl('')
+      void loadAll()
+    } catch (e) {
+      const msg = `Erro ao processar: ${e instanceof Error ? e.message : String(e)}`
+      setError(msg)
+      window.alert(msg)
+    } finally {
+      setStudying(false)
     }
-    const row = (data as { material?: AiTrainingMaterialRow } | null)?.material
-    if (row) {
-      setMaterials((prev) => [row, ...prev])
-    }
-    setLinkModalOpen(false)
-    setLinkUrl('')
-    void loadAll()
   }
 
   async function onEscolherArquivo(e: ChangeEvent<HTMLInputElement>) {
@@ -165,31 +195,41 @@ export function AiTrainingPage() {
     setStudying(true)
     setError(null)
 
-    const { error: upErr } = await supabase.storage
-      .from('training_files')
-      .upload(path, file, {
-        upsert: true,
-        contentType: file.type || undefined,
-      })
-    if (upErr) {
-      setStudying(false)
-      setError(`Falha no upload: ${upErr.message}`)
-      return
-    }
+    try {
+      const { error: upErr } = await supabase.storage
+        .from('training_files')
+        .upload(path, file, {
+          upsert: true,
+          contentType: file.type || undefined,
+        })
+      if (upErr) {
+        const msg = `Falha no upload: ${upErr.message}`
+        setError(msg)
+        window.alert(msg)
+        return
+      }
 
-    const { data, error } = await supabase.functions.invoke('process-ai-training', {
-      body: { type: 'file', filePath: path },
-    })
-    setStudying(false)
-    if (error) {
-      setError(textoErroInvoke(error, data))
-      return
+      const { data, error } = await supabase.functions.invoke('process-ai-training', {
+        body: { type: 'file', filePath: path },
+      })
+      if (error) {
+        const msg = await mensagemErroProcessamento(error, data)
+        setError(msg)
+        window.alert(msg)
+        return
+      }
+      const row = (data as { material?: AiTrainingMaterialRow } | null)?.material
+      if (row) {
+        setMaterials((prev) => [row, ...prev])
+      }
+      void loadAll()
+    } catch (e) {
+      const msg = `Erro ao processar: ${e instanceof Error ? e.message : String(e)}`
+      setError(msg)
+      window.alert(msg)
+    } finally {
+      setStudying(false)
     }
-    const row = (data as { material?: AiTrainingMaterialRow } | null)?.material
-    if (row) {
-      setMaterials((prev) => [row, ...prev])
-    }
-    void loadAll()
   }
 
   useEffect(() => {
