@@ -207,22 +207,37 @@ function stripBase64Prefix(value: string): string {
   return trimmed
 }
 
-function extractMediaInfo(
-  msg: Record<string, unknown> | null,
-  envelope: Record<string, unknown>,
-): MediaInfo {
+/**
+ * Extrai os metadados e o Base64 da mídia procurando em TODAS as raízes
+ * possíveis do payload da Evolution. Quando `webhookBase64: true` está
+ * ativo, o motor envia o conteúdo em uma destas localizações:
+ *
+ *   • item.base64                      ← raiz do envelope (mais comum na v2)
+ *   • item.message.base64              ← raiz do nó message
+ *   • item.message.<imageMessage|audioMessage|videoMessage|documentMessage>.base64
+ *
+ * A função recebe o `item` inteiro (envelope) e fareja todas estas posições.
+ */
+function extractMediaInfo(item: UpsertItem): MediaInfo {
+  const envelope = item.envelope
+  const msg = item.message ?? {}
+
   const image = nestedRecord(msg, 'imageMessage')
   const audio = nestedRecord(msg, 'audioMessage')
   const document = nestedRecord(msg, 'documentMessage')
   const video = nestedRecord(msg, 'videoMessage')
   const mediaNode = image ?? audio ?? document ?? video
 
-  const rawBase64 = firstString(
-    envelope.base64,
-    envelope.media,
-    msg?.base64,
-    mediaNode?.base64,
-  )
+  // Caça o Base64 em todas as raízes conhecidas — a primeira não-vazia vence.
+  const base64 =
+    stringValue(envelope.base64) ??
+    stringValue(envelope.media) ??
+    stringValue(msg.base64) ??
+    stringValue(image?.base64) ??
+    stringValue(audio?.base64) ??
+    stringValue(video?.base64) ??
+    stringValue(document?.base64) ??
+    null
 
   const mimeType =
     firstString(mediaNode?.mimetype, mediaNode?.mimeType, envelope.mimetype) ??
@@ -243,7 +258,7 @@ function extractMediaInfo(
   )
 
   return {
-    base64: rawBase64 ? stripBase64Prefix(rawBase64) : null,
+    base64: base64 ? stripBase64Prefix(base64) : null,
     mimeType,
     extension: extensionFromFileName(fileName) ?? extensionFromMimeType(mimeType),
     fileName,
@@ -431,167 +446,6 @@ async function ensureLeadId(
   return { id: null, created: false, error: error?.message ?? 'insert lead falhou' }
 }
 
-/**
- * Busca Ativa (Reverse Fetch).
- *
- * A Evolution às vezes não envia o `base64` da mídia direto no webhook (por
- * questões de performance do motor) — mesmo com todas as flags ativadas.
- * Quando isso acontece, chamamos o endpoint oficial:
- *
- *   POST {EVOLUTION_API_URL}/chat/getBase64FromMediaMessage/{instance}
- *   header: apikey: {EVOLUTION_API_KEY}
- *
- * O endpoint exige a mensagem COMPLETA (com `key` + `message`). Por isso a
- * função aceita `rawItem` (o envelope que veio do upsert) e tenta variações
- * de body conhecidas até a Evolution aceitar:
- *
- *   1. { message: <envelope com key+message> }      ← formato oficial v2
- *   2. <envelope direto>                            ← algumas builds antigas
- *   3. { message: <só o item.message interno> }     ← último recurso
- *
- * A resposta vem como `{ base64, mimetype, ... }` e nós usamos isso para
- * subir o arquivo para o bucket `chat_media` normalmente.
- */
-async function fetchBase64FromEvolution(params: {
-  evoUrl: string
-  evoKey: string
-  instance: string
-  rawItem: Record<string, unknown>
-  innerMessage: Record<string, unknown> | null
-}): Promise<{
-  base64: string | null
-  mimeType: string | null
-  fileName: string | null
-  error: string | null
-}> {
-  const { evoUrl, evoKey, instance, rawItem, innerMessage } = params
-
-  if (!evoUrl || !evoKey) {
-    return {
-      base64: null,
-      mimeType: null,
-      fileName: null,
-      error:
-        'EVOLUTION_API_URL ou EVOLUTION_API_KEY ausentes nas variáveis de ambiente da Edge Function.',
-    }
-  }
-
-  if (!rawItem && !innerMessage) {
-    return {
-      base64: null,
-      mimeType: null,
-      fileName: null,
-      error: 'mensagem original ausente — nada para resgatar',
-    }
-  }
-
-  const baseUrl = evoUrl.replace(/\/+$/, '')
-  const candidatePaths = [
-    `/chat/getBase64FromMediaMessage/${encodeURIComponent(instance)}`,
-    `/v1/chat/getBase64FromMediaMessage/${encodeURIComponent(instance)}`,
-  ]
-
-  // Variações de body para sobreviver a versões diferentes da Evolution.
-  type BodyShape = { label: string; payload: unknown }
-  const bodyVariants: BodyShape[] = []
-
-  if (rawItem) {
-    bodyVariants.push({ label: 'wrapped-envelope', payload: { message: rawItem } })
-    bodyVariants.push({ label: 'raw-envelope', payload: rawItem })
-  }
-  if (innerMessage) {
-    bodyVariants.push({
-      label: 'inner-message',
-      payload: { message: innerMessage },
-    })
-  }
-
-  let lastError: string | null = null
-
-  for (const path of candidatePaths) {
-    for (const variant of bodyVariants) {
-      const url = `${baseUrl}${path}`
-      try {
-        const res = await fetch(url, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            apikey: evoKey,
-          },
-          body: JSON.stringify(variant.payload),
-        })
-
-        const raw = await res.text()
-        let data: unknown = null
-        if (raw) {
-          try {
-            data = JSON.parse(raw) as unknown
-          } catch {
-            data = { raw }
-          }
-        }
-
-        console.log('[Zapifica][reverseFetch] tentativa', {
-          path,
-          variant: variant.label,
-          status: res.status,
-          ok: res.ok,
-          gotBase64:
-            asRecord(data) && typeof asRecord(data)?.base64 === 'string'
-              ? `len=${(asRecord(data)?.base64 as string).length}`
-              : false,
-        })
-
-        if (!res.ok) {
-          if (res.status === 404 || res.status === 400) {
-            lastError = `HTTP ${res.status} em ${path} (${variant.label})`
-            continue
-          }
-          return {
-            base64: null,
-            mimeType: null,
-            fileName: null,
-            error: `HTTP ${res.status} em ${path} (${variant.label}): ${
-              typeof data === 'object' ? JSON.stringify(data) : String(data ?? '')
-            }`,
-          }
-        }
-
-        const root = asRecord(data) ?? {}
-        const base64 =
-          stringValue(root.base64) ??
-          stringValue(root.media) ??
-          stringValue(root.data)
-        const mimeType =
-          stringValue(root.mimetype) ?? stringValue(root.mimeType)
-        const fileName =
-          stringValue(root.fileName) ?? stringValue(root.filename)
-
-        if (!base64) {
-          lastError = `Resposta sem base64 em ${path} (${variant.label})`
-          continue
-        }
-
-        return {
-          base64,
-          mimeType,
-          fileName,
-          error: null,
-        }
-      } catch (e) {
-        lastError = e instanceof Error ? e.message : String(e)
-      }
-    }
-  }
-
-  return {
-    base64: null,
-    mimeType: null,
-    fileName: null,
-    error: lastError ?? 'Não foi possível resgatar a mídia da Evolution.',
-  }
-}
-
 serve(async (req) => {
   if (req.method === 'OPTIONS') {
     return new Response('ok', { headers: corsHeaders })
@@ -667,24 +521,6 @@ serve(async (req) => {
     return jsonResponse({ error: 'Server misconfigured' }, 500)
   }
 
-  // Credenciais para a Busca Ativa (Reverse Fetch) na Evolution.
-  // Mantemos compatibilidade lendo dois nomes possíveis de variável.
-  const evoUrl = (
-    Deno.env.get('EVOLUTION_API_URL') ??
-    Deno.env.get('EVOLUTION_URL') ??
-    ''
-  ).trim()
-  const evoKey = (
-    Deno.env.get('EVOLUTION_API_KEY') ??
-    Deno.env.get('EVOLUTION_GLOBAL_KEY') ??
-    ''
-  ).trim()
-  if (!evoUrl || !evoKey) {
-    console.warn(
-      '[evolution-whatsapp-webhook] EVOLUTION_API_URL/EVOLUTION_API_KEY ausentes — Busca Ativa de mídia ficará desabilitada.',
-    )
-  }
-
   const supabase = createClient(supabaseUrl, serviceKey, {
     auth: { persistSession: false, autoRefreshToken: false },
   })
@@ -741,53 +577,30 @@ serve(async (req) => {
     if (ensured.created) createdLeads += 1
 
     const { body: text, content: contentType } = extractTextAndType(item.message)
-    const media = extractMediaInfo(item.message, item.envelope)
+    const media = extractMediaInfo(item)
 
-    // Busca Ativa (Reverse Fetch): se a mensagem é de mídia mas a Evolution
-    // não mandou o base64 direto no webhook (acontece por performance do
-    // motor), pedimos ele explicitamente via POST para o endpoint oficial.
     const isMediaContent =
       contentType === 'image' ||
       contentType === 'audio' ||
       contentType === 'document'
 
-    if (isMediaContent && !media.base64) {
-      console.log('[Zapifica] Buscando mídia ativamente na Evolution...', {
-        msgId: item.msgId,
-        contentType,
-        mimeType: media.mimeType,
-        fileName: media.fileName,
-      })
-
-      const rescue = await fetchBase64FromEvolution({
-        evoUrl,
-        evoKey,
-        instance,
-        rawItem: item.envelope,
-        innerMessage: item.message,
-      })
-
-      if (rescue.base64) {
-        console.log('[Zapifica] Mídia resgatada com sucesso!', {
+    if (isMediaContent) {
+      if (media.base64) {
+        console.log('[Zapifica] Base64 capturado direto do webhook', {
           msgId: item.msgId,
-          mimeType: rescue.mimeType ?? media.mimeType,
-          base64Length: rescue.base64.length,
+          contentType,
+          mimeType: media.mimeType,
+          base64Length: media.base64.length,
         })
-        media.base64 = stripBase64Prefix(rescue.base64)
-        if (rescue.mimeType) {
-          media.mimeType = rescue.mimeType
-          media.extension =
-            extensionFromMimeType(rescue.mimeType) || media.extension
-        }
-        if (rescue.fileName) {
-          media.fileName = rescue.fileName
-          const fromName = extensionFromFileName(rescue.fileName)
-          if (fromName) media.extension = fromName
-        }
       } else {
         console.warn(
-          '[Zapifica] Não foi possível resgatar a mídia da Evolution — seguindo sem o arquivo.',
-          { msgId: item.msgId, error: rescue.error },
+          '[Zapifica] Mensagem de mídia sem base64 no payload — verifique se webhookBase64=true está ativo na Evolution.',
+          {
+            msgId: item.msgId,
+            contentType,
+            mimeType: media.mimeType,
+            fileName: media.fileName,
+          },
         )
       }
     }
