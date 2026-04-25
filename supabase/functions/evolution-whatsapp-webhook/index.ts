@@ -420,6 +420,131 @@ async function ensureLeadId(
   return { id: null, created: false, error: error?.message ?? 'insert lead falhou' }
 }
 
+/**
+ * Busca Ativa (Reverse Fetch).
+ *
+ * A Evolution às vezes não envia o `base64` da mídia direto no webhook (por
+ * questões de performance do motor) — mesmo com todas as flags ativadas.
+ * Quando isso acontece, chamamos o endpoint oficial:
+ *
+ *   POST {EVOLUTION_API_URL}/chat/getBase64FromMediaMessage/{instance}
+ *   body: { message: <objeto message original> }
+ *   header: apikey: {EVOLUTION_API_KEY}
+ *
+ * A resposta vem com `{ base64, mimetype, ... }` e nós usamos isso para
+ * subir o arquivo para o bucket `chat_media` normalmente.
+ */
+async function fetchBase64FromEvolution(params: {
+  evoUrl: string
+  evoKey: string
+  instance: string
+  message: Record<string, unknown> | null
+}): Promise<{
+  base64: string | null
+  mimeType: string | null
+  fileName: string | null
+  error: string | null
+}> {
+  const { evoUrl, evoKey, instance, message } = params
+
+  if (!evoUrl || !evoKey) {
+    return {
+      base64: null,
+      mimeType: null,
+      fileName: null,
+      error:
+        'EVOLUTION_API_URL ou EVOLUTION_API_KEY ausentes nas variáveis de ambiente da Edge Function.',
+    }
+  }
+
+  if (!message) {
+    return {
+      base64: null,
+      mimeType: null,
+      fileName: null,
+      error: 'mensagem original ausente — nada para resgatar',
+    }
+  }
+
+  const baseUrl = evoUrl.replace(/\/+$/, '')
+  const candidatePaths = [
+    `/chat/getBase64FromMediaMessage/${encodeURIComponent(instance)}`,
+    `/v1/chat/getBase64FromMediaMessage/${encodeURIComponent(instance)}`,
+  ]
+
+  let lastError: string | null = null
+
+  for (const path of candidatePaths) {
+    const url = `${baseUrl}${path}`
+    try {
+      const res = await fetch(url, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          apikey: evoKey,
+        },
+        body: JSON.stringify({ message }),
+      })
+
+      const raw = await res.text()
+      let data: unknown = null
+      if (raw) {
+        try {
+          data = JSON.parse(raw) as unknown
+        } catch {
+          data = { raw }
+        }
+      }
+
+      if (!res.ok) {
+        if (res.status === 404) {
+          lastError = `HTTP 404 em ${path}`
+          continue
+        }
+        return {
+          base64: null,
+          mimeType: null,
+          fileName: null,
+          error: `HTTP ${res.status} em ${path}: ${
+            typeof data === 'object' ? JSON.stringify(data) : String(data ?? '')
+          }`,
+        }
+      }
+
+      const root = asRecord(data) ?? {}
+      const base64 =
+        stringValue(root.base64) ??
+        stringValue(root.media) ??
+        stringValue(root.data)
+      const mimeType =
+        stringValue(root.mimetype) ?? stringValue(root.mimeType)
+      const fileName =
+        stringValue(root.fileName) ?? stringValue(root.filename)
+
+      if (!base64) {
+        lastError = `Resposta sem base64 em ${path}`
+        continue
+      }
+
+      return {
+        base64,
+        mimeType,
+        fileName,
+        error: null,
+      }
+    } catch (e) {
+      lastError = e instanceof Error ? e.message : String(e)
+    }
+  }
+
+  return {
+    base64: null,
+    mimeType: null,
+    fileName: null,
+    error: lastError ?? 'Não foi possível resgatar a mídia da Evolution.',
+  }
+}
+
 serve(async (req) => {
   if (req.method === 'OPTIONS') {
     return new Response('ok', { headers: corsHeaders })
@@ -495,6 +620,24 @@ serve(async (req) => {
     return jsonResponse({ error: 'Server misconfigured' }, 500)
   }
 
+  // Credenciais para a Busca Ativa (Reverse Fetch) na Evolution.
+  // Mantemos compatibilidade lendo dois nomes possíveis de variável.
+  const evoUrl = (
+    Deno.env.get('EVOLUTION_API_URL') ??
+    Deno.env.get('EVOLUTION_URL') ??
+    ''
+  ).trim()
+  const evoKey = (
+    Deno.env.get('EVOLUTION_API_KEY') ??
+    Deno.env.get('EVOLUTION_GLOBAL_KEY') ??
+    ''
+  ).trim()
+  if (!evoUrl || !evoKey) {
+    console.warn(
+      '[evolution-whatsapp-webhook] EVOLUTION_API_URL/EVOLUTION_API_KEY ausentes — Busca Ativa de mídia ficará desabilitada.',
+    )
+  }
+
   const supabase = createClient(supabaseUrl, serviceKey, {
     auth: { persistSession: false, autoRefreshToken: false },
   })
@@ -553,23 +696,52 @@ serve(async (req) => {
     const { body: text, content: contentType } = extractTextAndType(item.message)
     const media = extractMediaInfo(item.message, item.envelope)
 
-    // Sinal vermelho: o tipo é mídia mas a Evolution não enviou o Base64.
-    // Isso acontece quando o webhookBase64 está desativado na instância.
-    if (
-      (contentType === 'image' ||
-        contentType === 'audio' ||
-        contentType === 'document') &&
-      !media.base64
-    ) {
-      console.error(
-        '[evolution-whatsapp-webhook] mídia recebida SEM base64 — provavelmente o webhookBase64 está desligado na Evolution.',
-        {
+    // Busca Ativa (Reverse Fetch): se a mensagem é de mídia mas a Evolution
+    // não mandou o base64 direto no webhook (acontece por performance do
+    // motor), pedimos ele explicitamente via POST para o endpoint oficial.
+    const isMediaContent =
+      contentType === 'image' ||
+      contentType === 'audio' ||
+      contentType === 'document'
+
+    if (isMediaContent && !media.base64) {
+      console.log('[Zapifica] Buscando mídia ativamente na Evolution...', {
+        msgId: item.msgId,
+        contentType,
+        mimeType: media.mimeType,
+        fileName: media.fileName,
+      })
+
+      const rescue = await fetchBase64FromEvolution({
+        evoUrl,
+        evoKey,
+        instance,
+        message: item.message,
+      })
+
+      if (rescue.base64) {
+        console.log('[Zapifica] Mídia resgatada com sucesso!', {
           msgId: item.msgId,
-          contentType,
-          mimeType: media.mimeType,
-          fileName: media.fileName,
-        },
-      )
+          mimeType: rescue.mimeType ?? media.mimeType,
+          base64Length: rescue.base64.length,
+        })
+        media.base64 = stripBase64Prefix(rescue.base64)
+        if (rescue.mimeType) {
+          media.mimeType = rescue.mimeType
+          media.extension =
+            extensionFromMimeType(rescue.mimeType) || media.extension
+        }
+        if (rescue.fileName) {
+          media.fileName = rescue.fileName
+          const fromName = extensionFromFileName(rescue.fileName)
+          if (fromName) media.extension = fromName
+        }
+      } else {
+        console.warn(
+          '[Zapifica] Não foi possível resgatar a mídia da Evolution — seguindo sem o arquivo.',
+          { msgId: item.msgId, error: rescue.error },
+        )
+      }
     }
 
     const upload = await uploadMedia(supabase, {
