@@ -2,7 +2,7 @@
 // Fila: public.scheduled_messages → Evolution API
 // - Agenda tradicional, segmentos, e agendamentos do Chat (lead_id + media_url).
 //
-// Secrets: CHAVE_MESTRA_ZAPIFICA ou SUPABASE_SERVICE_ROLE_KEY, SUPABASE_URL,
+// Secrets: SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY (obrigatório; bypass RLS no banco)
 //          EVOLUTION_API_URL, EVOLUTION_API_KEY
 
 import { serve } from 'https://deno.land/std@0.168.0/http/server.ts'
@@ -125,12 +125,10 @@ function stripDataUrlBase64(input: string): string {
 }
 
 serve(async () => {
+  console.log('[Agenda Suprema] Robô acordou! Buscando pendentes...')
+
   const supabaseUrl = (Deno.env.get('SUPABASE_URL') ?? '').trim()
-  const serviceKey = (
-    Deno.env.get('CHAVE_MESTRA_ZAPIFICA') ??
-    Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ??
-    ''
-  ).trim()
+  const serviceKey = (Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? '').trim()
   const evolutionUrl = (Deno.env.get('EVOLUTION_API_URL') ?? '').replace(
     /\/+$/,
     '',
@@ -138,10 +136,13 @@ serve(async () => {
   const evolutionApiKey = (Deno.env.get('EVOLUTION_API_KEY') ?? '').trim()
 
   if (!supabaseUrl || !serviceKey) {
+    console.error(
+      '[Agenda Suprema] Falha: defina SUPABASE_URL e SUPABASE_SERVICE_ROLE_KEY nas secrets desta função (para o worker ignorar RLS).',
+    )
     return new Response(
       JSON.stringify({
         error:
-          'Defina CHAVE_MESTRA_ZAPIFICA (ou SUPABASE_SERVICE_ROLE_KEY) e SUPABASE_URL nas secrets da função.',
+          'Defina SUPABASE_URL e SUPABASE_SERVICE_ROLE_KEY nas secrets da função (Edge / Dashboard).',
       }),
       { status: 500, headers: { 'Content-Type': 'application/json' } },
     )
@@ -166,8 +167,9 @@ serve(async () => {
 
   const nowIso = new Date().toISOString()
   console.log(
-    '[process-scheduled-messages] Buscando: status=pending, is_active=true, scheduled_at NOT NULL, scheduled_at <=',
+    '[Agenda Suprema] Agora (UTC) para a query:',
     nowIso,
+    '| pendentes com scheduled_at <= agora (UTC).',
   )
 
   const { data: candidates, error: fetchError } = await supabase
@@ -214,6 +216,8 @@ serve(async () => {
     if (claimErr || !claimed) {
       continue
     }
+
+    console.log('[Agenda Suprema] Disparando mensagem ID:', msg.id)
 
     try {
       // --- 1) Destinatários ---

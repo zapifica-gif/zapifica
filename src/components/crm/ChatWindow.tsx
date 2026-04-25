@@ -665,6 +665,26 @@ export function ChatWindow({ open, onClose, lead }: ChatWindowProps) {
     return 'document'
   }
 
+  /**
+   * Monta o instante a partir de data + hora no **fuso do navegador** e devolve
+   * string ISO em UTC. Evita a ambiguidade de `new Date("YYYY-MM-DDTHH:mm:ss")`, que
+   * em alguns motores vira interpretação UTC e atrasa 3h no Brasil.
+   */
+  function dataHoraLocalParaUtcIso(dataYmd: string, timeHm: string): string | null {
+    const dPart = dataYmd.trim().split('-').map((x) => Number(x))
+    const tPart = timeHm.trim().split(':').map((x) => Number(x))
+    if (dPart.length !== 3 || tPart.length < 2) return null
+    const y = dPart[0]!
+    const mo = dPart[1]!
+    const d = dPart[2]!
+    const h = tPart[0]!
+    const mi = tPart[1]!
+    if ([y, mo, d, h, mi].some((n) => Number.isNaN(n))) return null
+    const local = new Date(y, mo - 1, d, h, mi, 0, 0)
+    if (Number.isNaN(local.getTime())) return null
+    return local.toISOString()
+  }
+
   async function programarEnvio() {
     if (!lead) return
     setScheduleError(null)
@@ -676,13 +696,12 @@ export function ChatWindow({ open, onClose, lead }: ChatWindowProps) {
       return
     }
 
-    // Junta data + hora no fuso local e converte para UTC ISO (worker compara em UTC)
-    const local = new Date(`${dataStr}T${horaStr}:00`)
-    if (Number.isNaN(local.getTime())) {
+    const scheduledAtUtc = dataHoraLocalParaUtcIso(dataStr, horaStr)
+    if (!scheduledAtUtc) {
       setScheduleError('Data ou hora inválidas.')
       return
     }
-    if (local.getTime() <= Date.now()) {
+    if (new Date(scheduledAtUtc).getTime() <= Date.now()) {
       setScheduleError('Escolha uma data/hora no futuro.')
       return
     }
@@ -724,7 +743,13 @@ export function ChatWindow({ open, onClose, lead }: ChatWindowProps) {
         mediaUrl = pub.publicUrl
       }
 
-      const scheduledAtUtc = local.toISOString()
+      console.log(
+        '[Agenda Suprema/Chat] Salvando agendamento em UTC (scheduled_at):',
+        scheduledAtUtc,
+        '| local escolhido ≈',
+        new Date(scheduledAtUtc).toString(),
+      )
+
       const { error: insErr } = await supabase
         .from('scheduled_messages')
         .insert({
