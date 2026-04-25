@@ -429,15 +429,21 @@ serve(async (req) => {
     return jsonResponse({ error: 'Method not allowed' }, 405)
   }
 
-  const secret = Deno.env.get('EVOLUTION_WEBHOOK_SECRET')?.trim() ?? ''
-  if (secret) {
+  // Política aberta intencional: a função aceita qualquer chamada POST porque
+  // está exposta sem JWT e a Evolution API gerencia o canal. Mantemos suporte
+  // OPCIONAL ao header `x-webhook-secret` apenas para registrar avisos quando
+  // alguém configurar um segredo, mas NUNCA bloqueamos a entrada por isso.
+  const expectedSecret = Deno.env.get('EVOLUTION_WEBHOOK_SECRET')?.trim() ?? ''
+  if (expectedSecret) {
     const h = req.headers.get('x-webhook-secret')?.trim() ?? ''
     const auth = req.headers.get('authorization')?.trim() ?? ''
     const bearer = auth.toLowerCase().startsWith('bearer ')
       ? auth.slice(7)
       : ''
-    if (h !== secret && bearer !== secret) {
-      return jsonResponse({ error: 'Unauthorized' }, 401)
+    if (h !== expectedSecret && bearer !== expectedSecret) {
+      console.warn(
+        '[evolution-whatsapp-webhook] x-webhook-secret divergente — seguindo sem bloquear (Evolution não envia o segredo).',
+      )
     }
   }
 
@@ -445,12 +451,19 @@ serve(async (req) => {
   try {
     body = await req.json()
   } catch {
+    console.error('[evolution-whatsapp-webhook] payload inválido (JSON)')
     return jsonResponse({ error: 'Invalid JSON' }, 400)
   }
 
   const b = asRecord(body) ?? {}
   const event = stringValue(b.event) ?? ''
   const instance = stringValue(b.instance) ?? ''
+
+  console.log('[evolution-whatsapp-webhook] payload recebido', {
+    event,
+    instance,
+    hasData: Object.prototype.hasOwnProperty.call(b, 'data'),
+  })
 
   const normalizedEvent = event.toLowerCase().replace('_', '.')
   if (normalizedEvent && normalizedEvent !== 'messages.upsert') {
@@ -459,6 +472,10 @@ serve(async (req) => {
 
   const userId = userIdFromZapificaInstance(instance)
   if (!userId) {
+    console.error(
+      '[evolution-whatsapp-webhook] instância fora da convenção zapifica_<uuid>',
+      { instance },
+    )
     return jsonResponse({
       ok: false,
       error:
@@ -535,6 +552,26 @@ serve(async (req) => {
 
     const { body: text, content: contentType } = extractTextAndType(item.message)
     const media = extractMediaInfo(item.message, item.envelope)
+
+    // Sinal vermelho: o tipo é mídia mas a Evolution não enviou o Base64.
+    // Isso acontece quando o webhookBase64 está desativado na instância.
+    if (
+      (contentType === 'image' ||
+        contentType === 'audio' ||
+        contentType === 'document') &&
+      !media.base64
+    ) {
+      console.error(
+        '[evolution-whatsapp-webhook] mídia recebida SEM base64 — provavelmente o webhookBase64 está desligado na Evolution.',
+        {
+          msgId: item.msgId,
+          contentType,
+          mimeType: media.mimeType,
+          fileName: media.fileName,
+        },
+      )
+    }
+
     const upload = await uploadMedia(supabase, {
       userId,
       leadId: ensured.id,
@@ -543,6 +580,10 @@ serve(async (req) => {
     })
 
     if (upload.error) {
+      console.error('[evolution-whatsapp-webhook] falha ao salvar mídia', {
+        msgId: item.msgId,
+        error: upload.error,
+      })
       errors.push(`media:${item.msgId}:${upload.error}`)
       continue
     }
@@ -568,6 +609,16 @@ serve(async (req) => {
   }
 
   const ok = errors.length === 0
+  console.log('[evolution-whatsapp-webhook] resumo', {
+    instance,
+    userId,
+    saved,
+    createdLeads,
+    skipped: skipped.length,
+    errors: errors.length,
+    count: items.length,
+  })
+
   return jsonResponse(
     {
       ok,

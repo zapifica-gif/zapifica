@@ -1,5 +1,7 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
+  AlertCircle,
+  CheckCircle2,
   ImageIcon,
   Megaphone,
   QrCode,
@@ -7,6 +9,7 @@ import {
   RefreshCcw,
   Smartphone,
   Sparkles,
+  Stethoscope,
   X,
 } from 'lucide-react'
 import { supabase } from '../lib/supabase'
@@ -14,8 +17,13 @@ import { NewCampaignModal } from '../components/zapvoice/NewCampaignModal'
 import {
   checkConnectionStatus,
   createInstanceAndGetQr,
+  getEvolutionBaseUrl,
+  getEvolutionWebhookUrl,
+  instanceNameFromUserId,
   sendTextMessage,
   syncWebhookForCurrentInstance,
+  verifyEvolutionInstance,
+  type VerifyInstanceResult,
 } from '../services/evolution'
 
 export function ZapVoicePage() {
@@ -36,7 +44,20 @@ export function ZapVoicePage() {
   const [disconnectHint, setDisconnectHint] = useState(false)
   const [webhookSyncing, setWebhookSyncing] = useState(false)
 
+  const [currentUserId, setCurrentUserId] = useState<string | null>(null)
+  const [verifying, setVerifying] = useState(false)
+  const [verifyResult, setVerifyResult] = useState<VerifyInstanceResult | null>(
+    null,
+  )
+
   const pollingRef = useRef<ReturnType<typeof setInterval> | null>(null)
+
+  const evolutionBaseUrl = useMemo(() => getEvolutionBaseUrl(), [])
+  const supabaseWebhookUrl = useMemo(() => getEvolutionWebhookUrl(), [])
+  const previewInstanceName = useMemo(
+    () => (currentUserId ? instanceNameFromUserId(currentUserId) : null),
+    [currentUserId],
+  )
 
   const closeQrModal = useCallback(() => {
     if (pollingRef.current) {
@@ -58,6 +79,8 @@ export function ZapVoicePage() {
         data: { user },
       } = await supabase.auth.getUser()
       if (!user || cancelled) return
+
+      setCurrentUserId(user.id)
 
       const s = await checkConnectionStatus(user.id)
       if (cancelled) return
@@ -217,24 +240,77 @@ export function ZapVoicePage() {
         return
       }
 
+      setCurrentUserId(user.id)
       const result = await syncWebhookForCurrentInstance(user.id)
+      console.log('[Zapifica][handleSyncWebhook] resultado', result)
       setInfoToast(null)
 
       if (!result.ok) {
-        setErrorToast(
-          result.error ??
-            'Não foi possível sincronizar o webhook com a Evolution.',
-        )
-        window.setTimeout(() => setErrorToast(null), 8000)
+        const baseMsg =
+          result.error ?? 'Não foi possível sincronizar o webhook com a Evolution.'
+        const parts: string[] = [baseMsg]
+        if (result.status) {
+          parts.push(`(HTTP ${result.status})`)
+        }
+        if (result.instanceName) {
+          parts.push(`Instância: ${result.instanceName}`)
+        }
+        if (result.pathTried) {
+          parts.push(`Endpoint: ${result.pathTried}`)
+        }
+        const detailed = parts.join(' · ')
+        setErrorToast(detailed)
+        window.setTimeout(() => setErrorToast(null), 12000)
+        // Roda uma verificação automática para alimentar o painel de status.
+        void (async () => {
+          setVerifying(true)
+          const audit = await verifyEvolutionInstance(user.id)
+          setVerifyResult(audit)
+          setVerifying(false)
+        })()
         return
       }
 
-      setSuccessToast('Webhook sincronizado com sucesso!')
+      const successDetail = result.pathTried
+        ? `Webhook sincronizado via ${result.pathTried}.`
+        : 'Webhook sincronizado com sucesso!'
+      setSuccessToast(successDetail)
       window.setTimeout(() => setSuccessToast(null), 6000)
     } finally {
       setWebhookSyncing(false)
     }
   }, [webhookSyncing])
+
+  const handleTestConnection = useCallback(async () => {
+    if (verifying) return
+    setVerifying(true)
+    setVerifyResult(null)
+    setErrorToast(null)
+    setSuccessToast(null)
+
+    try {
+      const {
+        data: { user },
+        error: authErr,
+      } = await supabase.auth.getUser()
+
+      if (authErr || !user) {
+        setVerifying(false)
+        setErrorToast(
+          'Não foi possível identificar seu usuário. Faça login novamente.',
+        )
+        window.setTimeout(() => setErrorToast(null), 7000)
+        return
+      }
+
+      setCurrentUserId(user.id)
+      const result = await verifyEvolutionInstance(user.id)
+      console.log('[Zapifica][handleTestConnection] resultado', result)
+      setVerifyResult(result)
+    } finally {
+      setVerifying(false)
+    }
+  }, [verifying])
 
   return (
     <div className="space-y-8">
@@ -344,6 +420,113 @@ export function ZapVoicePage() {
               />
               {webhookSyncing ? 'Sincronizando…' : 'Sincronizar Webhook'}
             </button>
+
+            <div className="rounded-xl border border-zinc-200 bg-zinc-50/70 p-4 text-xs text-zinc-600">
+              <div className="mb-2 flex items-center gap-2 text-[11px] font-semibold uppercase tracking-wider text-zinc-500">
+                <Stethoscope className="h-3.5 w-3.5" aria-hidden />
+                Status de Conexão
+              </div>
+
+              <dl className="space-y-1.5">
+                <div className="flex flex-col gap-0.5">
+                  <dt className="text-[11px] font-medium uppercase tracking-wide text-zinc-400">
+                    Instância
+                  </dt>
+                  <dd className="break-all rounded-md bg-white px-2 py-1 font-mono text-[11px] text-zinc-800 ring-1 ring-zinc-200">
+                    {previewInstanceName ?? 'Aguardando login…'}
+                  </dd>
+                </div>
+
+                <div className="flex flex-col gap-0.5">
+                  <dt className="text-[11px] font-medium uppercase tracking-wide text-zinc-400">
+                    Evolution API
+                  </dt>
+                  <dd className="break-all rounded-md bg-white px-2 py-1 font-mono text-[11px] text-zinc-800 ring-1 ring-zinc-200">
+                    {evolutionBaseUrl ??
+                      'VITE_EVOLUTION_URL ausente no .env.local'}
+                  </dd>
+                </div>
+
+                <div className="flex flex-col gap-0.5">
+                  <dt className="text-[11px] font-medium uppercase tracking-wide text-zinc-400">
+                    Webhook (Supabase)
+                  </dt>
+                  <dd className="break-all rounded-md bg-white px-2 py-1 font-mono text-[11px] text-zinc-800 ring-1 ring-zinc-200">
+                    {supabaseWebhookUrl ??
+                      'VITE_SUPABASE_URL ausente no .env.local'}
+                  </dd>
+                </div>
+              </dl>
+
+              <button
+                type="button"
+                onClick={() => void handleTestConnection()}
+                disabled={verifying}
+                className="mt-3 inline-flex w-full items-center justify-center gap-2 rounded-lg border border-zinc-300 bg-white px-3 py-2 text-xs font-semibold text-zinc-700 shadow-sm transition hover:border-brand-300 hover:bg-brand-50 hover:text-brand-700 disabled:cursor-not-allowed disabled:opacity-60"
+              >
+                <Stethoscope
+                  className={`h-3.5 w-3.5 ${verifying ? 'animate-pulse' : ''}`}
+                  aria-hidden
+                />
+                {verifying ? 'Testando…' : 'Testar Conexão Real'}
+              </button>
+
+              {verifyResult ? (
+                <div
+                  className={`mt-3 rounded-lg border px-3 py-2 text-[11px] leading-relaxed ${
+                    verifyResult.ok
+                      ? 'border-emerald-200 bg-emerald-50 text-emerald-900'
+                      : verifyResult.exists === false
+                        ? 'border-rose-200 bg-rose-50 text-rose-900'
+                        : 'border-amber-200 bg-amber-50 text-amber-900'
+                  }`}
+                >
+                  <div className="flex items-center gap-1.5 font-semibold">
+                    {verifyResult.ok ? (
+                      <CheckCircle2 className="h-3.5 w-3.5" aria-hidden />
+                    ) : (
+                      <AlertCircle className="h-3.5 w-3.5" aria-hidden />
+                    )}
+                    {verifyResult.exists === true
+                      ? `Instância encontrada na Evolution${
+                          verifyResult.state ? ` (${verifyResult.state})` : ''
+                        }.`
+                      : verifyResult.exists === false
+                        ? 'Instância NÃO encontrada no motor da Evolution.'
+                        : 'Não conseguimos auditar a Evolution agora.'}
+                  </div>
+
+                  {verifyResult.error ? (
+                    <p className="mt-1 break-words">{verifyResult.error}</p>
+                  ) : null}
+
+                  {verifyResult.webhook ? (
+                    <p className="mt-1 break-words">
+                      Webhook atual:{' '}
+                      <span className="font-mono">
+                        {verifyResult.webhook.url ?? '—'}
+                      </span>{' '}
+                      (enabled={String(verifyResult.webhook.enabled ?? '?')},
+                      base64=
+                      {String(verifyResult.webhook.base64 ?? '?')})
+                    </p>
+                  ) : null}
+
+                  {verifyResult.details.length ? (
+                    <ul className="mt-1 list-disc space-y-0.5 pl-4">
+                      {verifyResult.details.map((d) => (
+                        <li key={d}>{d}</li>
+                      ))}
+                    </ul>
+                  ) : null}
+                </div>
+              ) : (
+                <p className="mt-2 text-[11px] text-zinc-500">
+                  Use o teste para confirmar que a instância existe no motor
+                  da Evolution antes de sincronizar.
+                </p>
+              )}
+            </div>
 
             {whatsappConnected ? (
               <>

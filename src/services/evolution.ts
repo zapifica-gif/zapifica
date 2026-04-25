@@ -72,43 +72,155 @@ function evolutionWebhookUrlFromVite(): string | null {
 /** Eventos que queremos escutar — por enquanto, apenas mensagens recebidas. */
 export const EVOLUTION_WEBHOOK_EVENTS = ['MESSAGES_UPSERT'] as const
 
+/** URL da Evolution lida do .env (útil para o painel de status). */
+export function getEvolutionBaseUrl(): string | null {
+  return resolveConfig()?.baseUrl ?? null
+}
+
+/** URL pública do nosso webhook no Supabase (para mostrar na tela). */
+export function getEvolutionWebhookUrl(): string | null {
+  return evolutionWebhookUrlFromVite()
+}
+
+export type SetInstanceWebhookResult = {
+  ok: boolean
+  error: string | null
+  status: number
+  /** Caminho que efetivamente respondeu (`/webhook/set/...` ou `/v1/webhook/set/...`). */
+  pathTried: string | null
+  /** Resposta crua da Evolution (útil para diagnóstico). */
+  response: unknown
+}
+
 /**
  * Registra (ou atualiza) o webhook de uma instância existente na Evolution.
- * Usa a rota oficial `POST /webhook/set/{instance}`.
+ *
+ * Faz uma série de tentativas para sobreviver a versões diferentes do motor:
+ *   1. `POST /webhook/set/{instance}`  com payload aninhado em `{ webhook: {...} }`
+ *   2. mesmo path com payload achatado (Evolution v2 mais nova)
+ *   3. fallback com prefixo `/v1` para deploys antigos
+ *
+ * Garante explicitamente `enabled: true`, `webhookBase64: true` e o evento
+ * `MESSAGES_UPSERT` para nunca perder mídias do CRM. Sempre loga no console
+ * do navegador o que cada tentativa devolveu, facilitando diagnóstico.
  */
 export async function setInstanceWebhook(
   cfg: EvolutionHttpConfig,
   instanceName: string,
   webhookTargetUrl: string,
   events: readonly string[] = EVOLUTION_WEBHOOK_EVENTS,
-): Promise<{ ok: boolean; error: string | null; status: number }> {
-  const payload = {
-    webhook: {
-      enabled: true,
-      url: webhookTargetUrl,
-      webhookByEvents: false,
-      webhookBase64: true,
-      events: [...events],
-    },
+): Promise<SetInstanceWebhookResult> {
+  const flatPayload = {
+    enabled: true,
+    url: webhookTargetUrl,
+    webhookByEvents: false,
+    webhookBase64: true,
+    events: [...events],
+  }
+  const wrappedPayload = { webhook: flatPayload }
+
+  const safeInstance = encodeURIComponent(instanceName)
+  const candidatePaths = [
+    `/webhook/set/${safeInstance}`,
+    `/v1/webhook/set/${safeInstance}`,
+  ] as const
+
+  type Attempt = {
+    path: string
+    payloadShape: 'wrapped' | 'flat'
+    payload: unknown
   }
 
-  const res = await evolutionFetch(
-    cfg,
-    `/webhook/set/${encodeURIComponent(instanceName)}`,
-    {
+  const attempts: Attempt[] = candidatePaths.flatMap((path) => [
+    { path, payloadShape: 'wrapped', payload: wrappedPayload },
+    { path, payloadShape: 'flat', payload: flatPayload },
+  ])
+
+  let lastFailure: {
+    path: string
+    payloadShape: Attempt['payloadShape']
+    status: number
+    data: unknown
+  } | null = null
+
+  for (const attempt of attempts) {
+    const res = await evolutionFetch(cfg, attempt.path, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload),
-    },
-  )
+      body: JSON.stringify(attempt.payload),
+    })
 
-  if (res.ok) {
-    return { ok: true, error: null, status: res.status }
+    console.log('[Zapifica][setInstanceWebhook] tentativa', {
+      instance: instanceName,
+      path: attempt.path,
+      payloadShape: attempt.payloadShape,
+      status: res.status,
+      ok: res.ok,
+      response: res.data,
+    })
+
+    if (res.ok) {
+      console.log('[Zapifica][setInstanceWebhook] sucesso', {
+        instance: instanceName,
+        path: attempt.path,
+        payloadShape: attempt.payloadShape,
+        webhookUrl: webhookTargetUrl,
+      })
+      return {
+        ok: true,
+        error: null,
+        status: res.status,
+        pathTried: attempt.path,
+        response: res.data,
+      }
+    }
+
+    lastFailure = {
+      path: attempt.path,
+      payloadShape: attempt.payloadShape,
+      status: res.status,
+      data: res.data,
+    }
+
+    // Se a Evolution retornou 401/403 (autenticação) não adianta tentar mais.
+    if (res.status === 401 || res.status === 403) {
+      break
+    }
   }
+
+  if (!lastFailure) {
+    return {
+      ok: false,
+      error: 'Nenhuma resposta válida da Evolution API.',
+      status: 0,
+      pathTried: null,
+      response: null,
+    }
+  }
+
+  const baseError = formatHttpError(lastFailure.status, lastFailure.data)
+  let error = baseError
+  if (lastFailure.status === 404) {
+    error = `Instância "${instanceName}" não encontrada na Evolution (HTTP 404). Verifique se o WhatsApp já foi pareado.`
+  } else if (lastFailure.status === 401 || lastFailure.status === 403) {
+    error = `Evolution recusou a chamada (HTTP ${lastFailure.status}). Confirme VITE_EVOLUTION_GLOBAL_KEY.`
+  }
+
+  console.warn('[Zapifica][setInstanceWebhook] falhou', {
+    instance: instanceName,
+    lastPath: lastFailure.path,
+    payloadShape: lastFailure.payloadShape,
+    status: lastFailure.status,
+    response: lastFailure.data,
+    resolvedError: error,
+  })
+
   return {
     ok: false,
-    error: formatHttpError(res.status, res.data),
-    status: res.status,
+    error,
+    status: lastFailure.status,
+    pathTried: lastFailure.path,
+    response: lastFailure.data,
   }
 }
 
@@ -118,6 +230,12 @@ export type SyncWebhookResult = {
   /** URL que o webhook passou a apontar (útil pra mostrar no toast). */
   webhookUrl: string | null
   instanceName: string | null
+  /** Caminho que respondeu na Evolution (`/webhook/set/...` ou `/v1/...`). */
+  pathTried: string | null
+  /** Resposta crua da Evolution para diagnóstico. */
+  response: unknown
+  /** Status HTTP da última tentativa. */
+  status: number
 }
 
 /**
@@ -136,6 +254,9 @@ export async function syncWebhookForCurrentInstance(
         'Configure VITE_EVOLUTION_URL e VITE_EVOLUTION_GLOBAL_KEY no arquivo .env.local.',
       webhookUrl: null,
       instanceName: null,
+      pathTried: null,
+      response: null,
+      status: 0,
     }
   }
 
@@ -147,6 +268,9 @@ export async function syncWebhookForCurrentInstance(
         'VITE_SUPABASE_URL ausente. Não consegui montar a URL do webhook do Supabase.',
       webhookUrl: null,
       instanceName: null,
+      pathTried: null,
+      response: null,
+      status: 0,
     }
   }
 
@@ -159,6 +283,9 @@ export async function syncWebhookForCurrentInstance(
       error: result.error,
       webhookUrl: webhookTargetUrl,
       instanceName,
+      pathTried: result.pathTried,
+      response: result.response,
+      status: result.status,
     }
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e)
@@ -169,6 +296,9 @@ export async function syncWebhookForCurrentInstance(
           'Não foi possível contatar a Evolution API (rede ou CORS). Verifique VITE_EVOLUTION_URL.',
         webhookUrl: webhookTargetUrl,
         instanceName,
+        pathTried: null,
+        response: null,
+        status: 0,
       }
     }
     return {
@@ -176,7 +306,307 @@ export async function syncWebhookForCurrentInstance(
       error: msg || 'Erro inesperado ao sincronizar o webhook.',
       webhookUrl: webhookTargetUrl,
       instanceName,
+      pathTried: null,
+      response: null,
+      status: 0,
     }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Verificação real da instância (auditoria)
+// ---------------------------------------------------------------------------
+
+export type EvolutionWebhookSummary = {
+  url: string | null
+  enabled: boolean | null
+  base64: boolean | null
+  events: string[] | null
+  pathTried: string | null
+  raw: unknown
+}
+
+export type VerifyInstanceResult = {
+  /** Tudo encontrado e instância existe na Evolution. */
+  ok: boolean
+  /** O nome que o sistema está tentando usar (zapifica_<userId>). */
+  instanceName: string
+  /** URL da Evolution que está sendo consultada (do `.env`). */
+  baseUrl: string | null
+  /** URL do webhook que esperamos que esteja registrada. */
+  expectedWebhookUrl: string | null
+  /** True quando a instância existe no motor (fetchInstances ou connectionState). */
+  exists: boolean | null
+  /** Estado bruto da conexão (open/close/connecting/qr...). */
+  state: string | null
+  /** Conveniência: state em ('open','connected','ready','online'). */
+  connected: boolean
+  /** Telefone associado, quando a Evolution devolve. */
+  phone: string | null
+  /** Webhook configurado hoje na instância (se conseguimos ler). */
+  webhook: EvolutionWebhookSummary | null
+  /** Mensagem de erro consolidada quando algo falha. */
+  error: string | null
+  /** Lista de notas/avisos para diagnóstico no painel. */
+  details: string[]
+}
+
+function pickWebhookFields(payload: unknown): EvolutionWebhookSummary | null {
+  if (!payload || typeof payload !== 'object') return null
+  const root = payload as Record<string, unknown>
+  const node =
+    root.webhook && typeof root.webhook === 'object'
+      ? (root.webhook as Record<string, unknown>)
+      : root
+
+  const url = typeof node.url === 'string' ? node.url : null
+  const enabled = typeof node.enabled === 'boolean' ? node.enabled : null
+  const base64 =
+    typeof node.webhookBase64 === 'boolean'
+      ? node.webhookBase64
+      : typeof node.base64 === 'boolean'
+        ? (node.base64 as boolean)
+        : null
+  const events = Array.isArray(node.events)
+    ? (node.events.filter((e) => typeof e === 'string') as string[])
+    : null
+
+  return {
+    url,
+    enabled,
+    base64,
+    events,
+    pathTried: null,
+    raw: payload,
+  }
+}
+
+async function evolutionFetchWithFallback(
+  cfg: EvolutionHttpConfig,
+  paths: readonly string[],
+  init: RequestInit & { parseJson?: boolean } = {},
+): Promise<{
+  ok: boolean
+  status: number
+  data: unknown
+  pathTried: string | null
+}> {
+  let lastResult: { ok: boolean; status: number; data: unknown } | null = null
+  let lastPath: string | null = null
+
+  for (const path of paths) {
+    const res = await evolutionFetch(cfg, path, init)
+    lastResult = res
+    lastPath = path
+    if (res.ok) {
+      return { ...res, pathTried: path }
+    }
+    if (res.status !== 404) {
+      // 401/403/500 não vão melhorar mudando o prefixo; sai já.
+      return { ...res, pathTried: path }
+    }
+  }
+
+  return lastResult
+    ? { ...lastResult, pathTried: lastPath }
+    : { ok: false, status: 0, data: null, pathTried: null }
+}
+
+/**
+ * Faz uma auditoria real da instância: verifica se ela existe na Evolution,
+ * qual o estado da conexão e qual webhook está registrado hoje. Útil para o
+ * botão "Testar Conexão Real" do painel de status.
+ */
+export async function verifyEvolutionInstance(
+  userId: string,
+): Promise<VerifyInstanceResult> {
+  const baseUrl = getEvolutionBaseUrl()
+  const expectedWebhookUrl = evolutionWebhookUrlFromVite()
+  const instanceName = instanceNameFromUserId(userId)
+  const details: string[] = []
+
+  const cfg = resolveConfig()
+  if (!cfg) {
+    return {
+      ok: false,
+      instanceName,
+      baseUrl,
+      expectedWebhookUrl,
+      exists: null,
+      state: null,
+      connected: false,
+      phone: null,
+      webhook: null,
+      error:
+        'Configure VITE_EVOLUTION_URL e VITE_EVOLUTION_GLOBAL_KEY no arquivo .env.local.',
+      details,
+    }
+  }
+
+  let exists: boolean | null = null
+  let state: string | null = null
+  let phone: string | null = null
+  let webhook: EvolutionWebhookSummary | null = null
+  const errors: string[] = []
+
+  try {
+    const fetchInstances = await evolutionFetchWithFallback(
+      cfg,
+      ['/instance/fetchInstances', '/v1/instance/fetchInstances'],
+      { method: 'GET' },
+    )
+
+    console.log('[Zapifica][verifyEvolutionInstance] fetchInstances', {
+      pathTried: fetchInstances.pathTried,
+      status: fetchInstances.status,
+      sample: Array.isArray(fetchInstances.data)
+        ? `${(fetchInstances.data as unknown[]).length} instância(s)`
+        : fetchInstances.data,
+    })
+
+    if (fetchInstances.ok && Array.isArray(fetchInstances.data)) {
+      const list = fetchInstances.data as unknown[]
+      exists = list.some((entry) => {
+        if (!entry || typeof entry !== 'object') return false
+        const root = entry as Record<string, unknown>
+        if (root.name === instanceName) return true
+        const inst = root.instance
+        if (inst && typeof inst === 'object') {
+          const o = inst as Record<string, unknown>
+          if (o.instanceName === instanceName || o.name === instanceName) {
+            return true
+          }
+        }
+        return false
+      })
+
+      if (!exists) {
+        details.push(
+          `A instância ${instanceName} não apareceu em /instance/fetchInstances. Confira se ela foi criada no motor.`,
+        )
+      }
+    } else if (!fetchInstances.ok) {
+      errors.push(
+        `fetchInstances HTTP ${fetchInstances.status}: ${formatHttpError(
+          fetchInstances.status,
+          fetchInstances.data,
+        )}`,
+      )
+    }
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e)
+    errors.push(`fetchInstances falhou: ${msg}`)
+  }
+
+  try {
+    const conn = await evolutionFetchWithFallback(
+      cfg,
+      [
+        `/instance/connectionState/${encodeURIComponent(instanceName)}`,
+        `/v1/instance/connectionState/${encodeURIComponent(instanceName)}`,
+      ],
+      { method: 'GET' },
+    )
+
+    console.log('[Zapifica][verifyEvolutionInstance] connectionState', {
+      pathTried: conn.pathTried,
+      status: conn.status,
+      response: conn.data,
+    })
+
+    if (conn.ok) {
+      exists = exists ?? true
+      const data = conn.data as Record<string, unknown> | null
+      const inst = data?.instance as Record<string, unknown> | undefined
+      const stateRaw = inst?.state ?? data?.state
+      state = typeof stateRaw === 'string' ? stateRaw : null
+      phone = pickPhoneFromPayload(conn.data)
+    } else if (conn.status === 404) {
+      exists = false
+      details.push(
+        `connectionState devolveu 404 — instância "${instanceName}" não existe no motor.`,
+      )
+    } else if (conn.status > 0) {
+      errors.push(
+        `connectionState HTTP ${conn.status}: ${formatHttpError(conn.status, conn.data)}`,
+      )
+    }
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e)
+    errors.push(`connectionState falhou: ${msg}`)
+  }
+
+  try {
+    const find = await evolutionFetchWithFallback(
+      cfg,
+      [
+        `/webhook/find/${encodeURIComponent(instanceName)}`,
+        `/v1/webhook/find/${encodeURIComponent(instanceName)}`,
+      ],
+      { method: 'GET' },
+    )
+
+    console.log('[Zapifica][verifyEvolutionInstance] webhook/find', {
+      pathTried: find.pathTried,
+      status: find.status,
+      response: find.data,
+    })
+
+    if (find.ok) {
+      const summary = pickWebhookFields(find.data)
+      if (summary) {
+        webhook = { ...summary, pathTried: find.pathTried }
+        if (!webhook.enabled) {
+          details.push('Webhook está desativado (enabled=false) na Evolution.')
+        }
+        if (webhook.base64 === false) {
+          details.push(
+            'webhookBase64 = false — mídias não vão chegar ao Supabase. Clique em Sincronizar Webhook.',
+          )
+        }
+        if (
+          webhook.url &&
+          expectedWebhookUrl &&
+          webhook.url.replace(/\/+$/, '') !==
+            expectedWebhookUrl.replace(/\/+$/, '')
+        ) {
+          details.push(
+            `Webhook aponta para ${webhook.url}, mas o esperado é ${expectedWebhookUrl}. Sincronize de novo.`,
+          )
+        }
+      }
+    } else if (find.status === 404) {
+      details.push('A instância existe, mas ainda não tem webhook registrado.')
+    } else if (find.status > 0) {
+      errors.push(
+        `webhook/find HTTP ${find.status}: ${formatHttpError(find.status, find.data)}`,
+      )
+    }
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e)
+    errors.push(`webhook/find falhou: ${msg}`)
+  }
+
+  const connected =
+    typeof state === 'string'
+      ? ['open', 'connected', 'ready', 'online'].includes(state.toLowerCase())
+      : false
+
+  const ok = exists === true && errors.length === 0
+  const error = errors.length ? errors.join(' · ') : null
+
+  return {
+    ok,
+    instanceName,
+    baseUrl,
+    expectedWebhookUrl,
+    exists,
+    state,
+    connected,
+    phone,
+    webhook,
+    error,
+    details,
   }
 }
 
