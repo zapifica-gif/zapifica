@@ -1,5 +1,12 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
-import { BookOpen, Loader2, Save, SquarePen } from 'lucide-react'
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ChangeEvent,
+} from 'react'
+import { BookOpen, Link2, Loader2, Save, SquarePen, Upload } from 'lucide-react'
 import { supabase } from '../lib/supabase'
 
 type AiCompanyContextRow = {
@@ -30,6 +37,11 @@ export function AiTrainingPage() {
   const [materialText, setMaterialText] = useState('')
   const [addingMaterial, setAddingMaterial] = useState(false)
   const [materials, setMaterials] = useState<AiTrainingMaterialRow[]>([])
+
+  const [studying, setStudying] = useState(false)
+  const [linkModalOpen, setLinkModalOpen] = useState(false)
+  const [linkUrl, setLinkUrl] = useState('')
+  const fileInputRef = useRef<HTMLInputElement | null>(null)
 
   const canAddMaterial = useMemo(() => materialText.trim().length > 0, [materialText])
 
@@ -98,6 +110,88 @@ export function AiTrainingPage() {
     setLoading(false)
   }, [])
 
+  function textoErroInvoke(err: unknown, data: unknown): string {
+    if (err instanceof Error) {
+      const extra =
+        data && typeof data === 'object' && 'error' in data
+          ? String((data as { error: unknown }).error)
+          : ''
+      return extra ? `${err.message}: ${extra}` : err.message
+    }
+    return String(err)
+  }
+
+  async function processarLink() {
+    const url = linkUrl.trim()
+    if (!url) {
+      setError('Informe uma URL válida.')
+      return
+    }
+    setStudying(true)
+    setError(null)
+    const { data, error } = await supabase.functions.invoke('process-ai-training', {
+      body: { type: 'link', url },
+    })
+    setStudying(false)
+    if (error) {
+      setError(textoErroInvoke(error, data))
+      return
+    }
+    const row = (data as { material?: AiTrainingMaterialRow } | null)?.material
+    if (row) {
+      setMaterials((prev) => [row, ...prev])
+    }
+    setLinkModalOpen(false)
+    setLinkUrl('')
+    void loadAll()
+  }
+
+  async function onEscolherArquivo(e: ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0] ?? null
+    e.target.value = ''
+    if (!file) return
+
+    const {
+      data: { user },
+    } = await supabase.auth.getUser()
+    if (!user) {
+      setError('Sessão inválida. Entre novamente.')
+      return
+    }
+
+    const safe = file.name.replace(/[^a-zA-Z0-9._-]/g, '_')
+    const path = `${user.id}/treino_${crypto.randomUUID()}_${safe}`
+
+    setStudying(true)
+    setError(null)
+
+    const { error: upErr } = await supabase.storage
+      .from('training_files')
+      .upload(path, file, {
+        upsert: true,
+        contentType: file.type || undefined,
+      })
+    if (upErr) {
+      setStudying(false)
+      setError(`Falha no upload: ${upErr.message}`)
+      return
+    }
+
+    const { data, error } = await supabase.functions.invoke('process-ai-training', {
+      body: { type: 'file', filePath: path },
+    })
+    setStudying(false)
+    if (error) {
+      setError(textoErroInvoke(error, data))
+      return
+    }
+    const row = (data as { material?: AiTrainingMaterialRow } | null)?.material
+    if (row) {
+      setMaterials((prev) => [row, ...prev])
+    }
+    void loadAll()
+  }
+
   useEffect(() => {
     void loadAll()
   }, [loadAll])
@@ -158,7 +252,26 @@ export function AiTrainingPage() {
   }
 
   return (
-    <div className="space-y-6">
+    <div className="relative space-y-6">
+      {studying ? (
+        <div
+          className="fixed inset-0 z-[90] flex items-center justify-center bg-zinc-950/45 px-6 backdrop-blur-[2px]"
+          role="status"
+          aria-live="polite"
+        >
+          <div className="max-w-md rounded-2xl border border-zinc-200 bg-white p-6 text-center shadow-2xl">
+            <Loader2 className="mx-auto h-10 w-10 animate-spin text-brand-600" aria-hidden />
+            <p className="mt-4 text-sm font-semibold text-zinc-900">
+              A IA está estudando o material (isso pode levar 1 minuto)…
+            </p>
+            <p className="mt-2 text-xs text-zinc-600">
+              Estamos extraindo o conteúdo e gerando um resumo estratégico com o modelo
+              DeepSeek Reasoner antes de salvar na base de conhecimento.
+            </p>
+          </div>
+        </div>
+      ) : null}
+
       <header className="flex items-start justify-between gap-4">
         <div>
           <h2 className="text-lg font-semibold text-zinc-900">Treinamento da IA</h2>
@@ -218,7 +331,7 @@ export function AiTrainingPage() {
           <div>
             <h3 className="text-sm font-semibold text-zinc-900">Base de Conhecimento</h3>
             <p className="text-xs text-zinc-500">
-              Fase 1: adicionar texto. Upload e links entram na Fase 2.
+              Texto direto, links e arquivos (PDF/TXT) viram resumos processados pela IA.
             </p>
           </div>
         </div>
@@ -247,29 +360,47 @@ export function AiTrainingPage() {
           </div>
 
           <div className="rounded-xl border border-dashed border-zinc-300 bg-white p-4">
-            <p className="text-xs font-semibold text-zinc-700">Em breve</p>
+            <p className="text-xs font-semibold text-zinc-700">Arquivos e links</p>
+            <input
+              ref={fileInputRef}
+              type="file"
+              accept=".pdf,.txt,.doc,.docx,application/pdf,text/plain"
+              className="hidden"
+              onChange={(e) => void onEscolherArquivo(e)}
+            />
             <div className="mt-3 grid grid-cols-1 gap-2">
               <button
                 type="button"
-                disabled
-                className="rounded-xl border border-zinc-200 bg-zinc-50 px-4 py-2 text-sm font-semibold text-zinc-400"
+                onClick={() => fileInputRef.current?.click()}
+                disabled={loading || studying}
+                className="inline-flex items-center justify-center gap-2 rounded-xl border border-zinc-200 bg-zinc-50 px-4 py-2 text-sm font-semibold text-zinc-800 transition hover:border-brand-300 hover:bg-brand-50 hover:text-brand-800 disabled:cursor-not-allowed disabled:opacity-50"
               >
-                Fazer Upload de PDF/Doc
+                <Upload className="h-4 w-4" />
+                Fazer Upload de PDF/TXT
               </button>
               <button
                 type="button"
-                disabled
-                className="rounded-xl border border-zinc-200 bg-zinc-50 px-4 py-2 text-sm font-semibold text-zinc-400"
+                onClick={() => {
+                  setLinkUrl('')
+                  setLinkModalOpen(true)
+                }}
+                disabled={loading || studying}
+                className="inline-flex items-center justify-center gap-2 rounded-xl border border-zinc-200 bg-zinc-50 px-4 py-2 text-sm font-semibold text-zinc-800 transition hover:border-brand-300 hover:bg-brand-50 hover:text-brand-800 disabled:cursor-not-allowed disabled:opacity-50"
               >
+                <Link2 className="h-4 w-4" />
                 Adicionar Link
               </button>
             </div>
+            <p className="mt-2 text-[11px] leading-relaxed text-zinc-500">
+              DOC/DOCX: você pode enviar, mas o processamento automático nesta versão prioriza
+              <span className="font-semibold"> PDF e TXT</span>. Para Word, exporte em PDF.
+            </p>
           </div>
         </div>
 
         <div className="mt-5">
           <div className="flex items-center justify-between">
-            <p className="text-xs font-semibold text-zinc-700">Textos adicionados</p>
+            <p className="text-xs font-semibold text-zinc-700">Materiais salvos</p>
             <button
               type="button"
               onClick={() => void loadAll()}
@@ -293,7 +424,13 @@ export function AiTrainingPage() {
                 >
                   <div className="flex items-center justify-between gap-3">
                     <p className="text-[11px] font-semibold uppercase tracking-wide text-zinc-500">
-                      {m.type === 'text' ? 'Texto' : m.type}
+                      {m.type === 'text'
+                        ? 'Texto'
+                        : m.type === 'link'
+                          ? 'Link'
+                          : m.type === 'file'
+                            ? 'Arquivo'
+                            : m.type}
                       {m.is_processed ? ' · Processado' : ' · Pendente'}
                     </p>
                     <p className="text-[11px] text-zinc-400 tabular-nums">
@@ -308,12 +445,65 @@ export function AiTrainingPage() {
                   <p className="mt-2 whitespace-pre-wrap break-words text-sm text-zinc-800">
                     {m.content ?? m.url ?? ''}
                   </p>
+                  {m.url && m.type !== 'text' ? (
+                    <a
+                      href={m.url}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="mt-2 inline-block text-xs font-semibold text-brand-700 hover:underline"
+                    >
+                      Abrir origem
+                    </a>
+                  ) : null}
                 </li>
               ))}
             </ul>
           )}
         </div>
       </section>
+
+      {linkModalOpen ? (
+        <div className="fixed inset-0 z-[80] flex items-center justify-center bg-zinc-950/50 px-4 backdrop-blur-[2px]">
+          <div
+            className="w-full max-w-md rounded-2xl border border-zinc-200 bg-white p-5 shadow-2xl"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="link-modal-title"
+          >
+            <h3 id="link-modal-title" className="text-sm font-semibold text-zinc-900">
+              Adicionar link
+            </h3>
+            <p className="mt-1 text-xs text-zinc-500">
+              Cole a URL pública (http ou https). A IA vai ler a página e gerar um resumo.
+            </p>
+            <input
+              type="url"
+              value={linkUrl}
+              onChange={(e) => setLinkUrl(e.target.value)}
+              placeholder="https://…"
+              className="mt-3 w-full rounded-xl border border-zinc-200 bg-zinc-50 px-3 py-2.5 text-sm outline-none focus:border-brand-400 focus:bg-white focus:ring-2 focus:ring-brand-600/20"
+            />
+            <div className="mt-4 flex justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => setLinkModalOpen(false)}
+                className="rounded-xl border border-zinc-200 bg-white px-4 py-2 text-sm font-semibold text-zinc-700 hover:bg-zinc-50"
+              >
+                Cancelar
+              </button>
+              <button
+                type="button"
+                onClick={() => void processarLink()}
+                disabled={studying || !linkUrl.trim()}
+                className="inline-flex items-center gap-2 rounded-xl bg-gradient-to-r from-brand-600 to-brand-700 px-4 py-2 text-sm font-semibold text-white shadow-md hover:from-brand-500 hover:to-brand-600 disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                {studying ? <Loader2 className="h-4 w-4 animate-spin" /> : null}
+                Estudar link
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
     </div>
   )
 }
