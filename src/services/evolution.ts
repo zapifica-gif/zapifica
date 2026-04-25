@@ -87,7 +87,7 @@ export async function setInstanceWebhook(
       enabled: true,
       url: webhookTargetUrl,
       webhookByEvents: false,
-      webhookBase64: false,
+      webhookBase64: true, // ALTERADO PARA TRUE: Ativa o envio de imagens/áudios
       events: [...events],
     },
   }
@@ -182,9 +182,6 @@ export async function syncWebhookForCurrentInstance(
 
 /**
  * Normaliza destino para Evolution: número (apenas dígitos) ou JID de grupo (@g.us).
- * - Já contém `@g.us` → envia o identificador como veio (grupo).
- * - JID `...@s.whatsapp.net` → extrai a parte numérica antes do `@`.
- * - Começa com dígito (após trim) e não é grupo → só dígitos (DDI + número).
  */
 export function normalizeEvolutionRecipient(
   raw: string,
@@ -681,7 +678,7 @@ export async function createInstanceAndGetQr(
         enabled: true,
         url: webhookTargetUrl,
         webhookByEvents: false,
-        webhookBase64: false,
+        webhookBase64: true, // ALTERADO PARA TRUE: Ativa mídias na criação da instância
         events: [...EVOLUTION_WEBHOOK_EVENTS],
       }
     }
@@ -712,13 +709,11 @@ export async function createInstanceAndGetQr(
       }
     }
 
-    // Garante o webhook mesmo em versões da Evolution que ignoram o campo
-    // `webhook` no /instance/create, ou quando a instância já existia.
     if (webhookTargetUrl) {
       try {
         await setInstanceWebhook(cfg, instanceName, webhookTargetUrl)
       } catch {
-        // não bloqueia o fluxo do QR Code se o set-webhook falhar aqui
+        // não bloqueia o fluxo do QR Code
       }
     }
 
