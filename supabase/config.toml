@@ -12,3 +12,6 @@ verify_jwt = false
 
 [functions.process-ai-training]
 verify_jwt = true
+
+[functions.apify-extractor]
+verify_jwt = true

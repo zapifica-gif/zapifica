@@ -9,6 +9,7 @@ import { HomePage } from './pages/HomePage'
 import { LoginPage } from './pages/LoginPage'
 import { SettingsPage } from './pages/SettingsPage'
 import { ZapVoicePage } from './pages/ZapVoicePage'
+import { LeadExtractorPage } from './pages/LeadExtractor'
 import type { DashboardNavId } from './components/Sidebar'
 
 function navTitle(id: DashboardNavId): string {
@@ -23,6 +24,8 @@ function navTitle(id: DashboardNavId): string {
       return 'Treinamento IA'
     case 'zap-voice':
       return 'Zap Voice'
+    case 'lead-extractor':
+      return 'Extrator de Leads'
     case 'settings':
       return 'Configurações'
     default:
@@ -30,7 +33,13 @@ function navTitle(id: DashboardNavId): string {
   }
 }
 
-function DashboardContent({ activeNav }: { activeNav: DashboardNavId }) {
+function DashboardContent({
+  activeNav,
+  onNavigate,
+}: {
+  activeNav: DashboardNavId
+  onNavigate: (id: DashboardNavId) => void
+}) {
   switch (activeNav) {
     case 'home':
       return <HomePage />
@@ -42,6 +51,8 @@ function DashboardContent({ activeNav }: { activeNav: DashboardNavId }) {
       return <AiTrainingPage />
     case 'zap-voice':
       return <ZapVoicePage />
+    case 'lead-extractor':
+      return <LeadExtractorPage onOpenCrm={() => onNavigate('crm')} />
     case 'settings':
       return <SettingsPage />
     default:
@@ -106,7 +117,7 @@ export default function App() {
       onNavigate={setActiveNav}
       title={navTitle(activeNav)}
     >
-      <DashboardContent activeNav={activeNav} />
+      <DashboardContent activeNav={activeNav} onNavigate={setActiveNav} />
     </DashboardLayout>
   )
 }

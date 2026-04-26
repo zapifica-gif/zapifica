@@ -1,11 +1,12 @@
 import {
+  Brain,
   CalendarDays,
   Home,
   LogOut,
   Mic2,
+  Search,
   Settings2,
   SquareKanban,
-  Brain,
 } from 'lucide-react'
 import logoZapifica from '../assets/logo-zapifica.png'
 import { supabase } from '../lib/supabase'
@@ -16,6 +17,7 @@ export type DashboardNavId =
   | 'agenda'
   | 'ai-training'
   | 'zap-voice'
+  | 'lead-extractor'
   | 'settings'
 
 type NavItem = {
@@ -30,6 +32,7 @@ const items: NavItem[] = [
   { id: 'agenda', label: 'Agenda Suprema', icon: CalendarDays },
   { id: 'ai-training', label: '🧠 Treinamento IA', icon: Brain },
   { id: 'zap-voice', label: 'Zap Voice', icon: Mic2 },
+  { id: 'lead-extractor', label: '🔍 Extrator de Leads', icon: Search },
   { id: 'settings', label: 'Configurações', icon: Settings2 },
 ]
 
