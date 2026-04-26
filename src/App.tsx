@@ -8,7 +8,6 @@ import { CrmPage } from './pages/CrmPage'
 import { HomePage } from './pages/HomePage'
 import { LoginPage } from './pages/LoginPage'
 import { SettingsPage } from './pages/SettingsPage'
-import { ZapVoicePage } from './pages/ZapVoicePage'
 import { ZapVoiceCampaignsPage } from './pages/ZapVoiceCampaigns'
 import { LeadExtractorPage } from './pages/LeadExtractor'
 import type { DashboardNavId } from './components/Sidebar'
@@ -23,8 +22,6 @@ function navTitle(id: DashboardNavId): string {
       return 'Agenda Suprema'
     case 'ai-training':
       return 'Treinamento IA'
-    case 'zap-voice':
-      return 'Zap Voice'
     case 'zv-campaigns':
       return 'Campanhas Zap Voice'
     case 'lead-extractor':
@@ -52,8 +49,6 @@ function DashboardContent({
       return <AgendaPage />
     case 'ai-training':
       return <AiTrainingPage />
-    case 'zap-voice':
-      return <ZapVoicePage />
     case 'zv-campaigns':
       return <ZapVoiceCampaignsPage />
     case 'lead-extractor':

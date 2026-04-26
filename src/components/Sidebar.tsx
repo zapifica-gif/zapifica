@@ -4,7 +4,6 @@ import {
   Home,
   LogOut,
   Megaphone,
-  Mic2,
   Search,
   Settings2,
   SquareKanban,
@@ -17,7 +16,6 @@ export type DashboardNavId =
   | 'crm'
   | 'agenda'
   | 'ai-training'
-  | 'zap-voice'
   | 'zv-campaigns'
   | 'lead-extractor'
   | 'settings'
@@ -33,7 +31,6 @@ const items: NavItem[] = [
   { id: 'crm', label: 'CRM / Funil', icon: SquareKanban },
   { id: 'agenda', label: 'Agenda Suprema', icon: CalendarDays },
   { id: 'ai-training', label: '🧠 Treinamento IA', icon: Brain },
-  { id: 'zap-voice', label: 'Zap Voice', icon: Mic2 },
   { id: 'zv-campaigns', label: '📣 Campanhas', icon: Megaphone },
   { id: 'lead-extractor', label: '🔍 Extrator de Leads', icon: Search },
   { id: 'settings', label: 'Configurações', icon: Settings2 },

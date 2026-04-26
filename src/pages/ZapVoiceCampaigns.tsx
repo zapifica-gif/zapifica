@@ -1,4 +1,10 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useState,
+  type ChangeEventHandler,
+} from 'react'
 import {
   ArrowDown,
   Check,
@@ -7,16 +13,21 @@ import {
   ChevronUp,
   CircleSlash,
   Clock,
+  FileText,
+  Image as ImageIcon,
   Loader2,
   Megaphone,
   MessageSquare,
+  Mic,
   Pause,
   Play,
   Plus,
   Save,
   Sparkles,
   Trash2,
+  Upload,
   Users,
+  Video,
   Zap,
 } from 'lucide-react'
 import { supabase } from '../lib/supabase'
@@ -26,6 +37,9 @@ import { supabase } from '../lib/supabase'
 // ---------------------------------------------------------------------------
 
 type CampaignStatus = 'draft' | 'active' | 'paused' | 'completed'
+
+/** Alinhado ao enum `public.zv_funnel_media_type` (Supabase). */
+export type FunnelMediaType = 'text' | 'image' | 'video' | 'audio' | 'document'
 
 type Campaign = {
   id: string
@@ -44,6 +58,8 @@ type FunnelStep = {
   campaign_id: string
   step_order: number
   message: string
+  media_type: FunnelMediaType
+  media_url: string | null
   delay_seconds: number
   expected_trigger: string | null
   created_at: string
@@ -209,7 +225,7 @@ export function ZapVoiceCampaignsPage() {
     const { data, error: e } = await supabase
       .from('zv_funnels')
       .select(
-        'id, campaign_id, step_order, message, delay_seconds, expected_trigger, created_at, updated_at',
+        'id, campaign_id, step_order, message, media_type, media_url, delay_seconds, expected_trigger, created_at, updated_at',
       )
       .eq('campaign_id', campaignId)
       .order('step_order', { ascending: true })
@@ -272,6 +288,8 @@ export function ZapVoiceCampaignsPage() {
         campaign_id: created.id,
         step_order: 1,
         message: 'Olá {nome}, tudo bem? Aqui é da equipe Zapifica…',
+        media_type: 'text',
+        media_url: null,
         delay_seconds: 0,
         expected_trigger: null,
       })
@@ -343,11 +361,13 @@ export function ZapVoiceCampaignsPage() {
         campaign_id: selected.id,
         step_order: nextOrder,
         message: '',
+        media_type: 'text',
+        media_url: null,
         delay_seconds: selected.default_delay_seconds,
         expected_trigger: null,
       })
       .select(
-        'id, campaign_id, step_order, message, delay_seconds, expected_trigger, created_at, updated_at',
+        'id, campaign_id, step_order, message, media_type, media_url, delay_seconds, expected_trigger, created_at, updated_at',
       )
       .single()
     if (e || !data) {
@@ -360,7 +380,12 @@ export function ZapVoiceCampaignsPage() {
   const saveStep = useCallback(
     async (
       stepId: string,
-      patch: Partial<Pick<FunnelStep, 'message' | 'delay_seconds' | 'expected_trigger'>>,
+      patch: Partial<
+        Pick<
+          FunnelStep,
+          'message' | 'media_type' | 'media_url' | 'delay_seconds' | 'expected_trigger'
+        >
+      >,
     ) => {
       setSavingStepId(stepId)
       const { error: e } = await supabase
@@ -845,6 +870,7 @@ export function ZapVoiceCampaignsPage() {
                       <li key={step.id}>
                         <StepCard
                           step={step}
+                          userId={userId}
                           index={idx + 1}
                           isLast={idx === steps.length - 1}
                           isFirst={idx === 0}
@@ -876,14 +902,36 @@ export function ZapVoiceCampaignsPage() {
 // Card de etapa (componente local)
 // ---------------------------------------------------------------------------
 
+const MEDIA_TYPE_OPTIONS: {
+  value: FunnelMediaType
+  label: string
+  icon: typeof MessageSquare
+}[] = [
+  { value: 'text', label: 'Texto', icon: MessageSquare },
+  { value: 'image', label: 'Foto', icon: ImageIcon },
+  { value: 'video', label: 'Vídeo', icon: Video },
+  { value: 'audio', label: 'Áudio', icon: Mic },
+  { value: 'document', label: 'Arquivo', icon: FileText },
+]
+
+function sanitizeFileName(name: string): string {
+  return name.replace(/[^a-zA-Z0-9._-]+/g, '_').slice(0, 120) || 'arquivo'
+}
+
 type StepCardProps = {
   step: FunnelStep
+  userId: string | null
   index: number
   isFirst: boolean
   isLast: boolean
   saving: boolean
   onSave: (
-    patch: Partial<Pick<FunnelStep, 'message' | 'delay_seconds' | 'expected_trigger'>>,
+    patch: Partial<
+      Pick<
+        FunnelStep,
+        'message' | 'media_type' | 'media_url' | 'delay_seconds' | 'expected_trigger'
+      >
+    >,
   ) => void
   onDelete: () => void
   onMoveUp: () => void
@@ -892,6 +940,7 @@ type StepCardProps = {
 
 function StepCard({
   step,
+  userId,
   index,
   isFirst,
   isLast,
@@ -902,23 +951,77 @@ function StepCard({
   onMoveDown,
 }: StepCardProps) {
   const [message, setMessage] = useState(step.message)
+  const [mediaType, setMediaType] = useState<FunnelMediaType>(step.media_type)
+  const [mediaUrl, setMediaUrl] = useState(step.media_url ?? '')
   const [delaySeconds, setDelaySeconds] = useState(step.delay_seconds)
   const [trigger, setTrigger] = useState(step.expected_trigger ?? '')
+  const [uploading, setUploading] = useState(false)
+  const [localError, setLocalError] = useState<string | null>(null)
 
   useEffect(() => {
     setMessage(step.message)
+    setMediaType(step.media_type)
+    setMediaUrl(step.media_url ?? '')
     setDelaySeconds(step.delay_seconds)
     setTrigger(step.expected_trigger ?? '')
-  }, [step.id, step.message, step.delay_seconds, step.expected_trigger])
+  }, [step.id, step.message, step.media_type, step.media_url, step.delay_seconds, step.expected_trigger])
 
+  const mediaNeedsUrl = mediaType !== 'text'
   const dirty =
     message !== step.message ||
+    mediaType !== step.media_type ||
+    (mediaUrl || '').trim() !== (step.media_url ?? '').trim() ||
     delaySeconds !== step.delay_seconds ||
     (trigger || '') !== (step.expected_trigger ?? '')
 
+  const handlePickMediaType = (next: FunnelMediaType) => {
+    setLocalError(null)
+    setMediaType(next)
+    if (next === 'text') {
+      setMediaUrl('')
+    }
+  }
+
+  const handleUpload: ChangeEventHandler<HTMLInputElement> = async (e) => {
+    const file = e.target.files?.[0]
+    e.target.value = ''
+    if (!file || !userId) {
+      if (!userId) setLocalError('Faça login para enviar arquivos.')
+      return
+    }
+    setLocalError(null)
+    setUploading(true)
+    const path = `${userId}/${Date.now()}_${sanitizeFileName(file.name)}`
+    const { error: upErr } = await supabase.storage
+      .from('campaign_media')
+      .upload(path, file, { upsert: true, cacheControl: '3600' })
+    if (upErr) {
+      setLocalError(`Upload: ${upErr.message}`)
+      setUploading(false)
+      return
+    }
+    const { data: pub } = supabase.storage.from('campaign_media').getPublicUrl(path)
+    setMediaUrl(pub.publicUrl)
+    setUploading(false)
+  }
+
+  const handleSaveClick = () => {
+    setLocalError(null)
+    if (mediaNeedsUrl && !mediaUrl.trim()) {
+      setLocalError('Informe a URL da mídia ou faça upload (tipos de imagem, vídeo, áudio e arquivo exigem link público).')
+      return
+    }
+    onSave({
+      message,
+      media_type: mediaType,
+      media_url: mediaType === 'text' ? null : mediaUrl.trim() || null,
+      delay_seconds: delaySeconds,
+      expected_trigger: trigger.trim() || null,
+    })
+  }
+
   return (
     <div className="overflow-hidden rounded-2xl border border-zinc-200 bg-gradient-to-br from-white via-white to-brand-50/30 shadow-sm ring-1 ring-zinc-100">
-      {/* Header da etapa */}
       <div className="flex items-center justify-between gap-2 border-b border-zinc-100 bg-zinc-50/50 px-4 py-2">
         <div className="flex items-center gap-2">
           <span className="inline-flex h-7 w-7 items-center justify-center rounded-lg bg-gradient-to-br from-brand-600 to-brand-700 text-[11px] font-bold text-white shadow-sm">
@@ -963,33 +1066,144 @@ function StepCard({
         </div>
       </div>
 
-      {/* Body */}
       <div className="grid gap-4 p-4 lg:grid-cols-[minmax(0,1fr)_220px]">
-        <div>
-          <label className="mb-1.5 flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wider text-zinc-500">
-            <MessageSquare className="h-3 w-3" aria-hidden />
-            Conteúdo da mensagem
-          </label>
-          <textarea
-            rows={5}
-            value={message}
-            onChange={(e) => setMessage(e.target.value)}
-            placeholder="Olá {nome}, tudo bem? Aqui é da equipe…"
-            className="w-full resize-y rounded-xl border border-zinc-200 bg-white px-3 py-2.5 text-sm leading-relaxed text-zinc-900 shadow-inner focus:border-brand-300 focus:outline-none focus:ring-2 focus:ring-brand-500/20"
-          />
-          <div className="mt-2 flex flex-wrap gap-1.5">
-            {MESSAGE_VARIABLES.map((v) => (
-              <button
-                key={v.key}
-                type="button"
-                onClick={() => setMessage((prev) => `${prev}${v.key}`)}
-                title={v.helper}
-                className="rounded-md border border-zinc-200 bg-white px-1.5 py-0.5 font-mono text-[10px] font-semibold text-brand-700 transition hover:border-brand-300 hover:bg-brand-50"
-              >
-                {v.key}
-              </button>
-            ))}
+        <div className="space-y-3">
+          <div>
+            <p className="mb-1.5 text-[11px] font-semibold uppercase tracking-wider text-zinc-500">
+              Tipo de mensagem
+            </p>
+            <div className="flex flex-wrap gap-1.5">
+              {MEDIA_TYPE_OPTIONS.map(({ value, label, icon: Icon }) => {
+                const on = mediaType === value
+                return (
+                  <button
+                    key={value}
+                    type="button"
+                    onClick={() => handlePickMediaType(value)}
+                    title={label}
+                    className={`inline-flex h-9 w-9 items-center justify-center rounded-lg border text-zinc-600 transition ${
+                      on
+                        ? 'border-brand-500 bg-brand-50 text-brand-800 ring-1 ring-brand-200'
+                        : 'border-zinc-200 bg-white hover:border-zinc-300'
+                    }`}
+                  >
+                    <Icon className="h-4 w-4" aria-hidden />
+                    <span className="sr-only">{label}</span>
+                  </button>
+                )
+              })}
+            </div>
           </div>
+
+          {mediaNeedsUrl ? (
+            <div className="rounded-xl border border-zinc-200 bg-white p-3">
+              <p className="text-[11px] font-semibold uppercase tracking-wider text-zinc-500">
+                Mídia (URL pública)
+              </p>
+              <p className="mt-0.5 text-[10px] text-zinc-500">
+                Cole um link acessível sem login ou envie do seu computador (bucket
+                `campaign_media`).
+              </p>
+              <div className="mt-2 flex flex-col gap-2 sm:flex-row sm:items-center">
+                <input
+                  value={mediaUrl}
+                  onChange={(e) => {
+                    setLocalError(null)
+                    setMediaUrl(e.target.value)
+                  }}
+                  placeholder="https://…"
+                  className="min-w-0 flex-1 rounded-lg border border-zinc-200 bg-zinc-50/50 px-2.5 py-2 text-xs text-zinc-900 shadow-inner focus:border-brand-300 focus:outline-none focus:ring-2 focus:ring-brand-500/20"
+                />
+                <label className="inline-flex cursor-pointer items-center justify-center gap-1.5 rounded-lg border border-zinc-200 bg-white px-2.5 py-2 text-xs font-semibold text-zinc-700 transition hover:border-brand-300 hover:bg-brand-50">
+                  {uploading ? (
+                    <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden />
+                  ) : (
+                    <Upload className="h-3.5 w-3.5" aria-hidden />
+                  )}
+                  Enviar arquivo
+                  <input
+                    type="file"
+                    className="sr-only"
+                    accept={
+                      mediaType === 'image'
+                        ? 'image/*'
+                        : mediaType === 'video'
+                          ? 'video/*'
+                          : mediaType === 'audio'
+                            ? 'audio/*'
+                            : mediaType === 'document'
+                              ? '.pdf,.doc,.docx,.xls,.xlsx,.zip'
+                              : '*/*'
+                    }
+                    onChange={handleUpload}
+                    disabled={uploading || !userId}
+                  />
+                </label>
+              </div>
+              {mediaUrl.trim() && (mediaType === 'image' || mediaType === 'video') ? (
+                <div className="mt-3 overflow-hidden rounded-lg border border-zinc-200 bg-zinc-100">
+                  {mediaType === 'image' ? (
+                    <img
+                      src={mediaUrl}
+                      alt="Prévia da mídia"
+                      className="max-h-40 w-full object-contain"
+                      onError={() => setLocalError('Não foi possível carregar a prévia (verifique a URL).')}
+                    />
+                  ) : (
+                    <video
+                      src={mediaUrl}
+                      className="max-h-40 w-full object-contain"
+                      controls
+                      muted
+                      playsInline
+                    />
+                  )}
+                </div>
+              ) : null}
+              {mediaUrl.trim() && (mediaType === 'audio' || mediaType === 'document') ? (
+                <p className="mt-2 truncate text-[10px] text-zinc-600" title={mediaUrl}>
+                  {mediaType === 'audio' ? 'Áudio' : 'Documento'}: {mediaUrl.slice(0, 80)}
+                  {mediaUrl.length > 80 ? '…' : ''}
+                </p>
+              ) : null}
+            </div>
+          ) : null}
+
+          <div>
+            <label className="mb-1.5 flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wider text-zinc-500">
+              <MessageSquare className="h-3 w-3" aria-hidden />
+              {mediaType === 'text' ? 'Mensagem' : 'Legenda (opcional)'}
+            </label>
+            <textarea
+              rows={5}
+              value={message}
+              onChange={(e) => setMessage(e.target.value)}
+              placeholder={
+                mediaType === 'text'
+                  ? 'Olá {nome}, tudo bem? Aqui é da equipe…'
+                  : 'Texto que acompanha a mídia (caption)…'
+              }
+              className="w-full resize-y rounded-xl border border-zinc-200 bg-white px-3 py-2.5 text-sm leading-relaxed text-zinc-900 shadow-inner focus:border-brand-300 focus:outline-none focus:ring-2 focus:ring-brand-500/20"
+            />
+            <div className="mt-2 flex flex-wrap gap-1.5">
+              {MESSAGE_VARIABLES.map((v) => (
+                <button
+                  key={v.key}
+                  type="button"
+                  onClick={() => setMessage((prev) => `${prev}${v.key}`)}
+                  title={v.helper}
+                  className="rounded-md border border-zinc-200 bg-white px-1.5 py-0.5 font-mono text-[10px] font-semibold text-brand-700 transition hover:border-brand-300 hover:bg-brand-50"
+                >
+                  {v.key}
+                </button>
+              ))}
+            </div>
+          </div>
+          {localError ? (
+            <p className="text-xs font-medium text-rose-600" role="alert">
+              {localError}
+            </p>
+          ) : null}
         </div>
 
         <div className="space-y-3">
@@ -1036,13 +1250,7 @@ function StepCard({
           <button
             type="button"
             disabled={!dirty || saving}
-            onClick={() =>
-              onSave({
-                message,
-                delay_seconds: delaySeconds,
-                expected_trigger: trigger.trim() || null,
-              })
-            }
+            onClick={handleSaveClick}
             className={`mt-1 inline-flex w-full items-center justify-center gap-1.5 rounded-xl px-3 py-2 text-xs font-bold uppercase tracking-wide shadow-sm transition ${
               dirty
                 ? 'bg-brand-600 text-white hover:bg-brand-700'

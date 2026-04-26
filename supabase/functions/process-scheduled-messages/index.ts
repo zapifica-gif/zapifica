@@ -142,9 +142,14 @@ function humanizedDelayMs(): number {
 
 type EvolutionPresence = 'composing' | 'recording' | 'paused'
 
-function presenceForContent(contentType: ContentType): EvolutionPresence {
-  // Áudio = "gravando…" no WhatsApp; demais = "digitando…".
-  if (contentType === 'audio') return 'recording'
+type DispatchPlan =
+  | { kind: 'text'; text: string }
+  | { kind: 'media'; mediatype: 'image' | 'video' | 'document'; body: Record<string, unknown> }
+  | { kind: 'audio'; body: Record<string, unknown> }
+
+/** Alinha presence ao que a Evolution recebe: áudio = gravando, resto = digitando. */
+function presenceForPlan(plan: DispatchPlan): EvolutionPresence {
+  if (plan.kind === 'audio') return 'recording'
   return 'composing'
 }
 
@@ -350,73 +355,88 @@ serve(async () => {
           : instanceNameFromUserId(msg.user_id)
 
       // --- 2) Monta envio (texto, mídia com URL, ou legado com corpo) ---
+      // Endpoints: message/sendText | message/sendMedia | message/sendWhatsAppAudio
       const caption = (msg.message_body ?? '').trim() || undefined
       const mediaUrl = msg.media_url?.trim() ?? null
-
-      type DispatchPlan =
-        | { kind: 'text'; text: string }
-        | { kind: 'media'; mediatype: 'image' | 'video' | 'document'; body: Record<string, unknown> }
-        | { kind: 'audio'; body: Record<string, unknown> }
 
       let plan: DispatchPlan
 
       if (mediaUrl) {
         const { base64, mimeType, fileName } = await downloadMediaAsBase64(mediaUrl)
         const ct = msg.content_type
-        if (ct === 'audio') {
-          plan = {
-            kind: 'audio',
-            body: {
-              audio: stripDataUrlBase64(base64),
-              delay: 1000,
-              encoding: true,
-              ptt: true,
-            },
-          }
-        } else if (ct === 'text') {
-          plan = {
-            kind: 'media',
-            mediatype: 'document',
-            body: {
-              mediatype: 'document',
-              mimetype: mimeType,
-              fileName,
-              media: base64,
-             ...(caption ? { caption } : {}),
-            },
-          }
-        } else if (ct === 'image') {
-          plan = {
-            kind: 'media',
-            mediatype: 'image',
-            body: {
+        switch (ct) {
+          case 'audio':
+            plan = {
+              kind: 'audio',
+              body: {
+                audio: stripDataUrlBase64(base64),
+                delay: 1000,
+                encoding: true,
+                ptt: true,
+              },
+            }
+            break
+          case 'image':
+            plan = {
+              kind: 'media',
               mediatype: 'image',
-              media: base64,
-              ...(caption ? { caption } : {}),
-            },
-          }
-        } else if (ct === 'video') {
-          plan = {
-            kind: 'media',
-            mediatype: 'video',
-            body: {
+              body: {
+                mediatype: 'image',
+                media: base64,
+                ...(caption ? { caption } : {}),
+              },
+            }
+            break
+          case 'video':
+            plan = {
+              kind: 'media',
               mediatype: 'video',
-              media: base64,
-              ...(caption ? { caption } : {}),
-            },
-          }
-        } else {
-          plan = {
-            kind: 'media',
-            mediatype: 'document',
-            body: {
+              body: {
+                mediatype: 'video',
+                media: base64,
+                ...(caption ? { caption } : {}),
+              },
+            }
+            break
+          case 'document':
+            plan = {
+              kind: 'media',
               mediatype: 'document',
-              mimetype: mimeType,
-              fileName,
-              media: base64,
-              ...(caption ? { caption } : {}),
-            },
-          }
+              body: {
+                mediatype: 'document',
+                mimetype: mimeType,
+                fileName,
+                media: base64,
+                ...(caption ? { caption } : {}),
+              },
+            }
+            break
+          case 'text':
+            // legado: linha de agenda antiga com URL mas tipo texto
+            plan = {
+              kind: 'media',
+              mediatype: 'document',
+              body: {
+                mediatype: 'document',
+                mimetype: mimeType,
+                fileName,
+                media: base64,
+                ...(caption ? { caption } : {}),
+              },
+            }
+            break
+          default:
+            plan = {
+              kind: 'media',
+              mediatype: 'document',
+              body: {
+                mediatype: 'document',
+                mimetype: mimeType,
+                fileName,
+                media: base64,
+                ...(caption ? { caption } : {}),
+              },
+            }
         }
       } else {
         const body = msg.message_body ?? ''
@@ -473,9 +493,8 @@ serve(async () => {
           payload = { number: phone, ...plan.body }
         }
 
-        // Anti-ban / humanização: simula "digitando…" (texto) ou "gravando…"
-        // (áudio) por 2-5 segundos antes de mandar a mensagem de verdade.
-        const presence = presenceForContent(msg.content_type)
+        // Anti-ban / humanização: "digitando…" (texto/mídia) ou "gravando…" (áudio).
+        const presence = presenceForPlan(plan)
         const presenceDelayMs = Math.floor(Math.random() * (5000 - 2000 + 1)) + 2000
         await sendEvolutionPresence(
           evolutionUrl,
