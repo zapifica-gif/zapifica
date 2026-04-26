@@ -118,7 +118,18 @@ export function AiTrainingPage() {
       if (typeof v === 'string' && v.trim()) backend = v.trim()
     }
     if (!backend && err !== null && err !== undefined && typeof err === 'object') {
-      const ctx = (err as { context?: { response?: Response } }).context
+      const ctx = (err as { context?: { response?: Response; json?: () => Promise<unknown> } }).context
+      const jsonFn = ctx?.json
+      if (typeof jsonFn === 'function') {
+        try {
+          const contextData = (await jsonFn()) as { error?: unknown } | null
+          if (contextData && typeof contextData.error === 'string' && contextData.error.trim()) {
+            backend = contextData.error.trim()
+          }
+        } catch {
+          /* ignore */
+        }
+      }
       const res = ctx?.response
       if (res) {
         try {

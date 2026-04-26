@@ -91,13 +91,27 @@ async function fetchHtmlText(url: URL): Promise<{ ok: true; text: string } | { o
 
 async function extractPdfText(bytes: Uint8Array): Promise<{ ok: true; text: string } | { ok: false; error: string }> {
   try {
-    // Import dinâmico para evitar crash no boot do runtime.
-    const mod = await import('npm:pdf-parse')
-    const pdfParse = (mod as { default?: (input: Uint8Array) => Promise<{ text?: string }> }).default
-    if (!pdfParse) return { ok: false, error: 'Biblioteca pdf-parse indisponível neste runtime.' }
+    // PDF.js legacy costuma ser a opção mais estável no runtime Edge/Deno.
+    const pdfjs = await import('npm:pdfjs-dist/legacy/build/pdf.js')
+    const getDocument = (pdfjs as unknown as { getDocument?: (opts: unknown) => { promise: Promise<unknown> } }).getDocument
+    if (!getDocument) return { ok: false, error: 'pdfjs-dist não expôs getDocument neste runtime.' }
 
-    const pdfData = await pdfParse(bytes)
-    const text = (pdfData?.text ?? '').replace(/\s+/g, ' ').trim()
+    const doc = await getDocument({ data: bytes, disableWorker: true }).promise
+    const pdf = doc as {
+      numPages: number
+      getPage: (n: number) => Promise<{
+        getTextContent: () => Promise<{ items: Array<{ str?: string }> }>
+      }>
+    }
+
+    let extractedText = ''
+    for (let i = 1; i <= pdf.numPages; i++) {
+      const page = await pdf.getPage(i)
+      const content = await page.getTextContent()
+      extractedText += content.items.map((item) => item.str ?? '').join(' ') + '\n'
+    }
+
+    const text = extractedText.replace(/\s+/g, ' ').trim()
     if (!text) return { ok: false, error: 'PDF sem texto extraível (pode ser imagem escaneada).' }
     return { ok: true, text }
   } catch (e) {
