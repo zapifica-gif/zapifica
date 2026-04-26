@@ -15,6 +15,7 @@ import {
   Clock,
   FileText,
   Image as ImageIcon,
+  History,
   LayoutGrid,
   ListTodo,
   Loader2,
@@ -51,6 +52,10 @@ type Campaign = {
   description: string | null
   /** Tags de público (OR): o disparo considera qualquer lead com uma delas. */
   audience_tags: string[] | null
+  /** Início do funil agendado (futuro); mensagens somam atrasos a partir daqui. */
+  scheduled_start_at: string | null
+  /** Frases exatas (Meta Ads / respostas rápidas) — motor de roteamento virá a usar. */
+  inbound_triggers: string[] | null
   status: CampaignStatus
   default_delay_seconds: number
   created_at: string
@@ -142,6 +147,75 @@ function TagMultiPicker({ options, value, onChange, customHint }: TagMultiPicker
   )
 }
 
+type PhraseChipsInputProps = {
+  value: string[]
+  onChange: (next: string[]) => void
+  help: string
+  placeholder?: string
+}
+
+function PhraseChipsInput({ value, onChange, help, placeholder }: PhraseChipsInputProps) {
+  const [draft, setDraft] = useState('')
+  const add = (phrase: string) => {
+    const t = phrase.trim()
+    if (!t || value.includes(t)) return
+    onChange([...value, t])
+    setDraft('')
+  }
+  const remove = (idx: number) => {
+    onChange(value.filter((_, i) => i !== idx))
+  }
+  return (
+    <div className="space-y-2">
+      <div className="flex min-h-[2.5rem] flex-wrap gap-1.5 rounded-lg border border-zinc-200 bg-white p-2">
+        {value.length === 0 ? (
+          <span className="self-center pl-0.5 text-xs text-zinc-400">Nenhuma frase ainda</span>
+        ) : null}
+        {value.map((phrase, i) => (
+          <span
+            key={`${phrase}-${i}`}
+            className="group inline-flex max-w-full items-center gap-1 rounded-full border border-zinc-200 bg-zinc-50 px-2.5 py-0.5 text-xs text-zinc-800"
+          >
+            <span className="min-w-0 max-w-[240px] truncate" title={phrase}>
+              {phrase}
+            </span>
+            <button
+              type="button"
+              onClick={() => remove(i)}
+              className="shrink-0 rounded-full p-0.5 text-zinc-400 hover:bg-zinc-200 hover:text-zinc-800"
+              aria-label="Remover"
+            >
+              <span className="text-[10px] font-bold">×</span>
+            </button>
+          </span>
+        ))}
+      </div>
+      <div className="flex gap-2">
+        <input
+          value={draft}
+          onChange={(e) => setDraft(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter') {
+              e.preventDefault()
+              add(draft)
+            }
+          }}
+          placeholder={placeholder ?? 'Digite a frase e pressione Enter'}
+          className="min-w-0 flex-1 rounded-lg border border-zinc-200 px-2 py-1.5 text-sm outline-none focus:border-brand-300"
+        />
+        <button
+          type="button"
+          onClick={() => add(draft)}
+          className="shrink-0 rounded-lg border border-zinc-200 bg-zinc-50 px-2 py-1.5 text-xs font-medium text-zinc-800 hover:bg-zinc-100"
+        >
+          Incluir
+        </button>
+      </div>
+      <p className="text-[11px] text-zinc-500">{help}</p>
+    </div>
+  )
+}
+
 // ---------------------------------------------------------------------------
 // UI helpers
 // ---------------------------------------------------------------------------
@@ -184,6 +258,30 @@ function formatDateBr(iso: string) {
   } catch {
     return iso
   }
+}
+
+function normalizeInboundTriggers(raw: string[] | null | undefined): string[] {
+  if (!raw || !Array.isArray(raw)) return []
+  return [...new Set(raw.map((t) => t.trim()).filter(Boolean))]
+}
+
+/** Valor de `<input type="datetime-local" />` no fuso do navegador. */
+function isoToDatetimeLocalValue(iso: string | null | undefined): string {
+  if (!iso) return ''
+  const d = new Date(iso)
+  if (Number.isNaN(d.getTime())) return ''
+  const pad = (n: number) => String(n).padStart(2, '0')
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(
+    d.getHours(),
+  )}:${pad(d.getMinutes())}`
+}
+
+function datetimeLocalToIso(s: string): string | null {
+  const t = s.trim()
+  if (!t) return null
+  const d = new Date(t)
+  if (Number.isNaN(d.getTime())) return null
+  return d.toISOString()
 }
 
 /** Variáveis dinâmicas suportadas no editor de mensagem (preview-only). */
@@ -229,7 +327,7 @@ function applyMessageTemplate(template: string, vars: TemplateVars): string {
 // Página principal
 // ---------------------------------------------------------------------------
 
-type MainTab = 'disparos' | 'contatos'
+type MainTab = 'campanhas' | 'contatos' | 'historico'
 
 function normalizeTags(raw: string[] | null | undefined): string[] {
   if (!raw || !Array.isArray(raw)) return []
@@ -237,7 +335,7 @@ function normalizeTags(raw: string[] | null | undefined): string[] {
 }
 
 export function ZapVoiceCampaignsPage() {
-  const [mainTab, setMainTab] = useState<MainTab>('disparos')
+  const [mainTab, setMainTab] = useState<MainTab>('campanhas')
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [success, setSuccess] = useState<string | null>(null)
@@ -257,7 +355,12 @@ export function ZapVoiceCampaignsPage() {
   const [newName, setNewName] = useState('')
   const [newAudienceTags, setNewAudienceTags] = useState<string[]>([])
   const [newDescription, setNewDescription] = useState('')
+  const [newScheduledStartLocal, setNewScheduledStartLocal] = useState('')
+  const [newInboundTriggers, setNewInboundTriggers] = useState<string[]>([])
   const [creating, setCreating] = useState(false)
+  const [historyStats, setHistoryStats] = useState<
+    Record<string, { firstAt: string | null; leadCount: number }>
+  >({})
 
   const selected = useMemo(
     () => campaigns.find((c) => c.id === selectedId) ?? null,
@@ -269,6 +372,19 @@ export function ZapVoiceCampaignsPage() {
   const tagsForSelected = useMemo(
     () => normalizeTags(selected?.audience_tags),
     [selected],
+  )
+
+  const activeCampaigns = useMemo(
+    () =>
+      campaigns.filter(
+        (c) =>
+          c.status === 'draft' || c.status === 'active' || c.status === 'paused',
+      ),
+    [campaigns],
+  )
+  const completedCampaigns = useMemo(
+    () => campaigns.filter((c) => c.status === 'completed'),
+    [campaigns],
   )
 
   // -------------------------------------------------------------------------
@@ -297,6 +413,53 @@ export function ZapVoiceCampaignsPage() {
     setAudienceOptions(options)
   }, [])
 
+  const loadHistoryStats = useCallback(
+    async (campaignIds: string[], uid: string) => {
+      if (campaignIds.length === 0) {
+        setHistoryStats({})
+        return
+      }
+      const { data, error: e } = await supabase
+        .from('scheduled_messages')
+        .select('zv_campaign_id, scheduled_at, lead_id')
+        .eq('user_id', uid)
+        .in('zv_campaign_id', campaignIds)
+      if (e) {
+        console.error('[ZapVoiceCampaigns] history stats:', e)
+        return
+      }
+      type Row = {
+        zv_campaign_id: string | null
+        scheduled_at: string
+        lead_id: string | null
+      }
+      const acc = new Map<
+        string,
+        { firstAt: string; leadCount: number; leads: Set<string> }
+      >()
+      for (const row of (data ?? []) as Row[]) {
+        const cid = row.zv_campaign_id
+        if (!cid) continue
+        let b = acc.get(cid)
+        if (!b) {
+          b = { firstAt: row.scheduled_at, leadCount: 0, leads: new Set() }
+          acc.set(cid, b)
+        }
+        if (row.scheduled_at < b.firstAt) b.firstAt = row.scheduled_at
+        if (row.lead_id) b.leads.add(row.lead_id)
+      }
+      const next: Record<string, { firstAt: string | null; leadCount: number }> = {}
+      for (const id of campaignIds) {
+        const b = acc.get(id)
+        next[id] = b
+          ? { firstAt: b.firstAt, leadCount: b.leads.size }
+          : { firstAt: null, leadCount: 0 }
+      }
+      setHistoryStats(next)
+    },
+    [],
+  )
+
   const loadCampaigns = useCallback(async () => {
     setLoading(true)
     setError(null)
@@ -313,7 +476,7 @@ export function ZapVoiceCampaignsPage() {
     const list = await supabase
       .from('zv_campaigns')
       .select(
-        'id, user_id, name, description, audience_tags, status, default_delay_seconds, created_at, updated_at',
+        'id, user_id, name, description, audience_tags, scheduled_start_at, inbound_triggers, status, default_delay_seconds, created_at, updated_at',
       )
       .eq('user_id', user.id)
       .order('created_at', { ascending: false })
@@ -324,14 +487,31 @@ export function ZapVoiceCampaignsPage() {
       return
     }
 
-    const rows = (list.data ?? []).map((r) => ({
-      ...(r as Campaign),
-      audience_tags: normalizeTags((r as { audience_tags?: string[] | null }).audience_tags),
-    })) as Campaign[]
+    const rows = (list.data ?? []).map((r) => {
+      const c = r as {
+        audience_tags?: string[] | null
+        inbound_triggers?: string[] | null
+        scheduled_start_at?: string | null
+      }
+      return {
+        ...(r as Campaign),
+        audience_tags: normalizeTags(c.audience_tags),
+        inbound_triggers: normalizeInboundTriggers(c.inbound_triggers),
+        scheduled_start_at: c.scheduled_start_at ?? null,
+      } as Campaign
+    })
     setCampaigns(rows)
     setSelectedId((prev) => {
-      if (prev && rows.some((r) => r.id === prev)) return prev
-      return rows[0]?.id ?? null
+      const actives = rows.filter(
+        (r) =>
+          r.status === 'draft' || r.status === 'active' || r.status === 'paused',
+      )
+      if (actives.length === 0) {
+        if (prev && rows.some((r) => r.id === prev)) return prev
+        return rows[0]?.id ?? null
+      }
+      if (prev && actives.some((r) => r.id === prev)) return prev
+      return actives[0].id
     })
 
     await loadAudienceOptions(user.id)
@@ -361,10 +541,32 @@ export function ZapVoiceCampaignsPage() {
   }, [loadCampaigns])
 
   useEffect(() => {
-    if (window.location.hash === '#contatos') {
-      setMainTab('contatos')
-    }
+    const h = window.location.hash
+    if (h === '#contatos') setMainTab('contatos')
+    else if (h === '#historico') setMainTab('historico')
   }, [])
+
+  const completedIdsKey = useMemo(
+    () => [...completedCampaigns].map((c) => c.id).sort().join(','),
+    [completedCampaigns],
+  )
+
+  useEffect(() => {
+    if (mainTab !== 'historico' || !userId) return
+    const ids = completedCampaigns.map((c) => c.id)
+    void loadHistoryStats(ids, userId)
+  }, [mainTab, userId, completedIdsKey, loadHistoryStats, completedCampaigns])
+
+  useEffect(() => {
+    if (loading) return
+    if (mainTab !== 'campanhas') return
+    const ids = new Set(activeCampaigns.map((c) => c.id))
+    if (selectedId && !ids.has(selectedId)) {
+      setSelectedId(activeCampaigns[0]?.id ?? null)
+    } else if (!selectedId && activeCampaigns[0]) {
+      setSelectedId(activeCampaigns[0].id)
+    }
+  }, [loading, mainTab, activeCampaigns, selectedId])
 
   const tagsKey = tagsForSelected.join('\u0000')
 
@@ -393,12 +595,12 @@ export function ZapVoiceCampaignsPage() {
   }, [userId, selected?.id, tagsKey])
 
   useEffect(() => {
-    if (!selectedId) {
+    if (mainTab !== 'campanhas' || !selectedId) {
       setSteps([])
       return
     }
     void loadSteps(selectedId)
-  }, [selectedId, loadSteps])
+  }, [selectedId, loadSteps, mainTab])
 
   // -------------------------------------------------------------------------
   // Mutations: campanha
@@ -414,6 +616,7 @@ export function ZapVoiceCampaignsPage() {
     setError(null)
     setSuccess(null)
     try {
+      const startIso = datetimeLocalToIso(newScheduledStartLocal)
       const insert = await supabase
         .from('zv_campaigns')
         .insert({
@@ -421,21 +624,28 @@ export function ZapVoiceCampaignsPage() {
           name: newName.trim(),
           description: newDescription.trim() || null,
           audience_tags: normalizeTags(newAudienceTags),
+          scheduled_start_at: startIso,
+          inbound_triggers: normalizeInboundTriggers(newInboundTriggers),
           status: 'draft' as CampaignStatus,
           default_delay_seconds: 60,
         })
         .select(
-          'id, user_id, name, description, audience_tags, status, default_delay_seconds, created_at, updated_at',
+          'id, user_id, name, description, audience_tags, scheduled_start_at, inbound_triggers, status, default_delay_seconds, created_at, updated_at',
         )
         .single()
       if (insert.error || !insert.data) {
         throw new Error(insert.error?.message ?? 'Falha ao criar campanha.')
       }
+      const ins = insert.data as {
+        audience_tags?: string[] | null
+        inbound_triggers?: string[] | null
+        scheduled_start_at?: string | null
+      }
       const created = {
         ...(insert.data as object),
-        audience_tags: normalizeTags(
-          (insert.data as { audience_tags?: string[] | null }).audience_tags,
-        ),
+        audience_tags: normalizeTags(ins.audience_tags),
+        inbound_triggers: normalizeInboundTriggers(ins.inbound_triggers),
+        scheduled_start_at: ins.scheduled_start_at ?? null,
       } as Campaign
 
       // Cria automaticamente uma Etapa 1 vazia para o usuário já editar.
@@ -455,6 +665,8 @@ export function ZapVoiceCampaignsPage() {
       setNewName('')
       setNewAudienceTags([])
       setNewDescription('')
+      setNewScheduledStartLocal('')
+      setNewInboundTriggers([])
       setSuccess('Campanha criada. Agora monte o roteiro de mensagens.')
       window.setTimeout(() => setSuccess(null), 5000)
     } catch (e) {
@@ -462,7 +674,7 @@ export function ZapVoiceCampaignsPage() {
     } finally {
       setCreating(false)
     }
-  }, [newName, newDescription, newAudienceTags, userId])
+  }, [newName, newDescription, newAudienceTags, newScheduledStartLocal, newInboundTriggers, userId])
 
   const updateCampaign = useCallback(
     async (id: string, patch: Partial<Campaign>) => {
@@ -588,7 +800,18 @@ export function ZapVoiceCampaignsPage() {
           }
         }
 
-        const startMs = Date.now()
+        const now = Date.now()
+        let startMs: number
+        if (c.scheduled_start_at) {
+          const planned = new Date(c.scheduled_start_at).getTime()
+          if (!Number.isNaN(planned) && planned > now) {
+            startMs = planned
+          } else {
+            startMs = now
+          }
+        } else {
+          startMs = now
+        }
         const rows: Record<string, unknown>[] = []
 
         for (const lead of withPhone) {
@@ -650,8 +873,14 @@ export function ZapVoiceCampaignsPage() {
         )
         const total = rows.length
         const nLeads = withPhone.length
+        const inicioFila =
+          startMs > now
+            ? ` A fila começa em ${formatDateBr(new Date(startMs).toISOString())}.`
+            : ''
         setSuccess(
-          `Campanha ativa: ${total} disparos agendados para ${nLeads} lead${nLeads === 1 ? '' : 's'} (${ordered.length} etapa${ordered.length === 1 ? '' : 's'} cada).`,
+          `Campanha ativa: ${total} disparos agendados para ${nLeads} lead${
+            nLeads === 1 ? '' : 's'
+          } (${ordered.length} etapa${ordered.length === 1 ? '' : 's'} cada).${inicioFila}`,
         )
         window.setTimeout(() => setSuccess(null), 8000)
       } catch (err) {
@@ -886,9 +1115,11 @@ export function ZapVoiceCampaignsPage() {
             Campanhas Zap Voice
           </h2>
           <p className="mt-1 max-w-2xl text-sm leading-relaxed text-zinc-600">
-            {mainTab === 'disparos'
-              ? 'Monte funis de disparo e una tags de várias origens. Cada etapa leva delay e, se quiser, gatilho de resposta.'
-              : 'Unifique e limpe a base: importe CSV, Google Contacts e acompanhe origens como no Google Contacts.'}
+            {mainTab === 'campanhas'
+              ? 'Funis, agendamento de início, gatilhos do Meta (respostas rápidas) e tráfego pago — tudo no mesmo fluxo.'
+              : mainTab === 'contatos'
+                ? 'Unifique e limpe a base: importe CSV, Google Contacts e acompanhe origens como no Google Contacts.'
+                : 'Visualize campanhas concluídas: data do primeiro disparo e quantos leads receberam mensagens agendadas.'}
           </p>
         </div>
       </div>
@@ -897,23 +1128,23 @@ export function ZapVoiceCampaignsPage() {
         <button
           type="button"
           onClick={() => {
-            setMainTab('disparos')
+            setMainTab('campanhas')
             window.location.hash = ''
           }}
           className={`inline-flex items-center gap-2 border-b-2 px-3 py-2.5 text-sm font-medium transition ${
-            mainTab === 'disparos'
+            mainTab === 'campanhas'
               ? 'border-brand-600 text-brand-800'
               : 'border-transparent text-zinc-500 hover:text-zinc-800'
           }`}
         >
           <ListTodo className="h-4 w-4" aria-hidden />
-          Funis de Disparo
+          Campanhas ativas
         </button>
         <button
           type="button"
           onClick={() => {
             setMainTab('contatos')
-            window.location.hash = 'contatos'
+            window.location.hash = '#contatos'
           }}
           className={`inline-flex items-center gap-2 border-b-2 px-3 py-2.5 text-sm font-medium transition ${
             mainTab === 'contatos'
@@ -922,7 +1153,22 @@ export function ZapVoiceCampaignsPage() {
           }`}
         >
           <LayoutGrid className="h-4 w-4" aria-hidden />
-          Base de Contatos
+          Base de contatos
+        </button>
+        <button
+          type="button"
+          onClick={() => {
+            setMainTab('historico')
+            window.location.hash = '#historico'
+          }}
+          className={`inline-flex items-center gap-2 border-b-2 px-3 py-2.5 text-sm font-medium transition ${
+            mainTab === 'historico'
+              ? 'border-brand-600 text-brand-800'
+              : 'border-transparent text-zinc-500 hover:text-zinc-800'
+          }`}
+        >
+          <History className="h-4 w-4" aria-hidden />
+          Histórico de campanhas
         </button>
       </div>
 
@@ -937,17 +1183,17 @@ export function ZapVoiceCampaignsPage() {
         />
       ) : null}
 
-      {/* Painel duplo: funis */}
-      {mainTab === 'disparos' ? (
+      {/* Painel duplo: funis (rascunho, ativa, pausada) */}
+      {mainTab === 'campanhas' ? (
       <div className="grid gap-6 lg:grid-cols-[360px_minmax(0,1fr)]">
         {/* COLUNA ESQUERDA: lista de campanhas */}
         <aside className="rounded-2xl border border-zinc-200/90 bg-white p-4 shadow-sm ring-1 ring-zinc-100/80">
           <div className="flex items-center justify-between gap-2 px-1 pb-3">
             <p className="text-xs font-semibold uppercase tracking-wider text-zinc-500">
-              Suas campanhas
+              Rascunho, ativa e pausada
             </p>
             <span className="text-xs tabular-nums text-zinc-400">
-              {campaigns.length}
+              {activeCampaigns.length}
             </span>
           </div>
 
@@ -998,6 +1244,34 @@ export function ZapVoiceCampaignsPage() {
                 />
               </div>
 
+              <div>
+                <label className="mb-1 block text-xs font-medium text-zinc-700">
+                  Agendar início para
+                </label>
+                <input
+                  type="datetime-local"
+                  value={newScheduledStartLocal}
+                  onChange={(e) => setNewScheduledStartLocal(e.target.value)}
+                  className="w-full rounded-lg border border-zinc-200 bg-white px-3 py-2 text-sm shadow-inner focus:border-brand-300 focus:outline-none focus:ring-2 focus:ring-brand-500/20"
+                />
+                <p className="mt-1 text-[11px] text-zinc-500">
+                  Opcional. Se vazio, ao ativar a campanha a fila começa na hora. Se
+                  preenchida no futuro, os atrasos do funil somam a partir deste
+                  instante.
+                </p>
+              </div>
+
+              <div>
+                <p className="mb-1 text-xs font-medium text-zinc-700">
+                  Gatilhos de entrada (Meta Ads)
+                </p>
+                <PhraseChipsInput
+                  value={newInboundTriggers}
+                  onChange={setNewInboundTriggers}
+                  help="Se um lead enviar uma destas mensagens exatas (vindas do seu anúncio), ele entrará automaticamente neste funil. (A automação de roteamento no WhatsApp entra em uma próxima etapa de backend.)"
+                />
+              </div>
+
               <div className="flex items-center gap-2">
                 <button
                   type="button"
@@ -1027,12 +1301,14 @@ export function ZapVoiceCampaignsPage() {
           <div className="mt-5 space-y-2">
             {loading ? (
               <p className="px-1 text-sm text-zinc-500">Carregando…</p>
-            ) : campaigns.length === 0 ? (
+            ) : activeCampaigns.length === 0 ? (
               <p className="rounded-xl border border-dashed border-zinc-200 bg-zinc-50/60 px-4 py-6 text-center text-xs text-zinc-500">
-                Você ainda não tem campanhas. Crie a primeira no botão acima.
+                {campaigns.length === 0
+                  ? 'Você ainda não tem campanhas. Crie a primeira no botão acima.'
+                  : 'Não há campanhas em rascunho, ativas ou pausadas. As concluídas ficam em Histórico.'}
               </p>
             ) : (
-              campaigns.map((c) => {
+              activeCampaigns.map((c) => {
                 const visual = statusVisual[c.status]
                 const active = c.id === selectedId
                 return (
@@ -1265,6 +1541,54 @@ export function ZapVoiceCampaignsPage() {
                     </p>
                   </div>
                 </div>
+
+                <div className="mt-5 space-y-4 border-t border-zinc-100 pt-5">
+                  <div>
+                    <label className="mb-1 block text-xs font-medium text-zinc-700">
+                      Agendar início para
+                    </label>
+                    <input
+                      type="datetime-local"
+                      value={isoToDatetimeLocalValue(selected.scheduled_start_at)}
+                      onChange={(e) => {
+                        const v = e.target.value
+                        const iso = v ? datetimeLocalToIso(v) : null
+                        setCampaigns((prev) =>
+                          prev.map((c) =>
+                            c.id === selected.id ? { ...c, scheduled_start_at: iso } : c,
+                          ),
+                        )
+                      }}
+                      onBlur={(e) =>
+                        void updateCampaign(selected.id, {
+                          scheduled_start_at: datetimeLocalToIso(e.target.value),
+                        })
+                      }
+                      className="w-full max-w-md rounded-lg border border-zinc-200 bg-white px-3 py-2 text-sm shadow-inner focus:border-brand-300 focus:outline-none focus:ring-2 focus:ring-brand-500/20"
+                    />
+                    <p className="mt-1 text-[11px] text-zinc-500">
+                      Deixe vazio para, ao ativar, começar a fila na hora. Com data/hora
+                      no futuro, os atrasos de cada etapa somam a partir desse ponto.
+                    </p>
+                  </div>
+                  <div>
+                    <h4 className="mb-1 text-xs font-semibold text-zinc-800">
+                      Gatilhos de entrada (Meta Ads)
+                    </h4>
+                    <PhraseChipsInput
+                      value={normalizeInboundTriggers(selected.inbound_triggers)}
+                      onChange={(next) => {
+                        setCampaigns((prev) =>
+                          prev.map((c) =>
+                            c.id === selected.id ? { ...c, inbound_triggers: next } : c,
+                          ),
+                        )
+                        void updateCampaign(selected.id, { inbound_triggers: next })
+                      }}
+                      help="Se um lead enviar uma destas mensagens exatas (vindas do seu anúncio), ele entrará automaticamente neste funil."
+                    />
+                  </div>
+                </div>
               </div>
 
               {/* Editor de etapas */}
@@ -1335,6 +1659,56 @@ export function ZapVoiceCampaignsPage() {
           )}
         </section>
       </div>
+      ) : null}
+
+      {mainTab === 'historico' ? (
+        <div className="overflow-hidden rounded-2xl border border-zinc-200/90 bg-white shadow-sm ring-1 ring-zinc-100/80">
+          {completedCampaigns.length === 0 ? (
+            <p className="px-5 py-12 text-center text-sm text-zinc-500">
+              Ainda não há campanhas concluídas. Quando marcar uma campanha como
+              concluída, ela aparece aqui com a data do primeiro disparo e a base
+              alcançada.
+            </p>
+          ) : (
+            <div className="overflow-x-auto">
+              <table className="w-full min-w-[640px] border-collapse text-left text-sm">
+                <thead>
+                  <tr className="border-b border-zinc-200 bg-zinc-50/90 text-[11px] font-semibold uppercase tracking-wider text-zinc-500">
+                    <th className="px-4 py-3">Campanha</th>
+                    <th className="px-4 py-3">Público (tags)</th>
+                    <th className="px-4 py-3">1º disparo (agendado)</th>
+                    <th className="px-4 py-3">Leads</th>
+                    <th className="px-4 py-3">Concluída em</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-zinc-100">
+                  {completedCampaigns.map((c) => {
+                    const st = historyStats[c.id]
+                    return (
+                      <tr key={c.id} className="bg-white hover:bg-zinc-50/50">
+                        <td className="px-4 py-3 font-medium text-zinc-900">{c.name}</td>
+                        <td className="max-w-[220px] px-4 py-3 text-zinc-600">
+                          {c.audience_tags && c.audience_tags.length > 0
+                            ? c.audience_tags.join(' · ')
+                            : '—'}
+                        </td>
+                        <td className="whitespace-nowrap px-4 py-3 text-zinc-600 tabular-nums">
+                          {st?.firstAt ? formatDateBr(st.firstAt) : '—'}
+                        </td>
+                        <td className="px-4 py-3 text-zinc-800 tabular-nums">
+                          {st ? st.leadCount : '—'}
+                        </td>
+                        <td className="whitespace-nowrap px-4 py-3 text-zinc-500 tabular-nums">
+                          {formatDateBr(c.updated_at)}
+                        </td>
+                      </tr>
+                    )
+                  })}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
       ) : null}
     </div>
   )
