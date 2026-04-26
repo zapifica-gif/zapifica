@@ -7,6 +7,7 @@
 
 import { serve } from 'https://deno.land/std@0.168.0/http/server.ts'
 import { createClient, SupabaseClient } from 'https://esm.sh/@supabase/supabase-js@2'
+import { processZapVoiceInbound } from './zapvoice-inbound.ts'
 
 const MEDIA_BUCKET = 'chat_media'
 
@@ -697,6 +698,7 @@ serve(async (req) => {
 
   let saved = 0
   let createdLeads = 0
+  let zvEnqueued = 0
   const skipped: string[] = []
   const errors: string[] = []
 
@@ -798,6 +800,49 @@ serve(async (req) => {
       continue
     }
     saved += 1
+
+    // ───────────────────────────────────────────────────────────────────────
+    // Zap Voice — gatilhos (Meta / respostas rápidas) -> scheduled_messages
+    // Mesma ideia de "Ativar campanha", ancorada em Date.now() para o funil
+    // automático. Ignora placeholder de mídia sem legenda; áudio sem STT: skip.
+    // ───────────────────────────────────────────────────────────────────────
+    const isPlaceholderText =
+      /^\[(imagem|áudio|vídeo|documento|mensagem)\]$/i.test(
+        (text || '').trim(),
+      )
+    const canTryZapVoice =
+      !isPlaceholderText &&
+      (text || '').trim().length > 0 &&
+      contentType !== 'audio'
+    if (canTryZapVoice) {
+      const leadDisplayName =
+        index.rows.find((r) => r.id === ensured.id)?.name ??
+        item.pushName ??
+        'Cliente'
+      const zv = await processZapVoiceInbound({
+        supabase,
+        userId,
+        instanceName: instance,
+        leadId: ensured.id,
+        phoneDigits,
+        leadName: leadDisplayName,
+        messageText: text,
+        contentType,
+      })
+      if (zv.enqueued) {
+        zvEnqueued += 1
+      } else if (
+        zv.reason &&
+        zv.reason !== 'sem_match' &&
+        zv.reason !== 'ja_na_fila'
+      ) {
+        console.log('[ZapVoice inbound] skip', {
+          reason: zv.reason,
+          campaignId: zv.campaignId,
+          msgId: item.msgId,
+        })
+      }
+    }
 
     // ───────────────────────────────────────────────────────────────────────
     // IA (DeepSeek) com handover por lead.ai_enabled
@@ -911,6 +956,7 @@ serve(async (req) => {
     userId,
     saved,
     createdLeads,
+    zvEnqueued,
     skipped: skipped.length,
     errors: errors.length,
     count: items.length,
@@ -921,6 +967,7 @@ serve(async (req) => {
       ok,
       saved,
       createdLeads,
+      zvEnqueued,
       skipped,
       errors,
       count: items.length,
