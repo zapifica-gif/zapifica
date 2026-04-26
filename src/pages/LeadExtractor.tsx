@@ -40,13 +40,13 @@ function formatDateBr(iso: string) {
   }
 }
 
-function downloadTextAsFile(filename: string, text: string) {
-  const blob = new Blob(['\uFEFF', text], { type: 'text/csv;charset=utf-8' })
-  const a = document.createElement('a')
-  a.href = URL.createObjectURL(blob)
-  a.download = filename
-  a.click()
-  URL.revokeObjectURL(a.href)
+function canDownloadLeadsFile(r: LeadExtractionRow): boolean {
+  return r.status === 'completed' && Boolean(r.result_url && r.result_url.trim())
+}
+
+function openLeadsFile(r: LeadExtractionRow) {
+  if (!canDownloadLeadsFile(r) || !r.result_url) return
+  window.open(r.result_url, '_blank', 'noopener,noreferrer')
 }
 
 type LeadExtractorPageProps = {
@@ -214,22 +214,6 @@ export function LeadExtractorPage({ onOpenCrm }: LeadExtractorPageProps) {
     } else {
       setError('Resposta inesperada do servidor.')
     }
-  }
-
-  function exportRowCsv(r: LeadExtractionRow) {
-    const head = 'termo,localizacao,data,quantidade,fonte,status,url_resultado\n'
-    const line = [
-      r.search_term,
-      r.location,
-      r.created_at,
-      String(r.requested_amount),
-      r.source,
-      r.status,
-      r.result_url ?? '',
-    ]
-      .map((cell) => `"${String(cell).replaceAll('"', '""')}"`)
-      .join(',')
-    downloadTextAsFile(`extracao-${r.id.slice(0, 8)}.csv`, head + line)
   }
 
   return (
@@ -442,11 +426,17 @@ export function LeadExtractorPage({ onOpenCrm }: LeadExtractorPageProps) {
                     <div className="flex flex-wrap justify-end gap-2">
                       <button
                         type="button"
-                        onClick={() => exportRowCsv(r)}
-                        className="inline-flex items-center gap-1 rounded-lg border border-zinc-200 bg-white px-2.5 py-1.5 text-xs font-medium text-zinc-700 transition hover:border-zinc-300 hover:bg-zinc-50"
+                        onClick={() => openLeadsFile(r)}
+                        disabled={!canDownloadLeadsFile(r)}
+                        title={
+                          canDownloadLeadsFile(r)
+                            ? 'Abre o CSV de leads no Storage'
+                            : 'Disponível quando o status for Concluída e o arquivo estiver pronto'
+                        }
+                        className="inline-flex items-center gap-1 rounded-lg border border-zinc-200 bg-white px-2.5 py-1.5 text-xs font-medium text-zinc-700 transition hover:border-zinc-300 hover:bg-zinc-50 disabled:cursor-not-allowed disabled:opacity-45"
                       >
-                        <Download className="h-3.5 w-3.5" />
-                        Exportar CSV
+                        <Download className="h-3.5 w-3.5 shrink-0" aria-hidden />
+                        Baixar Leads
                       </button>
                       <button
                         type="button"
