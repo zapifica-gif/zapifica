@@ -8,6 +8,12 @@
 import { serve } from 'https://deno.land/std@0.168.0/http/server.ts'
 import { createClient, SupabaseClient } from 'https://esm.sh/@supabase/supabase-js@2'
 import { processZapVoiceInbound } from './zapvoice-inbound.ts'
+import {
+  extractQuotedTextFromMessage,
+  fetchBase64FromEvolutionApi,
+  formatReplyWithQuote,
+  transcribeWhisper,
+} from './inbound-enrichment.ts'
 
 const MEDIA_BUCKET = 'chat_media'
 
@@ -209,6 +215,22 @@ function jsonResponse(body: unknown, status = 200): Response {
     status,
     headers: { 'Content-Type': 'application/json', ...corsHeaders },
   })
+}
+
+/** Dispara trabalho de fundo (Supabase Edge) e permite responder 200 na hora. */
+function tryScheduleBackground(promise: Promise<unknown>): boolean {
+  try {
+    const root = globalThis as unknown as {
+      EdgeRuntime?: { waitUntil: (x: Promise<unknown>) => void }
+    }
+    if (root.EdgeRuntime?.waitUntil) {
+      root.EdgeRuntime.waitUntil(promise)
+      return true
+    }
+  } catch {
+    /* ignora */
+  }
+  return false
 }
 
 function toEvolutionDigits(raw: string | null | undefined): string | null {
@@ -694,6 +716,16 @@ serve(async (req) => {
     return jsonResponse({ error: leErr.message }, 500)
   }
 
+  type BatchResult = {
+    ok: boolean
+    saved: number
+    createdLeads: number
+    zvEnqueued: number
+    skipped: string[]
+    errors: string[]
+  }
+
+  const runBatch = async (): Promise<BatchResult> => {
   const index = buildLeadIndex((allLeads ?? []) as LeadRow[])
 
   let saved = 0
@@ -737,8 +769,47 @@ serve(async (req) => {
     }
     if (ensured.created) createdLeads += 1
 
-    const { body: text, content: contentType } = extractTextAndType(item.message)
+    const rawExtract = extractTextAndType(item.message)
+    let replyText = rawExtract.body
+    let contentType = rawExtract.content
     const media = extractMediaInfo(item)
+    let audioTranscript: string | null = null
+    const openaiKey = Deno.env.get('OPENAI_API_KEY')?.trim() ?? ''
+
+    if (contentType === 'audio') {
+      let b64 = media.base64
+      if (!b64 && evolutionUrl && evolutionApiKey) {
+        const ev = await fetchBase64FromEvolutionApi(
+          evolutionUrl,
+          evolutionApiKey,
+          instance,
+          item.envelope,
+        )
+        b64 = ev.base64
+        if (ev.error) {
+          console.warn('[Zapifica] getBase64 Evolution:', ev.error, item.msgId)
+        }
+      }
+      if (b64 && openaiKey) {
+        const tw = await transcribeWhisper(openaiKey, b64, media.mimeType)
+        if (tw.text) {
+          audioTranscript = tw.text
+          replyText = `[Áudio Transcrito]: ${tw.text}`
+        } else {
+          replyText = '[Áudio não transcrito devido a erro técnico]'
+        }
+      } else {
+        if (!openaiKey && b64) {
+          console.warn('[Zapifica] OPENAI_API_KEY ausente; não dá para transcrever o áudio.')
+        }
+        replyText = '[Áudio não transcrito devido a erro técnico]'
+      }
+    }
+
+    const quoted = extractQuotedTextFromMessage(item.message)
+    const finalBody = formatReplyWithQuote(quoted, replyText)
+    const dbContentType: ChatContentType =
+      contentType === 'audio' && audioTranscript ? 'text' : contentType
 
     const isMediaContent =
       contentType === 'image' ||
@@ -753,7 +824,7 @@ serve(async (req) => {
           mimeType: media.mimeType,
           base64Length: media.base64.length,
         })
-      } else {
+      } else if (contentType !== 'audio') {
         console.warn(
           '[Zapifica] Mensagem de mídia sem base64 no payload — verifique se webhookBase64=true está ativo na Evolution.',
           {
@@ -785,8 +856,8 @@ serve(async (req) => {
     const { error: insErr } = await supabase.from('chat_messages').insert({
       lead_id: ensured.id,
       sender_type: 'cliente',
-      content_type: contentType,
-      message_body: text,
+      content_type: dbContentType,
+      message_body: finalBody,
       evolution_message_id: item.msgId,
       media_url: upload.url,
     })
@@ -803,17 +874,25 @@ serve(async (req) => {
 
     // ───────────────────────────────────────────────────────────────────────
     // Zap Voice — gatilhos (Meta / respostas rápidas) -> scheduled_messages
-    // Mesma ideia de "Ativar campanha", ancorada em Date.now() para o funil
-    // automático. Ignora placeholder de mídia sem legenda; áudio sem STT: skip.
+    // Compara o texto "novo" (ou transcrição de áudio), sem o bloco de citação.
     // ───────────────────────────────────────────────────────────────────────
-    const isPlaceholderText =
-      /^\[(imagem|áudio|vídeo|documento|mensagem)\]$/i.test(
-        (text || '').trim(),
-      )
-    const canTryZapVoice =
-      !isPlaceholderText &&
-      (text || '').trim().length > 0 &&
-      contentType !== 'audio'
+    const isPlaceholderReply =
+      /^\[(imagem|vídeo|documento|mensagem)\]$/i.test(
+        (replyText || '').trim(),
+      ) && !audioTranscript
+    const zvText =
+      contentType === 'audio'
+        ? (audioTranscript ?? '').trim()
+        : (replyText || '').trim()
+    const zvContent: 'text' | 'image' | 'document' =
+      contentType === 'audio'
+        ? 'text'
+        : contentType === 'image'
+          ? 'image'
+          : contentType === 'document'
+            ? 'document'
+            : 'text'
+    const canTryZapVoice = !isPlaceholderReply && zvText.length > 0
     if (canTryZapVoice) {
       const leadDisplayName =
         index.rows.find((r) => r.id === ensured.id)?.name ??
@@ -826,8 +905,8 @@ serve(async (req) => {
         leadId: ensured.id,
         phoneDigits,
         leadName: leadDisplayName,
-        messageText: text,
-        contentType,
+        messageText: zvText,
+        contentType: zvContent,
       })
       if (zv.enqueued) {
         zvEnqueued += 1
@@ -846,9 +925,18 @@ serve(async (req) => {
 
     // ───────────────────────────────────────────────────────────────────────
     // IA (DeepSeek) com handover por lead.ai_enabled
-    // Apenas quando for mensagem do cliente (fromMe:false já filtrado) e TEXTO.
+    // Texto, legenda, citação + resposta, ou áudio já transcrito (evita "só mídia").
     // ───────────────────────────────────────────────────────────────────────
-    if (contentType === 'text' && text.trim()) {
+    const failedAudio = contentType === 'audio' && !audioTranscript
+    const hasAiMaterial =
+      !failedAudio &&
+      finalBody.trim().length > 0 &&
+      (contentType === 'text' ||
+        (contentType === 'audio' && Boolean(audioTranscript)) ||
+        (['image', 'document'].includes(contentType) &&
+          !/^\[imagem\]$/i.test((replyText || '').trim())))
+
+    if (hasAiMaterial) {
       const { data: leadAi, error: aiErr } = await supabase
         .from('leads')
         .select('id, ai_enabled')
@@ -914,7 +1002,7 @@ serve(async (req) => {
 
             const ai = await callDeepSeek({
               apiKey: deepSeekKey,
-              userText: text,
+              userText: finalBody,
               systemPrompt,
             })
             if (!ai.ok || !ai.text) {
@@ -962,16 +1050,35 @@ serve(async (req) => {
     count: items.length,
   })
 
+  return { ok, saved, createdLeads, zvEnqueued, skipped, errors }
+  }
+
+  const batchPromise = runBatch()
+  if (tryScheduleBackground(batchPromise)) {
+    return jsonResponse(
+      {
+        ok: true,
+        accepted: true,
+        async: true,
+        count: items.length,
+        message:
+          'Processamento agendado em background. Os logs e o resumo ainda aparecem no painel do Supabase.',
+      },
+      200,
+    )
+  }
+
+  const result = await batchPromise
   return jsonResponse(
     {
-      ok,
-      saved,
-      createdLeads,
-      zvEnqueued,
-      skipped,
-      errors,
+      ok: result.ok,
+      saved: result.saved,
+      createdLeads: result.createdLeads,
+      zvEnqueued: result.zvEnqueued,
+      skipped: result.skipped,
+      errors: result.errors,
       count: items.length,
     },
-    ok ? 200 : 500,
+    result.ok ? 200 : 500,
   )
 })
