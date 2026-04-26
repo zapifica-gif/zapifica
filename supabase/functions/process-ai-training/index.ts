@@ -4,10 +4,7 @@
 
 import { serve } from 'https://deno.land/std@0.168.0/http/server.ts'
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2'
-import { Buffer } from 'node:buffer'
-import { createRequire } from 'node:module'
-
-const require = createRequire(import.meta.url)
+import { getDocument } from 'npm:unpdf'
 
 const corsHeaders: Record<string, string> = {
   'Access-Control-Allow-Origin': '*',
@@ -244,15 +241,22 @@ serve(async (req) => {
         rawText = text
       } else if (lower.endsWith('.pdf')) {
         try {
-          const pdf = require('pdf-parse') as (input: Buffer) => Promise<{ text?: string }>
           const arrayBuffer = await data.arrayBuffer()
-          const pdfBuffer = Buffer.from(arrayBuffer)
-          const pdfData = await pdf(pdfBuffer)
-          const extractedText = normalizeSpaces(pdfData?.text ?? '')
-          if (!extractedText) {
+          const pdfBytes = new Uint8Array(arrayBuffer)
+          const pdf = await getDocument(pdfBytes).promise
+
+          let extractedText = ''
+          for (let i = 1; i <= pdf.numPages; i++) {
+            const page = await pdf.getPage(i)
+            const content = await page.getTextContent()
+            extractedText += content.items.map((item: any) => item.str).join(' ') + '\n'
+          }
+
+          const cleaned = normalizeSpaces(extractedText)
+          if (!cleaned) {
             return jsonResponse({ error: 'PDF sem texto extraível (pode ser imagem escaneada).' }, 400)
           }
-          rawText = extractedText
+          rawText = cleaned
         } catch (e) {
           const msg = e instanceof Error ? e.message : String(e)
           return jsonResponse({ error: `Falha ao ler PDF: ${msg}` }, 400)
