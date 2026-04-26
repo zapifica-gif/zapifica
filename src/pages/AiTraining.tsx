@@ -7,7 +7,11 @@ import {
   type ChangeEvent,
 } from 'react'
 import { BookOpen, Link2, Loader2, Save, SquarePen, Upload } from 'lucide-react'
+import * as pdfjsLib from 'pdfjs-dist'
+import pdfWorker from 'pdfjs-dist/build/pdf.worker.mjs?url'
 import { supabase } from '../lib/supabase'
+
+pdfjsLib.GlobalWorkerOptions.workerSrc = pdfWorker
 
 type AiCompanyContextRow = {
   id: number
@@ -217,6 +221,34 @@ export function AiTrainingPage() {
         const msg = `Falha no upload: ${upErr.message}`
         setError(msg)
         window.alert(msg)
+        return
+      }
+
+      const isPdf = file.name.toLowerCase().endsWith('.pdf') || file.type === 'application/pdf'
+      if (isPdf) {
+        const arrayBuffer = await file.arrayBuffer()
+        const pdf = await pdfjsLib.getDocument(arrayBuffer).promise
+        let extractedText = ''
+        for (let i = 1; i <= pdf.numPages; i++) {
+          const page = await pdf.getPage(i)
+          const textContent = await page.getTextContent()
+          extractedText += textContent.items.map((s: any) => s.str).join(' ') + '\n'
+        }
+
+        const { data, error } = await supabase.functions.invoke('process-ai-training', {
+          body: { type: 'pdf_text', text: extractedText, filePath: path },
+        })
+        if (error) {
+          const msg = await mensagemErroProcessamento(error, data)
+          setError(msg)
+          window.alert(msg)
+          return
+        }
+        const row = (data as { material?: AiTrainingMaterialRow } | null)?.material
+        if (row) {
+          setMaterials((prev) => [row, ...prev])
+        }
+        void loadAll()
         return
       }
 

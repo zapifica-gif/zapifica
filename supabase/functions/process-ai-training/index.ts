@@ -4,7 +4,6 @@
 
 import { serve } from 'https://deno.land/std@0.168.0/http/server.ts'
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2'
-import { getDocument } from 'npm:unpdf'
 
 const corsHeaders: Record<string, string> = {
   'Access-Control-Allow-Origin': '*',
@@ -220,6 +219,23 @@ serve(async (req) => {
       const html = await fetchHtmlText(u)
       if (!html.ok) return jsonResponse({ error: html.error }, 400)
       rawText = html.text
+    } else if (type === 'pdf_text') {
+      materialType = 'file'
+      const extractedText = typeof o.text === 'string' ? o.text : ''
+      const cleaned = normalizeSpaces(extractedText)
+      if (!cleaned) {
+        return jsonResponse({ error: 'Texto do PDF vazio (nada para estudar).' }, 400)
+      }
+      rawText = cleaned
+
+      const filePath = typeof o.filePath === 'string' ? o.filePath.trim() : ''
+      if (filePath) {
+        if (!filePath.startsWith(`${user.id}/`)) {
+          return jsonResponse({ error: 'filePath inválido (deve começar com seu user_id/).' }, 400)
+        }
+        const { data: pub } = supabase.storage.from('training_files').getPublicUrl(filePath)
+        materialUrl = pub.publicUrl
+      }
     } else if (type === 'file') {
       materialType = 'file'
       const filePath = typeof o.filePath === 'string' ? o.filePath.trim() : ''
@@ -240,27 +256,13 @@ serve(async (req) => {
         if (!text) return jsonResponse({ error: 'Arquivo TXT vazio.' }, 400)
         rawText = text
       } else if (lower.endsWith('.pdf')) {
-        try {
-          const arrayBuffer = await data.arrayBuffer()
-          const pdfBytes = new Uint8Array(arrayBuffer)
-          const pdf = await getDocument(pdfBytes).promise
-
-          let extractedText = ''
-          for (let i = 1; i <= pdf.numPages; i++) {
-            const page = await pdf.getPage(i)
-            const content = await page.getTextContent()
-            extractedText += content.items.map((item: any) => item.str).join(' ') + '\n'
-          }
-
-          const cleaned = normalizeSpaces(extractedText)
-          if (!cleaned) {
-            return jsonResponse({ error: 'PDF sem texto extraível (pode ser imagem escaneada).' }, 400)
-          }
-          rawText = cleaned
-        } catch (e) {
-          const msg = e instanceof Error ? e.message : String(e)
-          return jsonResponse({ error: `Falha ao ler PDF: ${msg}` }, 400)
-        }
+        return jsonResponse(
+          {
+            error:
+              'PDF não é mais processado na Edge Function (limite de memória). Faça o parse no frontend e envie type="pdf_text".',
+          },
+          400,
+        )
       } else {
         return jsonResponse(
           { error: 'Por enquanto só processamos PDF e TXT nesta função. Converta DOC/DOCX para PDF.' },
