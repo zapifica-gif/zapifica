@@ -12,7 +12,7 @@ import {
   extractQuotedTextFromMessage,
   fetchBase64FromEvolutionApi,
   formatReplyWithQuote,
-  transcribeWhisper,
+  transcribeAudioGemini,
 } from './inbound-enrichment.ts'
 
 const MEDIA_BUCKET = 'chat_media'
@@ -103,7 +103,7 @@ async function callDeepSeek(params: {
   }
 
   try {
-    const res = await fetch('https://api.deepseek.com/chat/completions', {
+    const res = await fetch('https://api.deepseek.com/v1/chat/completions', {
       method: 'POST',
       headers: {
         Authorization: `Bearer ${key}`,
@@ -774,7 +774,7 @@ serve(async (req) => {
     let contentType = rawExtract.content
     const media = extractMediaInfo(item)
     let audioTranscript: string | null = null
-    const openaiKey = Deno.env.get('OPENAI_API_KEY')?.trim() ?? ''
+    const geminiKey = Deno.env.get('GEMINI_API_KEY')?.trim() ?? ''
 
     if (contentType === 'audio') {
       let b64 = media.base64
@@ -790,8 +790,8 @@ serve(async (req) => {
           console.warn('[Zapifica] getBase64 Evolution:', ev.error, item.msgId)
         }
       }
-      if (b64 && openaiKey) {
-        const tw = await transcribeWhisper(openaiKey, b64, media.mimeType)
+      if (b64 && geminiKey) {
+        const tw = await transcribeAudioGemini(geminiKey, b64, media.mimeType)
         if (tw.text) {
           audioTranscript = tw.text
           replyText = `[Áudio Transcrito]: ${tw.text}`
@@ -799,8 +799,8 @@ serve(async (req) => {
           replyText = '[Áudio não transcrito devido a erro técnico]'
         }
       } else {
-        if (!openaiKey && b64) {
-          console.warn('[Zapifica] OPENAI_API_KEY ausente; não dá para transcrever o áudio.')
+        if (!geminiKey && b64) {
+          console.warn('[Zapifica] GEMINI_API_KEY ausente; não dá para transcrever o áudio.')
         }
         replyText = '[Áudio não transcrito devido a erro técnico]'
       }

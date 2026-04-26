@@ -107,7 +107,7 @@ async function callDeepSeekReasoner(params: {
   const system =
     'Você é um analista de negócios especialista. Leia o texto bruto abaixo retirado de um documento/site da empresa. Extraia e resuma todas as informações cruciais sobre serviços, preços, regras e cultura. Crie um resumo limpo, direto e estratégico que será usado como base de conhecimento para um bot de atendimento no WhatsApp. Ignore lixos de formatação.'
 
-  const res = await fetch('https://api.deepseek.com/chat/completions', {
+  const res = await fetch('https://api.deepseek.com/v1/chat/completions', {
     method: 'POST',
     headers: {
       Authorization: `Bearer ${key}`,

@@ -1,4 +1,4 @@
-// Citações (quoted), fetch base64 via Evolution, transcrição Whisper (OpenAI)
+// Citações (quoted), fetch base64 via Evolution, transcrição de áudio (Gemini 1.5 Flash multimodal)
 // Usado por evolution-whatsapp-webhook
 
 function asRecord(value: unknown): Record<string, unknown> | null {
@@ -182,48 +182,68 @@ function bytesFromBase64(base64: string): Uint8Array {
   return bytes
 }
 
-export async function transcribeWhisper(
-  openaiKey: string,
+const GEMINI_MODEL = 'gemini-1.5-flash'
+
+export async function transcribeAudioGemini(
+  geminiKey: string,
   base64: string,
   mimeType: string,
 ): Promise<{ text: string | null; error: string | null }> {
-  if (!openaiKey.trim()) {
-    return { text: null, error: 'OPENAI_API_KEY ausente' }
+  const key = geminiKey.trim()
+  if (!key) {
+    return { text: null, error: 'GEMINI_API_KEY ausente' }
   }
-  const ext = pickExtension(mimeType)
-  const fileName = `audio.${ext}`
-  const bytes = bytesFromBase64(base64)
-  const blob = new Blob([bytes], { type: mimeType.split(';')[0]?.trim() || 'audio/ogg' })
 
-  const form = new FormData()
-  form.append('file', blob, fileName)
-  form.append('model', 'whisper-1')
-  form.append('language', 'pt')
+  // Gemini espera base64 puro (sem prefixo data:...;base64,)
+  const cleanB64 = stripBase64(base64)
+  const mt = (mimeType.split(';')[0]?.trim() || 'audio/ogg').toLowerCase()
 
-  const res = await fetch('https://api.openai.com/v1/audio/transcriptions', {
+  const url =
+    `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=` +
+    encodeURIComponent(key)
+
+  const prompt =
+    'Transcreva este áudio de WhatsApp com precisão absoluta. ' +
+    'Retorne APENAS o texto exato do que foi falado, sem explicações adicionais.'
+
+  const res = await fetch(url, {
     method: 'POST',
-    headers: {
-      Authorization: `Bearer ${openaiKey.trim()}`,
-    },
-    body: form,
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      contents: [
+        {
+          parts: [
+            { text: prompt },
+            { inline_data: { mime_type: mt, data: cleanB64 } },
+          ],
+        },
+      ],
+    }),
   })
 
   const raw = await res.text()
   if (!res.ok) {
-    console.error('[Whisper] falha', res.status, raw.slice(0, 300))
+    console.error('[Gemini STT] falha', res.status, raw.slice(0, 300))
     return { text: null, error: raw.slice(0, 200) }
   }
-  let text: string | null = null
+
+  let out: string | null = null
   try {
-    const j = JSON.parse(raw) as { text?: string }
-    text = j.text?.trim() ?? null
+    const j = JSON.parse(raw) as {
+      candidates?: Array<{
+        content?: { parts?: Array<{ text?: string }> }
+      }>
+    }
+    out = j.candidates?.[0]?.content?.parts?.[0]?.text?.trim() ?? null
   } catch {
-    text = raw.trim() || null
+    out = raw.trim() || null
   }
-  if (!text) {
+
+  if (!out) {
     return { text: null, error: 'resposta vazia' }
   }
-  return { text, error: null }
+
+  return { text: out, error: null }
 }
 
 function pickExtension(mime: string): string {

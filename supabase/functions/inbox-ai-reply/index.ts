@@ -17,7 +17,7 @@
 import { serve } from 'https://deno.land/std@0.168.0/http/server.ts'
 import { createClient, type SupabaseClient } from 'https://esm.sh/@supabase/supabase-js@2'
 
-const DEEPSEEK_URL = 'https://api.deepseek.com/chat/completions'
+const DEEPSEEK_URL = 'https://api.deepseek.com/v1/chat/completions'
 const DEEPSEEK_MODEL = 'deepseek-chat'
 const HISTORY_LIMIT = 40
 const DEEPSEEK_TIMEOUT_MS = 60_000
@@ -102,7 +102,10 @@ function extractInsertRecord(
   return { type, table, record: null }
 }
 
-function toOpenAiContent(messages: ChatMessageRow[]): { role: string; content: string }[] {
+/** Formato de mensagens compatível com Chat Completions (DeepSeek). */
+function toChatCompletionMessages(
+  messages: ChatMessageRow[],
+): { role: string; content: string }[] {
   const out: { role: string; content: string }[] = []
   for (const m of messages) {
     const text = (m.message_body ?? '').trim()
@@ -256,14 +259,14 @@ async function runPipeline(
   }
 
   const rows = (history ?? []) as ChatMessageRow[]
-  const openai = toOpenAiContent(rows)
-  if (openai.length === 0) {
+  const chatMsgs = toChatCompletionMessages(rows)
+  if (chatMsgs.length === 0) {
     return { error: 'Sem conteúdo de conversa para a IA' }
   }
 
   const { text, error: dsErr } = await callDeepSeek(
     ZAPIFICA_SYSTEM,
-    openai,
+    chatMsgs,
     deepseekKey,
   )
   if (dsErr || !text) {
