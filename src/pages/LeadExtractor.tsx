@@ -54,9 +54,26 @@ function openLeadsFile(r: LeadExtractionRow) {
 // CSV helpers para a "Ponte Zap Voice"
 // ---------------------------------------------------------------------------
 
+/**
+ * Limpa o nome de coluna lido do CSV: BOM, aspas literais, quebras, trim e
+ * comparação case-insensitive (sempre use isso para chaves e buscas).
+ */
+function normalizeCsvHeader(raw: string): string {
+  return raw.replace(/["\r\n\uFEFF]/g, '').trim().toLowerCase()
+}
+
+/** Remove aspas envolventes e lixo comum de células (nome, telefone, etc.). */
+function cleanCsvCellValue(raw: string): string {
+  let t = raw.replace(/["\r\n\uFEFF]/g, '').trim()
+  // Aspas restantes no início/fim (ex.: export com ""campo"")
+  t = t.replace(/^"+|"+$/g, '')
+  return t.trim()
+}
+
 /** Parse CSV simples (RFC 4180 “bom o suficiente”) — suporta aspas e vírgulas escapadas. */
 function parseSimpleCsv(text: string): { headers: string[]; rows: Record<string, string>[] } {
-  const cleaned = text.replace(/^\uFEFF/, '') // remove BOM UTF-8
+  // BOM no início do arquivo e, por segurança, no início da primeira linha
+  const cleaned = text.replace(/^\uFEFF/g, '')
   const lines: string[] = []
   let current = ''
   let inQuotes = false
@@ -110,44 +127,71 @@ function parseSimpleCsv(text: string): { headers: string[]; rows: Record<string,
     return out
   }
 
-  const headers = splitCsvLine(lines[0]).map((h) => h.trim())
+  const firstLine = lines[0].replace(/^\uFEFF/, '')
+  const rawHeaderCells = splitCsvLine(firstLine)
+  // Chaves normalizadas: comparação robusta a "telefone", \"telefone\", BOM, etc.
+  const headers = rawHeaderCells.map((h) => normalizeCsvHeader(h))
+
   const rows: Record<string, string>[] = []
   for (let i = 1; i < lines.length; i++) {
     const raw = lines[i]
-    if (!raw.trim()) continue
+    if (!raw.replace(/^\uFEFF/, '').trim()) continue
     const values = splitCsvLine(raw)
     const obj: Record<string, string> = {}
     headers.forEach((h, idx) => {
-      obj[h] = (values[idx] ?? '').trim()
+      if (!h) return
+      obj[h] = cleanCsvCellValue(values[idx] ?? '')
     })
     rows.push(obj)
   }
   return { headers, rows }
 }
 
-/** Heurística para encontrar a coluna do telefone, independente do dialeto do CSV. */
+/** Heurística para encontrar a coluna do telefone (headers já em lowercase). */
 function findPhoneColumn(headers: string[]): string | null {
-  const candidates = ['telefone', 'phone', 'whatsapp', 'celular', 'mobile']
-  const lower = headers.map((h) => h.toLowerCase())
-  for (const c of candidates) {
-    const idx = lower.findIndex((h) => h === c)
-    if (idx >= 0) return headers[idx]
+  const exact = new Set([
+    'telefone',
+    'phone',
+    'whatsapp',
+    'celular',
+    'mobile',
+    'telefone celular',
+  ])
+  for (const h of headers) {
+    if (h && exact.has(h)) return h
   }
-  for (const c of candidates) {
-    const idx = lower.findIndex((h) => h.includes(c))
-    if (idx >= 0) return headers[idx]
+  // Ordem: frases e termos mais específicos antes do genérico "phone"
+  const needIncludes = [
+    'telefone celular',
+    'telefone',
+    'whatsapp',
+    'celular',
+    'mobile',
+    'phone',
+  ]
+  for (const part of needIncludes) {
+    const found = headers.find((h) => h && h.includes(part))
+    if (found) return found
   }
   return null
 }
 
+/** Nome: headers já normalizados (lowercase, sem aspas). */
 function findNameColumn(headers: string[]): string | null {
-  const candidates = ['nome_empresa', 'nome', 'name', 'titulo', 'title', 'empresa']
-  const lower = headers.map((h) => h.toLowerCase())
-  for (const c of candidates) {
-    const idx = lower.findIndex((h) => h === c)
-    if (idx >= 0) return headers[idx]
+  const order = [
+    'nome_empresa',
+    'nome',
+    'title',
+    'name',
+    'titulo',
+    'empresa',
+    'displayname',
+  ]
+  for (const c of order) {
+    if (headers.includes(c)) return c
   }
-  return headers[0] ?? null
+  // fallback: primeira coluna não vazia
+  return headers.find((h) => h && h.length > 0) ?? null
 }
 
 function buildExtractionTag(r: LeadExtractionRow): string {
@@ -448,7 +492,7 @@ export function LeadExtractorPage({ onOpenZapVoice }: LeadExtractorPageProps) {
         const phoneCol = findPhoneColumn(headers)
         if (!phoneCol) {
           throw new Error(
-            'Não encontrei uma coluna de telefone no CSV (esperado "telefone" ou "phone").',
+            'Não encontrei uma coluna de telefone no CSV. Procurei por: telefone, phone, telefone celular, whatsapp, celular.',
           )
         }
         const nameCol = findNameColumn(headers)
@@ -457,10 +501,11 @@ export function LeadExtractorPage({ onOpenZapVoice }: LeadExtractorPageProps) {
 
         const leadsPayload = csvRows
           .map((row) => {
-            const phoneDigits = (row[phoneCol] ?? '').replace(/\D/g, '')
+            const phoneRaw = cleanCsvCellValue(row[phoneCol] ?? '')
+            const phoneDigits = phoneRaw.replace(/\D/g, '')
             if (!phoneDigits) return null
-            const rawName =
-              (nameCol ? row[nameCol] : '') || `Lead ${phoneDigits.slice(-4)}`
+            const nameFromCsv = nameCol ? cleanCsvCellValue(row[nameCol] ?? '') : ''
+            const rawName = nameFromCsv || `Lead ${phoneDigits.slice(-4)}`
             return {
               user_id: userId,
               name: rawName.slice(0, 200),
