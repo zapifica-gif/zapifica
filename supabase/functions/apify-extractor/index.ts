@@ -1,5 +1,5 @@
 // Edge Function: apify-extractor
-// Dedução de créditos, registro em lead_extractions e disparo (mock) da Apify.
+// Débito de créditos, registro, disparo do Actor Apify (run assíncrono) + webhooks
 
 import { serve } from 'https://deno.land/std@0.168.0/http/server.ts'
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2'
@@ -12,9 +12,10 @@ const corsHeaders: Record<string, string> = {
 
 type Source = 'google_maps' | 'instagram'
 
-const ACTOR_PATH: Record<Source, string> = {
-  google_maps: 'compass~crawler-google-places', // padrão Comunidade: Google Maps Scraper
-  instagram: 'apify~instagram-scraper', // referência: ajuste ao Actor real
+// IDs oficiais (Apify accepta o id ou `owner~name` na rota; usamos o id fixo)
+const APIFY_ACTOR_ID: Record<Source, string> = {
+  google_maps: 'G8sBzxTwIdqmYrxWn', // compass/google-maps-extractor
+  instagram: 'dSCLg0C3YEZ83HzYX', // apify/instagram-profile-scraper
 }
 
 function jsonResponse(body: unknown, status = 200): Response {
@@ -32,29 +33,60 @@ function jsonErrorResponse(err: unknown, status = 500): Response {
   })
 }
 
+function utf8ToBase64Json(obj: unknown): string {
+  const s = JSON.stringify(obj)
+  return btoa(unescape(encodeURIComponent(s)))
+}
+
+function buildWebhookRequestUrl(
+  supabaseUrl: string,
+  explicitUrl: string | null,
+  secret: string,
+): string {
+  const base = (
+    explicitUrl && explicitUrl.length > 0
+      ? explicitUrl
+      : `${supabaseUrl.replace(/\/$/, '')}/functions/v1/apify-webhook`
+  ).trim()
+  const u = new URL(base)
+  if (secret) u.searchParams.set('secret', secret)
+  return u.toString()
+}
+
+function parseInstagramUsernames(raw: string, max: number): string[] {
+  const parts = raw
+    .split(/[\n,;]+/)
+    .map((s) => s.trim().replace(/^@+/, ''))
+    .filter(Boolean)
+  if (parts.length > 0) {
+    return parts.slice(0, Math.min(200, max))
+  }
+  const one = raw.trim().replace(/^@+/, '')
+  return one ? [one] : []
+}
+
 function buildApifyInput(params: {
   source: Source
   searchTerm: string
   country: string
   state: string
   city: string
-  maxItems: number
+  requestedAmount: number
 }): Record<string, unknown> {
-  const area = [params.city, params.state, params.country].filter(Boolean).join(', ')
-  if (params.source === 'google_maps') {
+  const { source, searchTerm, country, state, city, requestedAmount } = params
+  const q = Math.min(200, Math.max(1, requestedAmount))
+  if (source === 'google_maps') {
     return {
-      searchStringsArray: [params.searchTerm],
-      locationQuery: area,
-      maxCrawledPlaces: params.maxItems,
+      searchStringsArray: [`${searchTerm} em ${city}, ${state}, ${country}`],
+      locationQuery: `${city}, ${state}, ${country}`,
+      maxCrawledPlacesPerSearch: q,
       language: 'pt',
     }
   }
+  const usernames = parseInstagramUsernames(searchTerm, q)
   return {
-    search: params.searchTerm,
-    resultsLimit: params.maxItems,
-    searchType: 'hashtag',
-    // Campos reais do Actor de Instagram costumam variar; isto alinha a arquitetura
-    locations: [area],
+    usernames,
+    includeAboutSection: false,
   }
 }
 
@@ -71,6 +103,10 @@ serve(async (req) => {
     const supabaseUrl = Deno.env.get('SUPABASE_URL')?.trim() ?? ''
     const anonKey = Deno.env.get('SUPABASE_ANON_KEY')?.trim() ?? ''
     const serviceKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')?.trim() ?? ''
+    const apifyToken = (Deno.env.get('APIFY_API_TOKEN') ?? '').trim()
+    const mockFromEnv = Deno.env.get('APIFY_MOCK')?.trim() === '1'
+    const apiWebhookOverride = (Deno.env.get('APIFY_WEBHOOK_URL') ?? '').trim() || null
+    const apiWebhookSecret = (Deno.env.get('APIFY_WEBHOOK_SECRET') ?? '').trim()
 
     if (!supabaseUrl || !anonKey) {
       return jsonResponse(
@@ -81,6 +117,12 @@ serve(async (req) => {
     if (!serviceKey) {
       return jsonResponse(
         { ok: false, error: 'SUPABASE_SERVICE_ROLE_KEY não configurada na função.' },
+        500,
+      )
+    }
+    if (!apifyToken && !mockFromEnv) {
+      return jsonResponse(
+        { ok: false, error: 'Defina APIFY_API_TOKEN (ou APIFY_MOCK=1 em ambiente de teste).' },
         500,
       )
     }
@@ -136,6 +178,10 @@ serve(async (req) => {
       })
     }
 
+    if (source === 'instagram' && parseInstagramUsernames(searchTerm, requestedAmount).length === 0) {
+      return jsonResponse({ ok: false, error: 'Para Instagram, informe ao menos um @ de perfil (ou nomes separados por vírgula).' })
+    }
+
     const location = `${city}, ${state}, ${country}`
 
     const supabase = createClient(supabaseUrl, serviceKey, {
@@ -152,8 +198,6 @@ serve(async (req) => {
 
     const ded = (deduceRows as { ok?: boolean; new_balance?: number }[] | null)?.[0]
     if (!ded?.ok) {
-      // 200: o cliente @supabase/supabase-js parseia o corpo em qualquer status;
-      // saldo insuficiente fica em ok:false para a tela ajustar o saldo sem tratar 402.
       return jsonResponse({
         ok: false,
         error: 'Saldo insuficiente para esta extração.',
@@ -186,52 +230,80 @@ serve(async (req) => {
       )
     }
 
-    const apifyToken = (Deno.env.get('APIFY_API_TOKEN') ?? '').trim()
-    const mockApify = Deno.env.get('APIFY_MOCK')?.trim() === '1' || !apifyToken
     const apifyInput = buildApifyInput({
       source: source as Source,
       searchTerm,
       country,
       state,
       city,
-      maxItems: requestedAmount,
+      requestedAmount,
     })
+    const mockApify = mockFromEnv
 
-    // URL padrão da API Apify (run síncrono do Actor); com mock evita erro de auth em dev
-    const actor = ACTOR_PATH[source as Source]
-    const apifyRunUrl = mockApify
-      ? 'https://httpbin.org/post'
-      : `https://api.apify.com/v2/acts/${actor}/runs?token=${encodeURIComponent(apifyToken)}`
+    const rowId = (row as { id: string }).id
 
     let apifyRunId: string | null = null
+
     try {
-      const apRes = await fetch(apifyRunUrl, {
-        method: 'POST',
-        headers: mockApify
-          ? { 'Content-Type': 'application/json' }
-          : { 'Content-Type': 'application/json' },
-        body: JSON.stringify(
-          mockApify
-            ? { mock: true, source, input: apifyInput, userId: user.id, extractionId: row.id }
-            : { ...apifyInput, webhooks: [] },
-        ),
-      })
-      if (!apRes.ok) {
-        const t = await apRes.text()
-        throw new Error(`Apify HTTP ${apRes.status}: ${t.slice(0, 400)}`)
-      }
-      const out = await apRes.json().catch(() => null) as
-        | { data?: { id?: string; defaultDatasetId?: string } }
-        | { json?: { mock?: boolean } }
-        | null
-      if (out && typeof out === 'object' && 'data' in out && out.data?.id) {
-        apifyRunId = out.data.id
+      if (mockApify) {
+        const apRes = await fetch('https://httpbin.org/post', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ mock: true, userId: user.id, extractionId: rowId, input: apifyInput }),
+        })
+        if (!apRes.ok) {
+          const t = await apRes.text()
+          throw new Error(`Mock HTTP ${apRes.status}: ${t.slice(0, 200)}`)
+        }
+        // Sem run id real — o webhook Apify não é usado
+        apifyRunId = null
+      } else {
+        const actorId = APIFY_ACTOR_ID[source as Source]
+        const requestUrl = buildWebhookRequestUrl(
+          supabaseUrl,
+          apiWebhookOverride,
+          apiWebhookSecret,
+        )
+        const adHocWebhooks = [
+          {
+            eventTypes: [
+              'ACTOR.RUN.SUCCEEDED',
+              'ACTOR.RUN.FAILED',
+              'ACTOR.RUN.ABORTED',
+              'ACTOR.RUN.TIMED_OUT',
+            ],
+            requestUrl,
+          },
+        ]
+        const webhooksParam = utf8ToBase64Json(adHocWebhooks)
+        const apifyRunUrl =
+          `https://api.apify.com/v2/acts/${encodeURIComponent(actorId)}/runs?token=${
+            encodeURIComponent(apifyToken)
+          }&webhooks=${encodeURIComponent(webhooksParam)}`
+
+        const apRes = await fetch(apifyRunUrl, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(apifyInput),
+        })
+        if (!apRes.ok) {
+          const t = await apRes.text()
+          throw new Error(`Apify HTTP ${apRes.status}: ${t.slice(0, 500)}`)
+        }
+        const out = (await apRes.json().catch(() => null)) as
+          | { data?: { id?: string; defaultDatasetId?: string } }
+          | null
+        if (out?.data?.id) {
+          apifyRunId = out.data.id
+        } else {
+          throw new Error('Resposta Apify sem data.id do run')
+        }
       }
     } catch (e) {
       await supabase
         .from('lead_extractions')
         .update({ status: 'failed' })
-        .eq('id', row.id)
+        .eq('id', rowId)
       await supabase.rpc('refund_extraction_credits', {
         p_user_id: user.id,
         p_amount: requestedAmount,
@@ -243,19 +315,31 @@ serve(async (req) => {
       }, 500)
     }
 
-    const resultUrl = apifyRunId
-      ? `https://console.apify.com/actors/runs/${apifyRunId}`
-      : null
-
-    await supabase
+    const { error: upErr } = await supabase
       .from('lead_extractions')
-      .update({ status: 'processing', result_url: resultUrl })
-      .eq('id', (row as { id: string }).id)
+      .update({
+        status: 'processing',
+        apify_run_id: apifyRunId,
+        result_url: null,
+      })
+      .eq('id', rowId)
+
+    if (upErr) {
+      if (!mockApify && apifyToken) {
+        // Run já criou na Apify; o webhook ainda encontra por apify_run_id se tiver; sem corrigir
+        console.error('[apify-extractor] Falha ao persistir apify_run_id:', upErr)
+      }
+    }
 
     return jsonResponse({
       ok: true,
       mock: mockApify,
-      extraction: { ...(row as object), status: 'processing' as const, result_url: resultUrl },
+      extraction: {
+        ...(row as object),
+        status: 'processing' as const,
+        apify_run_id: apifyRunId,
+        result_url: null,
+      },
       newBalance: ded.new_balance,
     })
   } catch (err: unknown) {
