@@ -12,9 +12,9 @@ const corsHeaders: Record<string, string> = {
 
 type Source = 'google_maps' | 'instagram'
 
-// IDs oficiais (Apify accepta o id ou `owner~name` na rota; usamos o id fixo)
+// IDs: na API use `owner~name` (til) em vez de barra, ex. agents~google-maps-search
 const APIFY_ACTOR_ID: Record<Source, string> = {
-  google_maps: 'G8sBzxTwIdqmYrxWn', // compass/google-maps-extractor
+  google_maps: 'agents~google-maps-search', // pay-per-event (nova geração)
   instagram: 'dSCLg0C3YEZ83HzYX', // apify/instagram-profile-scraper
 }
 
@@ -76,10 +76,10 @@ function buildApifyInput(params: {
   const { source, searchTerm, country, state, city, requestedAmount } = params
   const q = Math.min(200, Math.max(1, requestedAmount))
   if (source === 'google_maps') {
+    // agents/google-maps-search (input schema PPE)
     return {
-      searchStringsArray: [`${searchTerm} em ${city}, ${state}, ${country}`],
-      locationQuery: `${city}, ${state}, ${country}`,
-      maxCrawledPlacesPerSearch: q,
+      searchQueries: [`${searchTerm} em ${city}, ${state}, ${country}`],
+      maxItemsPerQuery: q,
       language: 'pt',
     }
   }
@@ -281,25 +281,51 @@ serve(async (req) => {
             encodeURIComponent(apifyToken)
           }&webhooks=${encodeURIComponent(webhooksParam)}`
 
-        const apRes = await fetch(apifyRunUrl, {
+        const apifyRes = await fetch(apifyRunUrl, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(apifyInput),
         })
-        if (!apRes.ok) {
-          const t = await apRes.text()
-          throw new Error(`Apify HTTP ${apRes.status}: ${t.slice(0, 500)}`)
+        if (!apifyRes.ok) {
+          const errorText = await apifyRes.text()
+          console.error('Erro da Apify:', errorText)
+          await supabase
+            .from('lead_extractions')
+            .update({ status: 'failed' })
+            .eq('id', rowId)
+          await supabase.rpc('refund_extraction_credits', {
+            p_user_id: user.id,
+            p_amount: requestedAmount,
+          })
+          return jsonResponse(
+            {
+              ok: false,
+              error: `A Apify recusou a requisição (HTTP ${apifyRes.status}). Detalhe em apifyError.`,
+              apifyError: errorText,
+              apifyStatus: apifyRes.status,
+              refunded: true,
+            },
+            200,
+          )
         }
-        const out = (await apRes.json().catch(() => null)) as
-          | { data?: { id?: string; defaultDatasetId?: string } }
-          | null
+        const out = (await apifyRes.json().catch((parseErr) => {
+          console.error('[apify-extractor] JSON inválido na resposta da Apify:', parseErr)
+          return null
+        })) as { data?: { id?: string; defaultDatasetId?: string } } | null
         if (out?.data?.id) {
           apifyRunId = out.data.id
         } else {
-          throw new Error('Resposta Apify sem data.id do run')
+          const raw = JSON.stringify(out)
+          console.error(
+            '[apify-extractor] Resposta Apify sem data.id. Corpo (trecho):',
+            raw.slice(0, 800),
+          )
+          throw new Error('Resposta Apify sem data.id do run (veja logs da função).')
         }
       }
     } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e)
+      console.error('[apify-extractor] Falha ao contatar/interpretar a Apify:', msg, e)
       await supabase
         .from('lead_extractions')
         .update({ status: 'failed' })
@@ -308,11 +334,14 @@ serve(async (req) => {
         p_user_id: user.id,
         p_amount: requestedAmount,
       })
-      return jsonResponse({
-        ok: false,
-        error: e instanceof Error ? e.message : 'Falha ao contatar a Apify.',
-        refunded: true,
-      }, 500)
+      return jsonResponse(
+        {
+          ok: false,
+          error: msg,
+          refunded: true,
+        },
+        200,
+      )
     }
 
     const { error: upErr } = await supabase

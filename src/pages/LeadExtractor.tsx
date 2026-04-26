@@ -175,6 +175,7 @@ export function LeadExtractorPage({ onOpenCrm }: LeadExtractorPageProps) {
         ? (data as {
             ok?: boolean
             error?: string
+            apifyError?: string
             balance?: number
             newBalance?: number
             refunded?: boolean
@@ -183,23 +184,25 @@ export function LeadExtractorPage({ onOpenCrm }: LeadExtractorPageProps) {
 
     if (fnError) {
       if (typeof d.balance === 'number') setBalance(d.balance)
-      setError(
+      const apifyDetail = typeof d.apifyError === 'string' && d.apifyError.trim() ? d.apifyError.trim() : ''
+      const main =
         d.error && typeof d.error === 'string'
           ? d.error
-          : `Não foi possível iniciar a extração: ${fnError.message}`,
-      )
+          : `Não foi possível iniciar a extração: ${fnError.message}`
+      setError(apifyDetail ? `${main}\n\nDetalhe (Apify): ${apifyDetail}` : main)
       void load()
       return
     }
 
     if (d.ok === false) {
       if (typeof d.balance === 'number') setBalance(d.balance)
-      setError(
+      const apifyDetail = typeof d.apifyError === 'string' && d.apifyError.trim() ? d.apifyError.trim() : ''
+      const main =
         d.error ??
-          (d.refunded
-            ? 'A requisição à Apify falhou; o saldo foi reposto. Tente de novo em instantes.'
-            : 'Falha na extração.'),
-      )
+        (d.refunded
+          ? 'A requisição à Apify falhou; o saldo foi reposto. Tente de novo em instantes.'
+          : 'Falha na extração.')
+      setError(apifyDetail ? `${main}\n\nDetalhe (Apify): ${apifyDetail}` : main)
       void load()
       return
     }

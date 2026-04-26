@@ -27,7 +27,96 @@ function jsonResponse(body: unknown, status = 200): Response {
   })
 }
 
-function jsonToCsvRows(items: Record<string, unknown>[]): string {
+/** Texto plano no CSV: sem quebras de linha/vírgulas no meio do campo (não quebra a planilha). */
+function sanitizeCsvCellValue(raw: string): string {
+  return raw
+    .replace(/\r\n|\n|\r/g, ' ')
+    .replace(/,/g, ' ')
+    .replace(/"/g, "'")
+    .replace(/\s+/g, ' ')
+    .trim()
+}
+
+function toPlainString(v: unknown): string {
+  if (v == null) return ''
+  if (typeof v === 'string') return v
+  if (typeof v === 'number' || typeof v === 'boolean') return String(v)
+  if (Array.isArray(v)) return v.map((x) => toPlainString(x)).filter(Boolean).join(' ')
+  if (typeof v === 'object') {
+    // endereço às vezes vem aninhado
+    return sanitizeCsvCellValue(JSON.stringify(v))
+  }
+  return String(v)
+}
+
+function firstNonEmptyField(obj: Record<string, unknown>, keys: string[]): string {
+  for (const k of keys) {
+    const v = obj[k]
+    if (v == null || v === '') continue
+    const t = toPlainString(v)
+    if (t) return sanitizeCsvCellValue(t)
+  }
+  return ''
+}
+
+/** Escapa RFC 4180: aspas dobradas; valor já vem sanitizado. */
+function quoteCsvField(s: string): string {
+  return `"${s.replaceAll('"', '""')}"`
+}
+
+/** Colunas alinhadas ao dataset `agents~google-maps-search` (variação de chaves com fallback). */
+function googleMapsSearchItemsToCsv(items: Record<string, unknown>[]): string {
+  const header = [
+    'nome_empresa',
+    'telefone',
+    'website',
+    'endereco',
+    'url_local',
+  ]
+  if (items.length === 0) {
+    return `${header.map(quoteCsvField).join(',')}\n`
+  }
+  const lines: string[] = [header.map(quoteCsvField).join(',')]
+  for (const item of items) {
+    const nome = firstNonEmptyField(item, [
+      'title',
+      'name',
+      'placeName',
+      'displayName',
+      'searchResultTitle',
+      'label',
+    ])
+    const fone = firstNonEmptyField(item, [
+      'phone',
+      'phoneNumber',
+      'internationalPhoneNumber',
+      'phoneUnformatted',
+    ])
+    const site = firstNonEmptyField(item, ['website', 'websiteUrl', 'web', 'urlWebsite'])
+    const ender = firstNonEmptyField(item, [
+      'address',
+      'fullAddress',
+      'addressFormatted',
+      'formattedAddress',
+      'street',
+      'subtitle',
+      'subTitle',
+    ])
+    const umap = firstNonEmptyField(item, [
+      'url',
+      'googleMapsUrl',
+      'mapUrl',
+      'placeUrl',
+      'searchResultPageUrl',
+    ])
+    lines.push(
+      [nome, fone, site, ender, umap].map(quoteCsvField).join(','),
+    )
+  }
+  return lines.join('\n')
+}
+
+function genericJsonToCsvRows(items: Record<string, unknown>[]): string {
   if (items.length === 0) return 'resultado\n"sem itens no dataset da Apify"'
   const colSet = new Set<string>()
   for (const o of items) {
@@ -37,12 +126,11 @@ function jsonToCsvRows(items: Record<string, unknown>[]): string {
   const esc = (v: unknown): string => {
     if (v === null || v === undefined) return '""'
     if (typeof v === 'object') {
-      return `"${JSON.stringify(v).replaceAll('"', '""')}"`
+      return quoteCsvField(sanitizeCsvCellValue(JSON.stringify(v)))
     }
-    const s = String(v)
-    return `"${s.replaceAll('"', '""')}"`
+    return quoteCsvField(sanitizeCsvCellValue(String(v)))
   }
-  const header = cols.join(',')
+  const header = cols.map(quoteCsvField).join(',')
   const lines = items.map((row) => cols.map((c) => esc((row as Record<string, unknown>)[c])).join(','))
   return [header, ...lines].join('\n')
 }
@@ -95,7 +183,7 @@ serve(async (req) => {
 
   const { data: ext, error: findErr } = await supabase
     .from('lead_extractions')
-    .select('id, user_id, requested_amount, status, apify_run_id')
+    .select('id, user_id, requested_amount, status, apify_run_id, source')
     .eq('apify_run_id', runId)
     .maybeSingle()
 
@@ -177,7 +265,10 @@ serve(async (req) => {
       )
     }
 
-    const csv = '\uFEFF' + jsonToCsvRows(items)
+    const extSource = (ext as { source?: string | null }).source
+    const csv =
+      '\uFEFF' +
+      (extSource === 'google_maps' ? googleMapsSearchItemsToCsv(items) : genericJsonToCsvRows(items))
     const path = `${userId}/${extractionId}.csv`
     const upload = await supabase.storage
       .from('lead_extractions')
