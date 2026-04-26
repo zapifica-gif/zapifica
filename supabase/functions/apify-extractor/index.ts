@@ -76,11 +76,10 @@ function buildApifyInput(params: {
   const { source, searchTerm, country, state, city, requestedAmount } = params
   const q = Math.min(200, Math.max(1, requestedAmount))
   if (source === 'google_maps') {
-    // agents~google-maps-search: a Apify exige "queries" (não "searchQueries")
+    // agents~google-maps-search: schema exige exatamente "searchTerms"
     const line = `${searchTerm} em ${city}, ${state}, ${country}`
     return {
-      queries: [line],
-      search: [line],
+      searchTerms: [line],
       maxItemsPerQuery: q,
       language: 'pt',
     }
