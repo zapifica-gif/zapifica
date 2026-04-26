@@ -2,12 +2,14 @@ import { useCallback, useEffect, useState, type FormEvent } from 'react'
 import {
   Calendar,
   Clock,
+  FileText,
   Image as ImageIcon,
   Megaphone,
   MessageSquare,
   Mic,
   User,
   Users,
+  Video,
   X,
 } from 'lucide-react'
 import { toEvolutionDigits } from '../../lib/phoneBrazil'
@@ -43,6 +45,8 @@ const CATEGORIAS: { value: string; label: string }[] = [
   { value: 'suporte', label: 'Suporte' },
   { value: 'outro', label: 'Outro' },
 ]
+
+const MEDIA_BUCKET = 'chat_media'
 
 function pad2(n: number) {
   return String(n).padStart(2, '0')
@@ -111,12 +115,15 @@ export function NewEventModal({
   const [recipientType, setRecipientType] = useState<'personal' | 'segment'>(
     'personal',
   )
-  const [contentType, setContentType] = useState<'text' | 'audio' | 'image'>(
+  const [contentType, setContentType] = useState<
+    'text' | 'audio' | 'image' | 'video' | 'document'
+  >(
     'text',
   )
   const [messageBody, setMessageBody] = useState(
     'Olá! Lembrete da Zapifica…',
   )
+  const [mediaFile, setMediaFile] = useState<File | null>(null)
   const [dispatchDate, setDispatchDate] = useState('')
   const [dispatchTime, setDispatchTime] = useState('09:00')
 
@@ -147,6 +154,7 @@ export function NewEventModal({
     setRecipientType('personal')
     setContentType('text')
     setMessageBody('Olá! Lembrete da Zapifica…')
+    setMediaFile(null)
     setSegmentIds(new Set())
     setManualPersonalPhone('')
     setError(null)
@@ -219,8 +227,12 @@ export function NewEventModal({
           setError('Preencha a data e o horário do disparo.')
           return
         }
-        if (!messageBody.trim() && contentType === 'text') {
+        if (contentType === 'text' && !messageBody.trim()) {
           setError('Escreva a mensagem do lembrete ou desative o disparo.')
+          return
+        }
+        if (contentType !== 'text' && !mediaFile) {
+          setError('Selecione um arquivo para o tipo de mídia escolhido.')
           return
         }
         if (recipientType === 'segment' && segmentIds.size === 0) {
@@ -352,6 +364,7 @@ export function NewEventModal({
             recipient_type: recipientType,
             content_type: contentType,
             message_body: messageBody.trim() || null,
+            media_url: null as string | null,
             scheduled_at: scheduledAtUtcIso,
             status: 'pending' as const,
             segment_lead_ids:
@@ -368,6 +381,7 @@ export function NewEventModal({
             recipient_type: 'personal' as const,
             content_type: 'text' as const,
             message_body: null,
+            media_url: null as string | null,
             scheduled_at: null,
             status: 'cancelled' as const,
             segment_lead_ids: [] as string[],
@@ -377,9 +391,39 @@ export function NewEventModal({
             evolution_message_id: null,
           }
 
+      if (lembreteEvolutionLigado && mediaFile && contentType !== 'text') {
+        const safe = mediaFile.name.replace(/[^a-zA-Z0-9._-]/g, '_')
+        const path = `${ownerId}/agenda_${eventoCriado.id}_${crypto.randomUUID()}_${safe}`
+        const { error: upErr } = await supabase.storage
+          .from(MEDIA_BUCKET)
+          .upload(path, mediaFile, {
+            upsert: true,
+            contentType: mediaFile.type || undefined,
+          })
+        if (upErr) {
+          await supabase.from('events').delete().eq('id', eventoCriado.id)
+          setError(`Falha no upload da mídia: ${upErr.message}`)
+          return
+        }
+        const { data: pub } = supabase.storage.from(MEDIA_BUCKET).getPublicUrl(path)
+        ;(mensagemAgendadaRow as { media_url: string | null }).media_url = pub.publicUrl
+      }
+
+      // BUGFIX 42P10: índice único em event_id é parcial; não usar upsert(onConflict:event_id).
+      const { error: delErr } = await supabase
+        .from('scheduled_messages')
+        .delete()
+        .eq('event_id', eventoCriado.id)
+        .eq('user_id', ownerId)
+      if (delErr) {
+        await supabase.from('events').delete().eq('id', eventoCriado.id)
+        setError(`Passo 2 (scheduled_messages): ${textoErroParaUsuario(delErr)}`)
+        return
+      }
+
       const { error: erroMsg } = await supabase
         .from('scheduled_messages')
-        .upsert(mensagemAgendadaRow, { onConflict: 'event_id' })
+        .insert(mensagemAgendadaRow)
         .select('id')
 
       if (erroMsg) {
@@ -752,7 +796,7 @@ export function NewEventModal({
                     <p className="mb-2 text-xs font-bold uppercase tracking-wide text-emerald-800">
                       Tipo de conteúdo
                     </p>
-                    <div className="grid grid-cols-3 gap-2">
+                    <div className="grid grid-cols-3 gap-2 sm:grid-cols-5">
                       {(
                         [
                           {
@@ -766,6 +810,16 @@ export function NewEventModal({
                             label: 'Imagem',
                             icon: ImageIcon,
                           },
+                          {
+                            id: 'video' as const,
+                            label: 'Vídeo',
+                            icon: Video,
+                          },
+                          {
+                            id: 'document' as const,
+                            label: 'Documento',
+                            icon: FileText,
+                          },
                         ] as const
                       ).map(({ id, label, icon: Icon }) => {
                         const on = contentType === id
@@ -774,7 +828,10 @@ export function NewEventModal({
                             key={id}
                             type="button"
                             disabled={submitting}
-                            onClick={() => setContentType(id)}
+                            onClick={() => {
+                              setContentType(id)
+                              if (id === 'text') setMediaFile(null)
+                            }}
                             className={`flex flex-col items-center gap-1.5 rounded-xl border px-2 py-3 text-xs font-semibold transition ${
                               on
                                 ? 'border-[var(--color-brand-green)] bg-emerald-50 text-emerald-900'
@@ -788,6 +845,38 @@ export function NewEventModal({
                       })}
                     </div>
                   </div>
+
+                  {contentType !== 'text' ? (
+                    <div>
+                      <p className="mb-2 text-xs font-bold uppercase tracking-wide text-emerald-800">
+                        Arquivo de mídia
+                      </p>
+                      <input
+                        type="file"
+                        disabled={submitting}
+                        accept={
+                          contentType === 'audio'
+                            ? 'audio/*'
+                            : contentType === 'image'
+                              ? 'image/*'
+                              : contentType === 'video'
+                                ? 'video/*'
+                                : '*/*'
+                        }
+                        onChange={(e) => setMediaFile(e.target.files?.[0] ?? null)}
+                        className="block w-full rounded-xl border border-zinc-200 bg-zinc-50 px-4 py-3 text-sm text-zinc-900 outline-none transition focus:border-brand-500 focus:bg-white focus:ring-4 focus:ring-brand-600/15 disabled:opacity-60"
+                      />
+                      {mediaFile ? (
+                        <p className="mt-2 text-xs text-zinc-600">
+                          Selecionado: <span className="font-semibold">{mediaFile.name}</span>
+                        </p>
+                      ) : (
+                        <p className="mt-2 text-xs text-zinc-500">
+                          Selecione um arquivo para anexar ao lembrete.
+                        </p>
+                      )}
+                    </div>
+                  ) : null}
 
                   <div>
                     <label
