@@ -119,6 +119,38 @@ const MESSAGE_VARIABLES = [
   { key: '{cidade}', helper: 'Cidade da extração' },
 ] as const
 
+const INSERT_CHUNK = 120
+
+function firstNameFromFullName(full: string): string {
+  const t = full.trim()
+  if (!t) return 'Cliente'
+  return t.split(/\s+/)[0] ?? t
+}
+
+function cityFromExtractionLocation(loc: string | null | undefined): string {
+  if (!loc) return ''
+  return loc.split(',')[0]?.trim() ?? ''
+}
+
+function phoneDigitsForQueue(raw: string | null | undefined): string | null {
+  if (!raw) return null
+  const d = raw.replace(/\D/g, '')
+  if (d.length < 10) return null
+  if (d.startsWith('55') && d.length >= 12) return d
+  if (d.length === 10 || d.length === 11) return `55${d}`
+  if (d.length >= 12) return d
+  return null
+}
+
+type TemplateVars = { nome: string; empresa: string; cidade: string }
+
+function applyMessageTemplate(template: string, vars: TemplateVars): string {
+  return template
+    .replaceAll('{nome}', vars.nome)
+    .replaceAll('{empresa}', vars.empresa)
+    .replaceAll('{cidade}', vars.cidade)
+}
+
 // ---------------------------------------------------------------------------
 // Página principal
 // ---------------------------------------------------------------------------
@@ -136,6 +168,7 @@ export function ZapVoiceCampaignsPage() {
   const [steps, setSteps] = useState<FunnelStep[]>([])
   const [stepsLoading, setStepsLoading] = useState(false)
   const [savingStepId, setSavingStepId] = useState<string | null>(null)
+  const [activating, setActivating] = useState(false)
 
   // form de "Nova Campanha"
   const [newOpen, setNewOpen] = useState(false)
@@ -324,6 +357,246 @@ export function ZapVoiceCampaignsPage() {
       )
     },
     [],
+  )
+
+  /** Remove agendamentos pendentes desta campanha (re-ativação sem duplicar). */
+  const clearPendingForCampaign = useCallback(
+    async (campaignId: string, uid: string) => {
+      const { error: e } = await supabase
+        .from('scheduled_messages')
+        .delete()
+        .eq('user_id', uid)
+        .eq('zv_campaign_id', campaignId)
+        .eq('status', 'pending')
+      if (e) {
+        throw new Error(
+          `Não foi possível limpar a fila pendente: ${e.message}`,
+        )
+      }
+    },
+    [],
+  )
+
+  const activateCampaign = useCallback(
+    async (c: Campaign, funnelSteps: FunnelStep[]) => {
+      if (!userId) {
+        setError('Sessão inválida.')
+        return
+      }
+      setError(null)
+      setSuccess(null)
+      setActivating(true)
+      try {
+        const tag = c.audience_tag?.trim()
+        if (!tag) {
+          throw new Error('Defina o público (tag) desta campanha antes de ativar.')
+        }
+
+        const ordered = [...funnelSteps].sort(
+          (a, b) => a.step_order - b.step_order,
+        )
+        if (ordered.length === 0) {
+          throw new Error('Adicione ao menos uma etapa no funil.')
+        }
+
+        for (const s of ordered) {
+          if (s.media_type !== 'text' && !s.media_url?.trim()) {
+            throw new Error(
+              `Etapa ${s.step_order}: mídia sem URL. Edite a etapa ou mude o tipo para texto.`,
+            )
+          }
+          if (s.media_type === 'text' && !s.message.trim()) {
+            throw new Error(
+              `Etapa ${s.step_order}: a mensagem de texto está vazia.`,
+            )
+          }
+        }
+
+        await clearPendingForCampaign(c.id, userId)
+
+        const { data: leadRows, error: leadErr } = await supabase
+          .from('leads')
+          .select('id, name, phone, tag, extraction_id')
+          .eq('user_id', userId)
+          .eq('tag', tag)
+
+        if (leadErr) {
+          throw new Error(leadErr.message)
+        }
+
+        type LeadQ = {
+          id: string
+          name: string
+          phone: string | null
+          tag: string | null
+          extraction_id: string | null
+        }
+        const leads = (leadRows ?? []) as LeadQ[]
+        const withPhone = leads.filter((l) => phoneDigitsForQueue(l.phone))
+
+        if (withPhone.length === 0) {
+          throw new Error(
+            'Não há leads com telefone válido e essa tag. Confira o CRM ou a extração.',
+          )
+        }
+
+        const exIds = [
+          ...new Set(
+            withPhone.map((l) => l.extraction_id).filter(Boolean),
+          ),
+        ] as string[]
+        const locByEx = new Map<string, string>()
+        if (exIds.length > 0) {
+          const { data: extData, error: extErr } = await supabase
+            .from('lead_extractions')
+            .select('id, location')
+            .in('id', exIds)
+            .eq('user_id', userId)
+          if (extErr) {
+            throw new Error(extErr.message)
+          }
+          for (const row of (extData ?? []) as { id: string; location: string | null }[]) {
+            if (row.location) locByEx.set(row.id, row.location)
+          }
+        }
+
+        const startMs = Date.now()
+        const rows: Record<string, unknown>[] = []
+
+        for (const lead of withPhone) {
+          let accMs = 0
+          const loc = lead.extraction_id
+            ? locByEx.get(lead.extraction_id) ?? null
+            : null
+          const vars: TemplateVars = {
+            nome: firstNameFromFullName(lead.name),
+            empresa: lead.name.trim() || 'sua empresa',
+            cidade: cityFromExtractionLocation(loc),
+          }
+
+          for (const step of ordered) {
+            accMs += step.delay_seconds * 1000
+            const scheduledAt = new Date(startMs + accMs).toISOString()
+            const rawMsg = step.message ?? ''
+            const messageBody = applyMessageTemplate(rawMsg, vars)
+            const ct = step.media_type
+            const mUrl = ct === 'text' ? null : step.media_url?.trim() ?? null
+
+            rows.push({
+              user_id: userId,
+              lead_id: lead.id,
+              zv_campaign_id: c.id,
+              zv_funnel_step_id: step.id,
+              is_active: true,
+              recipient_type: 'personal',
+              content_type: ct,
+              message_body: messageBody || null,
+              media_url: mUrl,
+              scheduled_at: scheduledAt,
+              status: 'pending',
+              recipient_phone: lead.phone,
+            })
+          }
+        }
+
+        for (let i = 0; i < rows.length; i += INSERT_CHUNK) {
+          const batch = rows.slice(i, i + INSERT_CHUNK)
+          const { error: insErr } = await supabase
+            .from('scheduled_messages')
+            .insert(batch)
+          if (insErr) {
+            throw new Error(`Fila: ${insErr.message}`)
+          }
+        }
+
+        const { error: upErr } = await supabase
+          .from('zv_campaigns')
+          .update({ status: 'active' as CampaignStatus })
+          .eq('id', c.id)
+        if (upErr) {
+          throw new Error(upErr.message)
+        }
+
+        setCampaigns((prev) =>
+          prev.map((x) => (x.id === c.id ? { ...x, status: 'active' as const } : x)),
+        )
+        const total = rows.length
+        const nLeads = withPhone.length
+        setSuccess(
+          `Campanha ativa: ${total} disparos agendados para ${nLeads} lead${nLeads === 1 ? '' : 's'} (${ordered.length} etapa${ordered.length === 1 ? '' : 's'} cada).`,
+        )
+        window.setTimeout(() => setSuccess(null), 8000)
+      } catch (err) {
+        setError(err instanceof Error ? err.message : String(err))
+      } finally {
+        setActivating(false)
+      }
+    },
+    [userId, clearPendingForCampaign],
+  )
+
+  const pauseCampaign = useCallback(
+    async (c: Campaign) => {
+      if (!userId) return
+      setActivating(true)
+      setError(null)
+      try {
+        await clearPendingForCampaign(c.id, userId)
+        const { error: e } = await supabase
+          .from('zv_campaigns')
+          .update({ status: 'paused' as CampaignStatus })
+          .eq('id', c.id)
+        if (e) {
+          setError(e.message)
+          return
+        }
+        setCampaigns((prev) =>
+          prev.map((x) => (x.id === c.id ? { ...x, status: 'paused' as const } : x)),
+        )
+        setSuccess(
+          'Campanha pausada. Agendamentos pendentes desta campanha foram cancelados.',
+        )
+        window.setTimeout(() => setSuccess(null), 6000)
+      } catch (err) {
+        setError(err instanceof Error ? err.message : String(err))
+      } finally {
+        setActivating(false)
+      }
+    },
+    [userId, clearPendingForCampaign],
+  )
+
+  const completeCampaign = useCallback(
+    async (c: Campaign) => {
+      if (!userId) return
+      setActivating(true)
+      setError(null)
+      try {
+        await clearPendingForCampaign(c.id, userId)
+        const { error: e } = await supabase
+          .from('zv_campaigns')
+          .update({ status: 'completed' as CampaignStatus })
+          .eq('id', c.id)
+        if (e) {
+          setError(e.message)
+          return
+        }
+        setCampaigns((prev) =>
+          prev.map((x) =>
+            x.id === c.id ? { ...x, status: 'completed' as const } : x,
+          ),
+        )
+        setSuccess(
+          'Campanha concluída. Agendamentos pendentes desta campanha foram cancelados.',
+        )
+        window.setTimeout(() => setSuccess(null), 6000)
+      } catch (err) {
+        setError(err instanceof Error ? err.message : String(err))
+      } finally {
+        setActivating(false)
+      }
+    },
+    [userId, clearPendingForCampaign],
   )
 
   const deleteCampaign = useCallback(
@@ -705,32 +978,37 @@ export function ZapVoiceCampaignsPage() {
                     {selected.status !== 'active' ? (
                       <button
                         type="button"
-                        onClick={() =>
-                          void updateCampaign(selected.id, { status: 'active' })
-                        }
-                        className="inline-flex items-center gap-1.5 rounded-xl bg-emerald-500 px-3 py-2 text-xs font-bold uppercase tracking-wide text-white shadow-sm transition hover:bg-emerald-600"
+                        onClick={() => void activateCampaign(selected, steps)}
+                        disabled={activating}
+                        className="inline-flex items-center gap-1.5 rounded-xl bg-emerald-500 px-3 py-2 text-xs font-bold uppercase tracking-wide text-white shadow-sm transition hover:bg-emerald-600 disabled:cursor-not-allowed disabled:opacity-60"
                       >
-                        <Play className="h-3.5 w-3.5" aria-hidden />
+                        {activating ? (
+                          <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden />
+                        ) : (
+                          <Play className="h-3.5 w-3.5" aria-hidden />
+                        )}
                         Ativar
                       </button>
                     ) : (
                       <button
                         type="button"
-                        onClick={() =>
-                          void updateCampaign(selected.id, { status: 'paused' })
-                        }
-                        className="inline-flex items-center gap-1.5 rounded-xl bg-amber-500 px-3 py-2 text-xs font-bold uppercase tracking-wide text-white shadow-sm transition hover:bg-amber-600"
+                        onClick={() => void pauseCampaign(selected)}
+                        disabled={activating}
+                        className="inline-flex items-center gap-1.5 rounded-xl bg-amber-500 px-3 py-2 text-xs font-bold uppercase tracking-wide text-white shadow-sm transition hover:bg-amber-600 disabled:cursor-not-allowed disabled:opacity-60"
                       >
-                        <Pause className="h-3.5 w-3.5" aria-hidden />
+                        {activating ? (
+                          <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden />
+                        ) : (
+                          <Pause className="h-3.5 w-3.5" aria-hidden />
+                        )}
                         Pausar
                       </button>
                     )}
                     <button
                       type="button"
-                      onClick={() =>
-                        void updateCampaign(selected.id, { status: 'completed' })
-                      }
-                      className="inline-flex items-center gap-1.5 rounded-xl border border-zinc-200 bg-white px-3 py-2 text-xs font-semibold text-zinc-700 transition hover:border-brand-300 hover:bg-brand-50 hover:text-brand-700"
+                      onClick={() => void completeCampaign(selected)}
+                      disabled={activating}
+                      className="inline-flex items-center gap-1.5 rounded-xl border border-zinc-200 bg-white px-3 py-2 text-xs font-semibold text-zinc-700 transition hover:border-brand-300 hover:bg-brand-50 hover:text-brand-700 disabled:cursor-not-allowed disabled:opacity-60"
                     >
                       <Check className="h-3.5 w-3.5" aria-hidden />
                       Concluir
