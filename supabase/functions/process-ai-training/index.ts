@@ -203,6 +203,23 @@ serve(async (req) => {
 
     const o = body as Record<string, unknown>
     const type = typeof o.type === 'string' ? o.type : ''
+    const categoryId = typeof o.categoryId === 'string' ? o.categoryId.trim() : ''
+    if (!categoryId) {
+      return jsonResponse({ error: 'categoryId é obrigatório.' }, 400)
+    }
+
+    const { data: cat, error: catErr } = await supabase
+      .from('ai_training_categories')
+      .select('id')
+      .eq('id', categoryId)
+      .eq('user_id', user.id)
+      .maybeSingle()
+    if (catErr) {
+      return jsonResponse({ error: catErr.message }, 500)
+    }
+    if (!cat) {
+      return jsonResponse({ error: 'Categoria não encontrada.' }, 400)
+    }
 
     let rawText = ''
     let materialType: 'link' | 'file' = 'file'
@@ -285,12 +302,13 @@ serve(async (req) => {
       .from('ai_training_materials')
       .insert({
         user_id: user.id,
+        category_id: categoryId,
         type: materialType,
         content: ai.summary,
         url: materialUrl,
         is_processed: true,
       })
-      .select('id, type, content, url, is_processed, created_at')
+      .select('id, category_id, type, content, url, is_processed, created_at')
       .single()
 
     if (insErr) {

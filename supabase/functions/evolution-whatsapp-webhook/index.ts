@@ -45,6 +45,7 @@ type LeadAiRow = { id: string; ai_enabled: boolean | null }
 
 type CompanyContextRow = { master_prompt: string | null }
 type TrainingTextRow = { content: string | null }
+type TrainingCategoryRow = { id: string }
 
 const FALLBACK_MASTER_PROMPT =
   'Você é o assistente virtual da agência de marketing Floripa Web. Seja direto, gentil, persuasivo e use respostas curtas em português do Brasil. Tente entender a necessidade do cliente.'
@@ -828,21 +829,36 @@ serve(async (req) => {
                   .eq('user_id', userId)
                   .maybeSingle(),
                 supabase
-                  .from('ai_training_materials')
-                  .select('content')
+                  .from('ai_training_categories')
+                  .select('id')
                   .eq('user_id', userId)
-                  .eq('type', 'text'),
+                  .eq('is_active', true),
               ])
 
             if (ctxErr) {
               console.error('[IA] Falha ao carregar master_prompt:', ctxErr.message)
             }
             if (matsErr) {
-              console.error('[IA] Falha ao carregar materiais de treinamento:', matsErr.message)
+              console.error('[IA] Falha ao carregar categorias ativas:', matsErr.message)
             }
 
             const masterPrompt = (ctx as CompanyContextRow | null)?.master_prompt ?? null
-            const trainingTexts = ((mats ?? []) as TrainingTextRow[])
+            const activeCategoryIds = ((mats ?? []) as TrainingCategoryRow[]).map((r) => r.id)
+            const mats2 = activeCategoryIds.length
+              ? await supabase
+                .from('ai_training_materials')
+                .select('content')
+                .eq('user_id', userId)
+                .eq('type', 'text')
+                .eq('is_processed', true)
+                .in('category_id', activeCategoryIds)
+              : { data: [] as TrainingTextRow[], error: null as { message: string } | null }
+
+            if (mats2.error) {
+              console.error('[IA] Falha ao carregar materiais (categorias ativas):', mats2.error.message)
+            }
+
+            const trainingTexts = ((mats2.data ?? []) as TrainingTextRow[])
               .map((r) => r.content ?? '')
               .filter((t) => Boolean(t && t.trim()))
 
