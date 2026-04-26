@@ -4,6 +4,10 @@
 
 import { serve } from 'https://deno.land/std@0.168.0/http/server.ts'
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2'
+import { Buffer } from 'node:buffer'
+import { createRequire } from 'node:module'
+
+const require = createRequire(import.meta.url)
 
 const corsHeaders: Record<string, string> = {
   'Access-Control-Allow-Origin': '*',
@@ -87,37 +91,6 @@ async function fetchHtmlText(url: URL): Promise<{ ok: true; text: string } | { o
   const text = extractTextFromHtml(html)
   if (!text) return { ok: false, error: 'Não foi possível extrair texto útil do HTML.' }
   return { ok: true, text }
-}
-
-async function extractPdfText(bytes: Uint8Array): Promise<{ ok: true; text: string } | { ok: false; error: string }> {
-  try {
-    // PDF.js legacy costuma ser a opção mais estável no runtime Edge/Deno.
-    const pdfjs = await import('npm:pdfjs-dist/legacy/build/pdf.js')
-    const getDocument = (pdfjs as unknown as { getDocument?: (opts: unknown) => { promise: Promise<unknown> } }).getDocument
-    if (!getDocument) return { ok: false, error: 'pdfjs-dist não expôs getDocument neste runtime.' }
-
-    const doc = await getDocument({ data: bytes, disableWorker: true }).promise
-    const pdf = doc as {
-      numPages: number
-      getPage: (n: number) => Promise<{
-        getTextContent: () => Promise<{ items: Array<{ str?: string }> }>
-      }>
-    }
-
-    let extractedText = ''
-    for (let i = 1; i <= pdf.numPages; i++) {
-      const page = await pdf.getPage(i)
-      const content = await page.getTextContent()
-      extractedText += content.items.map((item) => item.str ?? '').join(' ') + '\n'
-    }
-
-    const text = extractedText.replace(/\s+/g, ' ').trim()
-    if (!text) return { ok: false, error: 'PDF sem texto extraível (pode ser imagem escaneada).' }
-    return { ok: true, text }
-  } catch (e) {
-    const msg = e instanceof Error ? e.message : String(e)
-    return { ok: false, error: `Falha ao ler PDF: ${msg}` }
-  }
 }
 
 function normalizeSpaces(s: string): string {
@@ -270,11 +243,20 @@ serve(async (req) => {
         if (!text) return jsonResponse({ error: 'Arquivo TXT vazio.' }, 400)
         rawText = text
       } else if (lower.endsWith('.pdf')) {
-        const arrayBuffer = await data.arrayBuffer()
-        const buffer = new Uint8Array(arrayBuffer)
-        const extracted = await extractPdfText(buffer)
-        if (!extracted.ok) return jsonResponse({ error: extracted.error }, 400)
-        rawText = extracted.text
+        try {
+          const pdf = require('pdf-parse') as (input: Buffer) => Promise<{ text?: string }>
+          const arrayBuffer = await data.arrayBuffer()
+          const pdfBuffer = Buffer.from(arrayBuffer)
+          const pdfData = await pdf(pdfBuffer)
+          const extractedText = normalizeSpaces(pdfData?.text ?? '')
+          if (!extractedText) {
+            return jsonResponse({ error: 'PDF sem texto extraível (pode ser imagem escaneada).' }, 400)
+          }
+          rawText = extractedText
+        } catch (e) {
+          const msg = e instanceof Error ? e.message : String(e)
+          return jsonResponse({ error: `Falha ao ler PDF: ${msg}` }, 400)
+        }
       } else {
         return jsonResponse(
           { error: 'Por enquanto só processamos PDF e TXT nesta função. Converta DOC/DOCX para PDF.' },
