@@ -15,6 +15,8 @@ import {
   Clock,
   FileText,
   Image as ImageIcon,
+  LayoutGrid,
+  ListTodo,
   Loader2,
   Megaphone,
   MessageSquare,
@@ -31,6 +33,7 @@ import {
   Zap,
 } from 'lucide-react'
 import { supabase } from '../lib/supabase'
+import { ContactsBasePanel } from '../components/zapvoice/ContactsBasePanel'
 
 // ---------------------------------------------------------------------------
 // Tipos
@@ -46,7 +49,8 @@ type Campaign = {
   user_id: string
   name: string
   description: string | null
-  audience_tag: string | null
+  /** Tags de público (OR): o disparo considera qualquer lead com uma delas. */
+  audience_tags: string[] | null
   status: CampaignStatus
   default_delay_seconds: number
   created_at: string
@@ -67,6 +71,76 @@ type FunnelStep = {
 }
 
 type AudienceTagOption = { tag: string; count: number }
+
+type TagMultiPickerProps = {
+  options: AudienceTagOption[]
+  value: string[]
+  onChange: (next: string[]) => void
+  customHint?: string
+}
+
+function TagMultiPicker({ options, value, onChange, customHint }: TagMultiPickerProps) {
+  const [custom, setCustom] = useState('')
+  const toggle = (tag: string) => {
+    if (value.includes(tag)) onChange(value.filter((t) => t !== tag))
+    else onChange([...value, tag])
+  }
+  const addCustom = () => {
+    const t = custom.trim()
+    if (!t || value.includes(t)) return
+    onChange([...value, t])
+    setCustom('')
+  }
+  return (
+    <div className="space-y-2">
+      <div className="max-h-40 space-y-1 overflow-y-auto rounded-lg border border-zinc-200 bg-white p-2">
+        {options.length === 0 ? (
+          <p className="text-xs text-zinc-500">
+            Nenhuma tag ainda — importe na aba Base de Contatos ou use o Extrator.
+          </p>
+        ) : (
+          options.map((o) => (
+            <label
+              key={o.tag}
+              className="flex cursor-pointer items-center gap-2 rounded px-1 py-1 text-sm text-zinc-800 hover:bg-zinc-50"
+            >
+              <input
+                type="checkbox"
+                className="rounded border-zinc-300"
+                checked={value.includes(o.tag)}
+                onChange={() => toggle(o.tag)}
+              />
+              <span className="min-w-0 flex-1 truncate">{o.tag}</span>
+              <span className="shrink-0 text-xs tabular-nums text-zinc-400">{o.count}</span>
+            </label>
+          ))
+        )}
+      </div>
+      <div className="flex gap-2">
+        <input
+          value={custom}
+          onChange={(e) => setCustom(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter') {
+              e.preventDefault()
+              addCustom()
+            }
+          }}
+          placeholder="Outra tag (Enter para adicionar)"
+          className="min-w-0 flex-1 rounded-lg border border-zinc-200 px-2 py-1.5 text-xs outline-none focus:border-brand-300"
+        />
+        <button
+          type="button"
+          onClick={addCustom}
+          className="shrink-0 rounded-lg border border-zinc-200 bg-zinc-50 px-2 py-1.5 text-xs font-medium text-zinc-800 hover:bg-zinc-100"
+        >
+          Adicionar
+        </button>
+      </div>
+      {customHint ? <p className="text-[11px] text-zinc-500">{customHint}</p> : null}
+    </div>
+  )
+}
 
 // ---------------------------------------------------------------------------
 // UI helpers
@@ -155,7 +229,15 @@ function applyMessageTemplate(template: string, vars: TemplateVars): string {
 // Página principal
 // ---------------------------------------------------------------------------
 
+type MainTab = 'disparos' | 'contatos'
+
+function normalizeTags(raw: string[] | null | undefined): string[] {
+  if (!raw || !Array.isArray(raw)) return []
+  return [...new Set(raw.map((t) => t.trim()).filter(Boolean))]
+}
+
 export function ZapVoiceCampaignsPage() {
+  const [mainTab, setMainTab] = useState<MainTab>('disparos')
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [success, setSuccess] = useState<string | null>(null)
@@ -173,7 +255,7 @@ export function ZapVoiceCampaignsPage() {
   // form de "Nova Campanha"
   const [newOpen, setNewOpen] = useState(false)
   const [newName, setNewName] = useState('')
-  const [newTag, setNewTag] = useState('')
+  const [newAudienceTags, setNewAudienceTags] = useState<string[]>([])
   const [newDescription, setNewDescription] = useState('')
   const [creating, setCreating] = useState(false)
 
@@ -182,12 +264,12 @@ export function ZapVoiceCampaignsPage() {
     [campaigns, selectedId],
   )
 
-  /** Quantos leads do usuário casam com a tag da campanha selecionada. */
-  const audienceCount = useMemo(() => {
-    if (!selected?.audience_tag) return 0
-    const found = audienceOptions.find((o) => o.tag === selected.audience_tag)
-    return found?.count ?? 0
-  }, [audienceOptions, selected])
+  const [audienceReachCount, setAudienceReachCount] = useState<number | null>(null)
+
+  const tagsForSelected = useMemo(
+    () => normalizeTags(selected?.audience_tags),
+    [selected],
+  )
 
   // -------------------------------------------------------------------------
   // Loaders
@@ -231,7 +313,7 @@ export function ZapVoiceCampaignsPage() {
     const list = await supabase
       .from('zv_campaigns')
       .select(
-        'id, user_id, name, description, audience_tag, status, default_delay_seconds, created_at, updated_at',
+        'id, user_id, name, description, audience_tags, status, default_delay_seconds, created_at, updated_at',
       )
       .eq('user_id', user.id)
       .order('created_at', { ascending: false })
@@ -242,7 +324,10 @@ export function ZapVoiceCampaignsPage() {
       return
     }
 
-    const rows = (list.data ?? []) as Campaign[]
+    const rows = (list.data ?? []).map((r) => ({
+      ...(r as Campaign),
+      audience_tags: normalizeTags((r as { audience_tags?: string[] | null }).audience_tags),
+    })) as Campaign[]
     setCampaigns(rows)
     setSelectedId((prev) => {
       if (prev && rows.some((r) => r.id === prev)) return prev
@@ -276,6 +361,38 @@ export function ZapVoiceCampaignsPage() {
   }, [loadCampaigns])
 
   useEffect(() => {
+    if (window.location.hash === '#contatos') {
+      setMainTab('contatos')
+    }
+  }, [])
+
+  const tagsKey = tagsForSelected.join('\u0000')
+
+  useEffect(() => {
+    if (!userId || tagsForSelected.length === 0) {
+      setAudienceReachCount(0)
+      return
+    }
+    let cancelled = false
+    void (async () => {
+      const { count, error: e } = await supabase
+        .from('leads')
+        .select('id', { count: 'exact', head: true })
+        .eq('user_id', userId)
+        .in('tag', tagsForSelected)
+      if (cancelled) return
+      if (e) {
+        setAudienceReachCount(0)
+        return
+      }
+      setAudienceReachCount(count ?? 0)
+    })()
+    return () => {
+      cancelled = true
+    }
+  }, [userId, selected?.id, tagsKey])
+
+  useEffect(() => {
     if (!selectedId) {
       setSteps([])
       return
@@ -303,18 +420,23 @@ export function ZapVoiceCampaignsPage() {
           user_id: userId,
           name: newName.trim(),
           description: newDescription.trim() || null,
-          audience_tag: newTag.trim() || null,
+          audience_tags: normalizeTags(newAudienceTags),
           status: 'draft' as CampaignStatus,
           default_delay_seconds: 60,
         })
         .select(
-          'id, user_id, name, description, audience_tag, status, default_delay_seconds, created_at, updated_at',
+          'id, user_id, name, description, audience_tags, status, default_delay_seconds, created_at, updated_at',
         )
         .single()
       if (insert.error || !insert.data) {
         throw new Error(insert.error?.message ?? 'Falha ao criar campanha.')
       }
-      const created = insert.data as Campaign
+      const created = {
+        ...(insert.data as object),
+        audience_tags: normalizeTags(
+          (insert.data as { audience_tags?: string[] | null }).audience_tags,
+        ),
+      } as Campaign
 
       // Cria automaticamente uma Etapa 1 vazia para o usuário já editar.
       await supabase.from('zv_funnels').insert({
@@ -331,7 +453,7 @@ export function ZapVoiceCampaignsPage() {
       setSelectedId(created.id)
       setNewOpen(false)
       setNewName('')
-      setNewTag('')
+      setNewAudienceTags([])
       setNewDescription('')
       setSuccess('Campanha criada. Agora monte o roteiro de mensagens.')
       window.setTimeout(() => setSuccess(null), 5000)
@@ -340,7 +462,7 @@ export function ZapVoiceCampaignsPage() {
     } finally {
       setCreating(false)
     }
-  }, [newName, newDescription, newTag, userId])
+  }, [newName, newDescription, newAudienceTags, userId])
 
   const updateCampaign = useCallback(
     async (id: string, patch: Partial<Campaign>) => {
@@ -387,9 +509,11 @@ export function ZapVoiceCampaignsPage() {
       setSuccess(null)
       setActivating(true)
       try {
-        const tag = c.audience_tag?.trim()
-        if (!tag) {
-          throw new Error('Defina o público (tag) desta campanha antes de ativar.')
+        const tags = normalizeTags(c.audience_tags)
+        if (tags.length === 0) {
+          throw new Error(
+            'Selecione ao menos um público (tags) nesta campanha antes de ativar.',
+          )
         }
 
         const ordered = [...funnelSteps].sort(
@@ -418,7 +542,7 @@ export function ZapVoiceCampaignsPage() {
           .from('leads')
           .select('id, name, phone, tag, extraction_id')
           .eq('user_id', userId)
-          .eq('tag', tag)
+          .in('tag', tags)
 
         if (leadErr) {
           throw new Error(leadErr.message)
@@ -431,12 +555,16 @@ export function ZapVoiceCampaignsPage() {
           tag: string | null
           extraction_id: string | null
         }
-        const leads = (leadRows ?? []) as LeadQ[]
-        const withPhone = leads.filter((l) => phoneDigitsForQueue(l.phone))
+        const rawLeads = (leadRows ?? []) as LeadQ[]
+        const byId = new Map<string, LeadQ>()
+        for (const l of rawLeads) {
+          if (!byId.has(l.id)) byId.set(l.id, l)
+        }
+        const withPhone = [...byId.values()].filter((l) => phoneDigitsForQueue(l.phone))
 
         if (withPhone.length === 0) {
           throw new Error(
-            'Não há leads com telefone válido e essa tag. Confira o CRM ou a extração.',
+            'Não há leads com telefone válido para o público selecionado. Confira o CRM ou a extração.',
           )
         }
 
@@ -758,14 +886,59 @@ export function ZapVoiceCampaignsPage() {
             Campanhas Zap Voice
           </h2>
           <p className="mt-1 max-w-2xl text-sm leading-relaxed text-zinc-600">
-            Monte sequências de mensagens para grupos de leads (por tag). Cada
-            etapa é uma mensagem com delay e gatilho de resposta — ideal para
-            funis de WhatsApp 100% humanizados.
+            {mainTab === 'disparos'
+              ? 'Monte funis de disparo e una tags de várias origens. Cada etapa leva delay e, se quiser, gatilho de resposta.'
+              : 'Unifique e limpe a base: importe CSV, Google Contacts e acompanhe origens como no Google Contacts.'}
           </p>
         </div>
       </div>
 
-      {/* Painel duplo */}
+      <div className="flex flex-wrap gap-1 border-b border-zinc-200/90">
+        <button
+          type="button"
+          onClick={() => {
+            setMainTab('disparos')
+            window.location.hash = ''
+          }}
+          className={`inline-flex items-center gap-2 border-b-2 px-3 py-2.5 text-sm font-medium transition ${
+            mainTab === 'disparos'
+              ? 'border-brand-600 text-brand-800'
+              : 'border-transparent text-zinc-500 hover:text-zinc-800'
+          }`}
+        >
+          <ListTodo className="h-4 w-4" aria-hidden />
+          Funis de Disparo
+        </button>
+        <button
+          type="button"
+          onClick={() => {
+            setMainTab('contatos')
+            window.location.hash = 'contatos'
+          }}
+          className={`inline-flex items-center gap-2 border-b-2 px-3 py-2.5 text-sm font-medium transition ${
+            mainTab === 'contatos'
+              ? 'border-brand-600 text-brand-800'
+              : 'border-transparent text-zinc-500 hover:text-zinc-800'
+          }`}
+        >
+          <LayoutGrid className="h-4 w-4" aria-hidden />
+          Base de Contatos
+        </button>
+      </div>
+
+      {mainTab === 'contatos' && userId ? (
+        <ContactsBasePanel
+          userId={userId}
+          onContactsChanged={() => {
+            if (userId) void loadAudienceOptions(userId)
+          }}
+          onError={setError}
+          onSuccess={setSuccess}
+        />
+      ) : null}
+
+      {/* Painel duplo: funis */}
+      {mainTab === 'disparos' ? (
       <div className="grid gap-6 lg:grid-cols-[360px_minmax(0,1fr)]">
         {/* COLUNA ESQUERDA: lista de campanhas */}
         <aside className="rounded-2xl border border-zinc-200/90 bg-white p-4 shadow-sm ring-1 ring-zinc-100/80">
@@ -803,24 +976,14 @@ export function ZapVoiceCampaignsPage() {
 
               <div>
                 <label className="mb-1 block text-xs font-medium text-zinc-700">
-                  Público (tag de extração)
+                  Público (uma ou mais tags)
                 </label>
-                <select
-                  value={newTag}
-                  onChange={(e) => setNewTag(e.target.value)}
-                  className="w-full rounded-lg border border-zinc-200 bg-white px-3 py-2 text-sm shadow-inner focus:border-brand-300 focus:outline-none focus:ring-2 focus:ring-brand-500/20"
-                >
-                  <option value="">— sem tag específica —</option>
-                  {audienceOptions.map((o) => (
-                    <option key={o.tag} value={o.tag}>
-                      {o.tag} ({o.count})
-                    </option>
-                  ))}
-                </select>
-                <p className="mt-1 text-[11px] text-zinc-500">
-                  Use a mesma tag que aparece em "Enviar para Zap Voice" no
-                  Extrator de Leads.
-                </p>
+                <TagMultiPicker
+                  options={audienceOptions}
+                  value={newAudienceTags}
+                  onChange={setNewAudienceTags}
+                  customHint="O disparo inclui qualquer lead cuja tag estiver marcada (lógica OU). Tags vêm do Extrator, CSV ou Google."
+                />
               </div>
 
               <div>
@@ -899,8 +1062,10 @@ export function ZapVoiceCampaignsPage() {
                       </span>
                     </div>
                     <div className="flex items-center justify-between text-[11px] text-zinc-500">
-                      <span className="line-clamp-1">
-                        {c.audience_tag ? `Tag: ${c.audience_tag}` : 'Sem tag'}
+                      <span className="line-clamp-2">
+                        {c.audience_tags && c.audience_tags.length > 0
+                          ? c.audience_tags.join(' · ')
+                          : 'Sem tag'}
                       </span>
                       <span className="tabular-nums">{formatDateBr(c.created_at)}</span>
                     </div>
@@ -1026,33 +1191,31 @@ export function ZapVoiceCampaignsPage() {
 
                 {/* Linha de configurações + público */}
                 <div className="mt-5 grid gap-3 sm:grid-cols-3">
-                  <div className="rounded-xl border border-zinc-200 bg-zinc-50/60 p-3">
+                  <div className="rounded-xl border border-zinc-200 bg-zinc-50/60 p-3 sm:col-span-2">
                     <p className="flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-wider text-zinc-500">
                       <Users className="h-3 w-3" aria-hidden />
-                      Público
+                      Público (tags em OR)
                     </p>
-                    <select
-                      value={selected.audience_tag ?? ''}
-                      onChange={(e) =>
-                        void updateCampaign(selected.id, {
-                          audience_tag: e.target.value || null,
-                        })
-                      }
-                      className="mt-1.5 w-full rounded-lg border border-zinc-200 bg-white px-2.5 py-2 text-xs shadow-inner focus:border-brand-300 focus:outline-none focus:ring-2 focus:ring-brand-500/20"
-                    >
-                      <option value="">— sem tag —</option>
-                      {audienceOptions.map((o) => (
-                        <option key={o.tag} value={o.tag}>
-                          {o.tag} ({o.count})
-                        </option>
-                      ))}
-                    </select>
+                    <div className="mt-1.5">
+                      <TagMultiPicker
+                        options={audienceOptions}
+                        value={tagsForSelected}
+                        onChange={(next) => {
+                          setCampaigns((prev) =>
+                            prev.map((c) =>
+                              c.id === selected.id ? { ...c, audience_tags: next } : c,
+                            ),
+                          )
+                          void updateCampaign(selected.id, { audience_tags: next })
+                        }}
+                        customHint="Leads com qualquer uma das tags entram no disparo (duplicados por telefone são unificados)."
+                      />
+                    </div>
                     <p className="mt-2 text-[11px] font-medium text-zinc-700">
                       <span className="tabular-nums text-brand-700">
-                        {audienceCount}
+                        {audienceReachCount ?? '—'}
                       </span>{' '}
-                      lead{audienceCount === 1 ? '' : 's'} casa{audienceCount === 1 ? '' : 'm'}
-                      {' '}com essa tag
+                      lead{(audienceReachCount ?? 0) === 1 ? '' : 's'} com essas tags
                     </p>
                   </div>
 
@@ -1172,6 +1335,7 @@ export function ZapVoiceCampaignsPage() {
           )}
         </section>
       </div>
+      ) : null}
     </div>
   )
 }
