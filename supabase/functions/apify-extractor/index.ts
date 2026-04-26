@@ -13,9 +13,14 @@ const corsHeaders: Record<string, string> = {
 type Source = 'google_maps' | 'instagram'
 
 // IDs: na API use `owner~name` (til) em vez de barra, ex. agents~google-maps-search
+//
+// Para Instagram usamos o `apify/instagram-scraper` (id `shu8hvrXbJbY3Eb9W`),
+// porque ele aceita `search` + `searchType: "user"` e devolve cada perfil em
+// modo `details` — incluindo `biography`, `businessPhoneNumber`, etc., onde
+// muitas vezes o lead deixa o WhatsApp.
 const APIFY_ACTOR_ID: Record<Source, string> = {
   google_maps: 'agents~google-maps-search', // pay-per-event (nova geração)
-  instagram: 'dSCLg0C3YEZ83HzYX', // apify/instagram-profile-scraper
+  instagram: 'apify~instagram-scraper',
 }
 
 function jsonResponse(body: unknown, status = 200): Response {
@@ -53,18 +58,6 @@ function buildWebhookRequestUrl(
   return u.toString()
 }
 
-function parseInstagramUsernames(raw: string, max: number): string[] {
-  const parts = raw
-    .split(/[\n,;]+/)
-    .map((s) => s.trim().replace(/^@+/, ''))
-    .filter(Boolean)
-  if (parts.length > 0) {
-    return parts.slice(0, Math.min(200, max))
-  }
-  const one = raw.trim().replace(/^@+/, '')
-  return one ? [one] : []
-}
-
 function buildApifyInput(params: {
   source: Source
   searchTerm: string
@@ -84,10 +77,17 @@ function buildApifyInput(params: {
       language: 'pt',
     }
   }
-  const usernames = parseInstagramUsernames(searchTerm, q)
+  // apify~instagram-scraper:
+  //   - `search` com nicho + região (perfis locais)
+  //   - `searchType: "user"` retorna usuários, e em `resultsType: "details"`
+  //     o ator entra em cada perfil para trazer `biography` (onde acha o WhatsApp).
+  const searchString = `${searchTerm} em ${city}, ${state}`
   return {
-    usernames,
-    includeAboutSection: false,
+    search: searchString,
+    searchType: 'user',
+    searchLimit: q,
+    resultsType: 'details',
+    resultsLimit: q,
   }
 }
 
@@ -166,8 +166,7 @@ serve(async (req) => {
     if (!searchTerm) {
       return jsonResponse({ ok: false, error: 'Termo de busca é obrigatório.' })
     }
-    // Para Instagram, o termo de busca já são os @ — não exige localização.
-    if (source === 'google_maps' && (!country || !state || !city)) {
+    if (!country || !state || !city) {
       return jsonResponse({
         ok: false,
         error: 'Preencha país, estado e cidade para a localização.',
@@ -180,14 +179,7 @@ serve(async (req) => {
       })
     }
 
-    if (source === 'instagram' && parseInstagramUsernames(searchTerm, requestedAmount).length === 0) {
-      return jsonResponse({ ok: false, error: 'Para Instagram, informe ao menos um @ de perfil (ou nomes separados por vírgula).' })
-    }
-
-    const location =
-      source === 'instagram'
-        ? 'Instagram (perfis)'
-        : `${city}, ${state}, ${country}`
+    const location = `${city}, ${state}, ${country}`
 
     const supabase = createClient(supabaseUrl, serviceKey, {
       auth: { persistSession: false, autoRefreshToken: false, detectSessionInUrl: false },

@@ -9,6 +9,7 @@ import { HomePage } from './pages/HomePage'
 import { LoginPage } from './pages/LoginPage'
 import { SettingsPage } from './pages/SettingsPage'
 import { ZapVoicePage } from './pages/ZapVoicePage'
+import { ZapVoiceCampaignsPage } from './pages/ZapVoiceCampaigns'
 import { LeadExtractorPage } from './pages/LeadExtractor'
 import type { DashboardNavId } from './components/Sidebar'
 
@@ -24,6 +25,8 @@ function navTitle(id: DashboardNavId): string {
       return 'Treinamento IA'
     case 'zap-voice':
       return 'Zap Voice'
+    case 'zv-campaigns':
+      return 'Campanhas Zap Voice'
     case 'lead-extractor':
       return 'Extrator de Leads'
     case 'settings':
@@ -51,8 +54,10 @@ function DashboardContent({
       return <AiTrainingPage />
     case 'zap-voice':
       return <ZapVoicePage />
+    case 'zv-campaigns':
+      return <ZapVoiceCampaignsPage />
     case 'lead-extractor':
-      return <LeadExtractorPage onOpenZapVoice={() => onNavigate('zap-voice')} />
+      return <LeadExtractorPage onOpenZapVoice={() => onNavigate('zv-campaigns')} />
     case 'settings':
       return <SettingsPage />
     default:

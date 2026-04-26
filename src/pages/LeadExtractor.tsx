@@ -186,12 +186,48 @@ function findNameColumn(headers: string[]): string | null {
     'titulo',
     'empresa',
     'displayname',
+    'username',
   ]
   for (const c of order) {
     if (headers.includes(c)) return c
   }
   // fallback: primeira coluna não vazia
   return headers.find((h) => h && h.length > 0) ?? null
+}
+
+/** Coluna de biografia / sobre / descrição (Instagram, principalmente). */
+function findBiographyColumn(headers: string[]): string | null {
+  const order = ['biografia', 'biography', 'bio', 'sobre', 'description']
+  for (const c of order) {
+    if (headers.includes(c)) return c
+  }
+  return headers.find((h) => h.includes('bio') || h.includes('descri')) ?? null
+}
+
+/**
+ * Regex permissiva para garimpar números de WhatsApp brasileiros dentro de
+ * textos livres (a "Bio" do Instagram normalmente tem o WhatsApp solto).
+ * Aceita prefixos como "Whatsapp:", "Contato:", "wa.me/", "+55", etc.
+ */
+const BR_PHONE_REGEX_FRONT =
+  /(?:whatsapp|wa\.me|whats|contato|fone|tel|wpp|zap)?[\s:.-]*\+?5?5?\s?\(?\d{2}\)?[\s.-]?\d?[\s.-]?\d{4}[\s.-]?\d{4}/gi
+
+/**
+ * Pega o primeiro número brasileiro válido (DDI 55 + DDD + 8/9 dígitos) de
+ * dentro de um texto. Retorna apenas dígitos prontos para a Evolution, ou ''.
+ */
+function extractFirstBrazilianPhone(text: string): string {
+  if (!text) return ''
+  const matches = text.match(BR_PHONE_REGEX_FRONT)
+  if (!matches) return ''
+  for (const raw of matches) {
+    const digits = raw.replace(/\D/g, '')
+    if (digits.length < 10 || digits.length > 13) continue
+    if (digits.startsWith('55') && digits.length >= 12) return digits
+    if (digits.length === 10 || digits.length === 11) return `55${digits}`
+    if (digits.length >= 12) return digits
+  }
+  return ''
 }
 
 function buildExtractionTag(r: LeadExtractionRow): string {
@@ -227,7 +263,7 @@ export function LeadExtractorPage({ onOpenZapVoice }: LeadExtractorPageProps) {
   const searchTermPlaceholder = useMemo(
     () =>
       isInstagram
-        ? 'Ex.: @floripaweb, @zapifica'
+        ? 'Ex.: petshop, restaurante, clínica'
         : 'Ex.: petshops, auto peças, clínicas',
     [isInstagram],
   )
@@ -385,12 +421,12 @@ export function LeadExtractorPage({ onOpenZapVoice }: LeadExtractorPageProps) {
     if (!searchTerm.trim()) {
       setError(
         isInstagram
-          ? 'Informe ao menos um @ de perfil (ex.: @floripaweb).'
+          ? 'Informe um nicho ou palavra-chave (ex.: petshop).'
           : 'Informe o termo de busca.',
       )
       return
     }
-    if (!isInstagram && (!country.trim() || !state.trim() || !city.trim())) {
+    if (!country.trim() || !state.trim() || !city.trim()) {
       setError('Preencha país, estado e cidade.')
       return
     }
@@ -406,9 +442,9 @@ export function LeadExtractorPage({ onOpenZapVoice }: LeadExtractorPageProps) {
       body: {
         source,
         searchTerm: searchTerm.trim(),
-        country: isInstagram ? '' : country.trim(),
-        state: isInstagram ? '' : state.trim(),
-        city: isInstagram ? '' : city.trim(),
+        country: country.trim(),
+        state: state.trim(),
+        city: city.trim(),
         requestedAmount,
       },
     })
@@ -490,9 +526,11 @@ export function LeadExtractorPage({ onOpenZapVoice }: LeadExtractorPageProps) {
         }
 
         const phoneCol = findPhoneColumn(headers)
-        if (!phoneCol) {
+        const bioCol = findBiographyColumn(headers)
+        if (!phoneCol && !bioCol) {
           throw new Error(
-            'Não encontrei uma coluna de telefone no CSV. Procurei por: telefone, phone, telefone celular, whatsapp, celular.',
+            'Não encontrei nem coluna de telefone nem de biografia no CSV. ' +
+              'Esperado: telefone/phone/whatsapp ou biografia/biography.',
           )
         }
         const nameCol = findNameColumn(headers)
@@ -501,8 +539,17 @@ export function LeadExtractorPage({ onOpenZapVoice }: LeadExtractorPageProps) {
 
         const leadsPayload = csvRows
           .map((row) => {
-            const phoneRaw = cleanCsvCellValue(row[phoneCol] ?? '')
-            const phoneDigits = phoneRaw.replace(/\D/g, '')
+            // 1) tenta a coluna direta de telefone
+            let phoneDigits = ''
+            if (phoneCol) {
+              const phoneRaw = cleanCsvCellValue(row[phoneCol] ?? '')
+              phoneDigits = phoneRaw.replace(/\D/g, '')
+            }
+            // 2) fallback: garimpa o WhatsApp dentro da biografia (Instagram)
+            if (!phoneDigits && bioCol) {
+              const bio = cleanCsvCellValue(row[bioCol] ?? '')
+              phoneDigits = extractFirstBrazilianPhone(bio)
+            }
             if (!phoneDigits) return null
             const nameFromCsv = nameCol ? cleanCsvCellValue(row[nameCol] ?? '') : ''
             const rawName = nameFromCsv || `Lead ${phoneDigits.slice(-4)}`
@@ -617,7 +664,7 @@ export function LeadExtractorPage({ onOpenZapVoice }: LeadExtractorPageProps) {
             </div>
             <div className="sm:col-span-2">
               <label className="block text-sm font-medium text-zinc-700" htmlFor="le-term">
-                {isInstagram ? 'Perfis do Instagram' : 'Termo de busca'}
+                {isInstagram ? 'Nicho / palavra-chave' : 'Termo de busca'}
               </label>
               <input
                 id="le-term"
@@ -628,57 +675,53 @@ export function LeadExtractorPage({ onOpenZapVoice }: LeadExtractorPageProps) {
               />
               {isInstagram ? (
                 <p className="mt-1.5 text-xs text-zinc-500">
-                  Liste os @ separados por vírgula. A localização é ignorada porque o
-                  Instagram extrai por perfil, não por região.
+                  Buscamos perfis do Instagram que combinem com o nicho dentro da
+                  região informada (ex.: "petshop" em Florianópolis, SC).
                 </p>
               ) : null}
             </div>
-            {!isInstagram ? (
-              <>
-                <div>
-                  <label className="block text-sm font-medium text-zinc-700" htmlFor="le-country">
-                    País
-                  </label>
-                  <select
-                    id="le-country"
-                    value={country}
-                    onChange={(e) => setCountry(e.target.value)}
-                    className="mt-1.5 w-full rounded-xl border border-zinc-200 bg-zinc-50 px-3 py-2.5 text-sm text-zinc-900 outline-none focus:border-brand-200 focus:bg-white focus:ring-4 focus:ring-brand-600/15"
-                  >
-                    {COUNTRIES.map((c) => (
-                      <option key={c} value={c}>
-                        {c}
-                      </option>
-                    ))}
-                  </select>
-                </div>
-                <div>
-                  <label className="block text-sm font-medium text-zinc-700" htmlFor="le-state">
-                    Estado
-                  </label>
-                  <input
-                    id="le-state"
-                    value={state}
-                    onChange={(e) => setState(e.target.value.toUpperCase())}
-                    placeholder="Ex.: SC"
-                    maxLength={2}
-                    className="mt-1.5 w-full rounded-xl border border-zinc-200 bg-zinc-50 px-3 py-2.5 text-sm text-zinc-900 outline-none placeholder:text-zinc-400 focus:border-brand-200 focus:bg-white focus:ring-4 focus:ring-brand-600/15"
-                  />
-                </div>
-                <div className="sm:col-span-2">
-                  <label className="block text-sm font-medium text-zinc-700" htmlFor="le-city">
-                    Cidade
-                  </label>
-                  <input
-                    id="le-city"
-                    value={city}
-                    onChange={(e) => setCity(e.target.value)}
-                    placeholder="Ex.: Florianópolis"
-                    className="mt-1.5 w-full rounded-xl border border-zinc-200 bg-zinc-50 px-3 py-2.5 text-sm text-zinc-900 outline-none placeholder:text-zinc-400 focus:border-brand-200 focus:bg-white focus:ring-4 focus:ring-brand-600/15"
-                  />
-                </div>
-              </>
-            ) : null}
+            <div>
+              <label className="block text-sm font-medium text-zinc-700" htmlFor="le-country">
+                País
+              </label>
+              <select
+                id="le-country"
+                value={country}
+                onChange={(e) => setCountry(e.target.value)}
+                className="mt-1.5 w-full rounded-xl border border-zinc-200 bg-zinc-50 px-3 py-2.5 text-sm text-zinc-900 outline-none focus:border-brand-200 focus:bg-white focus:ring-4 focus:ring-brand-600/15"
+              >
+                {COUNTRIES.map((c) => (
+                  <option key={c} value={c}>
+                    {c}
+                  </option>
+                ))}
+              </select>
+            </div>
+            <div>
+              <label className="block text-sm font-medium text-zinc-700" htmlFor="le-state">
+                Estado
+              </label>
+              <input
+                id="le-state"
+                value={state}
+                onChange={(e) => setState(e.target.value.toUpperCase())}
+                placeholder="Ex.: SC"
+                maxLength={2}
+                className="mt-1.5 w-full rounded-xl border border-zinc-200 bg-zinc-50 px-3 py-2.5 text-sm text-zinc-900 outline-none placeholder:text-zinc-400 focus:border-brand-200 focus:bg-white focus:ring-4 focus:ring-brand-600/15"
+              />
+            </div>
+            <div className="sm:col-span-2">
+              <label className="block text-sm font-medium text-zinc-700" htmlFor="le-city">
+                Cidade
+              </label>
+              <input
+                id="le-city"
+                value={city}
+                onChange={(e) => setCity(e.target.value)}
+                placeholder="Ex.: Florianópolis"
+                className="mt-1.5 w-full rounded-xl border border-zinc-200 bg-zinc-50 px-3 py-2.5 text-sm text-zinc-900 outline-none placeholder:text-zinc-400 focus:border-brand-200 focus:bg-white focus:ring-4 focus:ring-brand-600/15"
+              />
+            </div>
             <div>
               <label className="block text-sm font-medium text-zinc-700" htmlFor="le-qty">
                 Quantidade de leads (máx. 200)

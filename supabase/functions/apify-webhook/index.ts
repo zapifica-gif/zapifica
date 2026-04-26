@@ -68,6 +68,41 @@ function cleanPhoneDigits(raw: string): string {
   return raw.replace(/\D/g, '')
 }
 
+/**
+ * Regex de números de WhatsApp brasileiros encontrados dentro de textos livres
+ * (biografia do Instagram, descrição de empresa, etc.).
+ *
+ * Casa formatos comuns:
+ *   - 11 99999-9999
+ *   - (48) 9 8888-8888
+ *   - +55 48 99999-9999
+ *   - Whatsapp: 48999998888
+ *
+ * Faz captura permissiva e a limpeza/normalização para "somente dígitos" é
+ * feita por `extractFirstBrazilianPhone`.
+ */
+const BR_PHONE_REGEX =
+  /(?:whatsapp|wa\.me|whats|contato|fone|tel|wpp|zap)?[\s:.-]*\+?5?5?\s?\(?\d{2}\)?[\s.-]?\d?[\s.-]?\d{4}[\s.-]?\d{4}/gi
+
+/**
+ * Encontra o primeiro número de WhatsApp brasileiro válido dentro de um texto
+ * livre e devolve só os dígitos com DDI 55. Devolve string vazia se não achar.
+ */
+function extractFirstBrazilianPhone(text: string): string {
+  if (!text) return ''
+  const matches = text.match(BR_PHONE_REGEX)
+  if (!matches) return ''
+  for (const raw of matches) {
+    const digits = cleanPhoneDigits(raw)
+    // Aceita DDI+DDD+8/9 dígitos (10..13 dígitos no total).
+    if (digits.length < 10 || digits.length > 13) continue
+    if (digits.startsWith('55') && digits.length >= 12) return digits
+    if (digits.length === 10 || digits.length === 11) return `55${digits}`
+    if (digits.length >= 12) return digits
+  }
+  return ''
+}
+
 /** Escapa RFC 4180: aspas dobradas; valor já vem sanitizado. */
 function quoteCsvField(s: string): string {
   return `"${s.replaceAll('"', '""')}"`
@@ -139,6 +174,76 @@ function isPhoneLikeKey(key: string): boolean {
     k.includes('telefone') ||
     k.includes('mobile')
   )
+}
+
+/** Colunas para o output do `apify~instagram-scraper` (resultsType=details). */
+function instagramItemsToCsv(items: Record<string, unknown>[]): string {
+  const header = [
+    'nome',
+    'username',
+    'telefone',
+    'biografia',
+    'website',
+    'seguidores',
+    'url_perfil',
+  ]
+  if (items.length === 0) {
+    return `${header.map(quoteCsvField).join(',')}\n`
+  }
+  const lines: string[] = [header.map(quoteCsvField).join(',')]
+  for (const item of items) {
+    const username = firstNonEmptyField(item, ['username', 'userName', 'handle'])
+    const nome = firstNonEmptyField(item, [
+      'fullName',
+      'full_name',
+      'displayName',
+      'name',
+      'title',
+    ])
+    const bioRaw = firstNonEmptyField(item, [
+      'biography',
+      'bio',
+      'description',
+      'aboutSection',
+    ])
+    // Telefone: 1) campos de contato comercial; 2) regex sobre a biografia
+    const phoneFromFields = firstNonEmptyField(item, [
+      'businessPhoneNumber',
+      'business_phone_number',
+      'contactPhoneNumber',
+      'public_phone_number',
+      'publicPhoneNumber',
+      'phone',
+      'phoneNumber',
+    ])
+    const phone = phoneFromFields
+      ? cleanPhoneDigits(phoneFromFields)
+      : extractFirstBrazilianPhone(bioRaw)
+    const website = firstNonEmptyField(item, [
+      'externalUrl',
+      'external_url',
+      'website',
+      'businessWebsite',
+    ])
+    const followers = firstNonEmptyField(item, [
+      'followersCount',
+      'followers_count',
+      'followers',
+    ])
+    const url = firstNonEmptyField(item, [
+      'url',
+      'profileUrl',
+      'profile_url',
+    ])
+    const fallbackUrl =
+      url || (username ? `https://www.instagram.com/${username}/` : '')
+    lines.push(
+      [nome, username, phone, bioRaw, website, followers, fallbackUrl]
+        .map(quoteCsvField)
+        .join(','),
+    )
+  }
+  return lines.join('\n')
 }
 
 function genericJsonToCsvRows(items: Record<string, unknown>[]): string {
@@ -297,9 +402,15 @@ serve(async (req) => {
     }
 
     const extSource = (ext as { source?: string | null }).source
-    const csv =
-      '\uFEFF' +
-      (extSource === 'google_maps' ? googleMapsSearchItemsToCsv(items) : genericJsonToCsvRows(items))
+    let csvBody: string
+    if (extSource === 'google_maps') {
+      csvBody = googleMapsSearchItemsToCsv(items)
+    } else if (extSource === 'instagram') {
+      csvBody = instagramItemsToCsv(items)
+    } else {
+      csvBody = genericJsonToCsvRows(items)
+    }
+    const csv = '\uFEFF' + csvBody
     const path = `${userId}/${extractionId}.csv`
     const upload = await supabase.storage
       .from('lead_extractions')
