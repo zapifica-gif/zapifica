@@ -166,7 +166,8 @@ serve(async (req) => {
     if (!searchTerm) {
       return jsonResponse({ ok: false, error: 'Termo de busca é obrigatório.' })
     }
-    if (!country || !state || !city) {
+    // Para Instagram, o termo de busca já são os @ — não exige localização.
+    if (source === 'google_maps' && (!country || !state || !city)) {
       return jsonResponse({
         ok: false,
         error: 'Preencha país, estado e cidade para a localização.',
@@ -183,7 +184,10 @@ serve(async (req) => {
       return jsonResponse({ ok: false, error: 'Para Instagram, informe ao menos um @ de perfil (ou nomes separados por vírgula).' })
     }
 
-    const location = `${city}, ${state}, ${country}`
+    const location =
+      source === 'instagram'
+        ? 'Instagram (perfis)'
+        : `${city}, ${state}, ${country}`
 
     const supabase = createClient(supabaseUrl, serviceKey, {
       auth: { persistSession: false, autoRefreshToken: false, detectSessionInUrl: false },

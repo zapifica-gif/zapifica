@@ -59,6 +59,15 @@ function firstNonEmptyField(obj: Record<string, unknown>, keys: string[]): strin
   return ''
 }
 
+/**
+ * Limpa um telefone para o formato “somente dígitos”, do jeito que a Evolution
+ * espera no campo `number` ao disparar uma campanha (ex.: 5548999990000).
+ * Remove parênteses, traços, espaços e qualquer caractere não numérico.
+ */
+function cleanPhoneDigits(raw: string): string {
+  return raw.replace(/\D/g, '')
+}
+
 /** Escapa RFC 4180: aspas dobradas; valor já vem sanitizado. */
 function quoteCsvField(s: string): string {
   return `"${s.replaceAll('"', '""')}"`
@@ -86,12 +95,13 @@ function googleMapsSearchItemsToCsv(items: Record<string, unknown>[]): string {
       'searchResultTitle',
       'label',
     ])
-    const fone = firstNonEmptyField(item, [
+    const foneRaw = firstNonEmptyField(item, [
       'phone',
       'phoneNumber',
       'internationalPhoneNumber',
       'phoneUnformatted',
     ])
+    const fone = cleanPhoneDigits(foneRaw)
     const site = firstNonEmptyField(item, ['website', 'websiteUrl', 'web', 'urlWebsite'])
     const ender = firstNonEmptyField(item, [
       'address',
@@ -116,6 +126,21 @@ function googleMapsSearchItemsToCsv(items: Record<string, unknown>[]): string {
   return lines.join('\n')
 }
 
+/** Heurística: chaves cujos valores devem ir “só com dígitos” no CSV. */
+function isPhoneLikeKey(key: string): boolean {
+  const k = key.toLowerCase()
+  return (
+    k === 'phone' ||
+    k === 'whatsapp' ||
+    k === 'tel' ||
+    k === 'celular' ||
+    k.includes('phone') ||
+    k.includes('whatsapp') ||
+    k.includes('telefone') ||
+    k.includes('mobile')
+  )
+}
+
 function genericJsonToCsvRows(items: Record<string, unknown>[]): string {
   if (items.length === 0) return 'resultado\n"sem itens no dataset da Apify"'
   const colSet = new Set<string>()
@@ -123,15 +148,21 @@ function genericJsonToCsvRows(items: Record<string, unknown>[]): string {
     for (const k of Object.keys(o)) colSet.add(k)
   }
   const cols = [...colSet].sort()
-  const esc = (v: unknown): string => {
+  const esc = (key: string, v: unknown): string => {
     if (v === null || v === undefined) return '""'
     if (typeof v === 'object') {
       return quoteCsvField(sanitizeCsvCellValue(JSON.stringify(v)))
     }
-    return quoteCsvField(sanitizeCsvCellValue(String(v)))
+    const sanitized = sanitizeCsvCellValue(String(v))
+    if (isPhoneLikeKey(key) && sanitized) {
+      return quoteCsvField(cleanPhoneDigits(sanitized))
+    }
+    return quoteCsvField(sanitized)
   }
   const header = cols.map(quoteCsvField).join(',')
-  const lines = items.map((row) => cols.map((c) => esc((row as Record<string, unknown>)[c])).join(','))
+  const lines = items.map((row) =>
+    cols.map((c) => esc(c, (row as Record<string, unknown>)[c])).join(','),
+  )
   return [header, ...lines].join('\n')
 }
 
@@ -291,17 +322,41 @@ serve(async (req) => {
     const { data: pub } = supabase.storage.from('lead_extractions').getPublicUrl(path)
     const resultUrl = pub.publicUrl
 
+    // Cobrança justa: a Apify cobrou `requested_amount`, mas só vieram `items.length`.
+    // Devolvemos a diferença no saldo do tenant via RPC (com idempotência por extraction_id).
+    const extractedCount = items.length
+    const refundAmount = Math.max(0, requestedAmount - extractedCount)
+
+    if (refundAmount > 0) {
+      const { error: refundErr } = await supabase.rpc('refund_partial_credits', {
+        p_user_id: userId,
+        p_extraction_id: extractionId,
+        p_amount: refundAmount,
+      })
+      if (refundErr) {
+        console.error('[apify-webhook] refund_partial_credits falhou:', refundErr)
+      }
+    }
+
     await supabase
       .from('lead_extractions')
-      .update({ status: 'completed', result_url: resultUrl })
+      .update({
+        status: 'completed',
+        result_url: resultUrl,
+        extracted_count: extractedCount,
+      })
       .eq('id', extractionId)
 
-    return jsonResponse({
-      ok: true,
-      extractionId,
-      resultUrl,
-      itemCount: items.length,
-    }, 200)
+    return jsonResponse(
+      {
+        ok: true,
+        extractionId,
+        resultUrl,
+        itemCount: extractedCount,
+        refunded: refundAmount,
+      },
+      200,
+    )
   }
 
   if (isFailed) {

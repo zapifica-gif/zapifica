@@ -52,7 +52,7 @@ function DashboardContent({
     case 'zap-voice':
       return <ZapVoicePage />
     case 'lead-extractor':
-      return <LeadExtractorPage onOpenCrm={() => onNavigate('crm')} />
+      return <LeadExtractorPage onOpenZapVoice={() => onNavigate('zap-voice')} />
     case 'settings':
       return <SettingsPage />
     default:

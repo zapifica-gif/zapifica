@@ -1,5 +1,5 @@
-import { useCallback, useEffect, useState } from 'react'
-import { Download, FolderKanban, Loader2, Search } from 'lucide-react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { Download, Loader2, Megaphone, Search } from 'lucide-react'
 import { supabase } from '../lib/supabase'
 
 type LeadExtractionSource = 'google_maps' | 'instagram'
@@ -14,6 +14,7 @@ type LeadExtractionRow = {
   requested_amount: number
   status: LeadExtractionStatus
   result_url: string | null
+  extracted_count: number | null
   created_at: string
 }
 
@@ -49,11 +50,117 @@ function openLeadsFile(r: LeadExtractionRow) {
   window.open(r.result_url, '_blank', 'noopener,noreferrer')
 }
 
-type LeadExtractorPageProps = {
-  onOpenCrm: () => void
+// ---------------------------------------------------------------------------
+// CSV helpers para a "Ponte Zap Voice"
+// ---------------------------------------------------------------------------
+
+/** Parse CSV simples (RFC 4180 “bom o suficiente”) — suporta aspas e vírgulas escapadas. */
+function parseSimpleCsv(text: string): { headers: string[]; rows: Record<string, string>[] } {
+  const cleaned = text.replace(/^\uFEFF/, '') // remove BOM UTF-8
+  const lines: string[] = []
+  let current = ''
+  let inQuotes = false
+  for (let i = 0; i < cleaned.length; i++) {
+    const ch = cleaned[i]
+    const next = cleaned[i + 1]
+    if (ch === '"' && inQuotes && next === '"') {
+      current += '"'
+      i++
+      continue
+    }
+    if (ch === '"') {
+      inQuotes = !inQuotes
+      continue
+    }
+    if ((ch === '\n' || ch === '\r') && !inQuotes) {
+      if (ch === '\r' && next === '\n') i++
+      lines.push(current)
+      current = ''
+      continue
+    }
+    current += ch
+  }
+  if (current.length) lines.push(current)
+  if (lines.length === 0) return { headers: [], rows: [] }
+
+  const splitCsvLine = (line: string): string[] => {
+    const out: string[] = []
+    let cell = ''
+    let q = false
+    for (let i = 0; i < line.length; i++) {
+      const ch = line[i]
+      const next = line[i + 1]
+      if (ch === '"' && q && next === '"') {
+        cell += '"'
+        i++
+        continue
+      }
+      if (ch === '"') {
+        q = !q
+        continue
+      }
+      if (ch === ',' && !q) {
+        out.push(cell)
+        cell = ''
+        continue
+      }
+      cell += ch
+    }
+    out.push(cell)
+    return out
+  }
+
+  const headers = splitCsvLine(lines[0]).map((h) => h.trim())
+  const rows: Record<string, string>[] = []
+  for (let i = 1; i < lines.length; i++) {
+    const raw = lines[i]
+    if (!raw.trim()) continue
+    const values = splitCsvLine(raw)
+    const obj: Record<string, string> = {}
+    headers.forEach((h, idx) => {
+      obj[h] = (values[idx] ?? '').trim()
+    })
+    rows.push(obj)
+  }
+  return { headers, rows }
 }
 
-export function LeadExtractorPage({ onOpenCrm }: LeadExtractorPageProps) {
+/** Heurística para encontrar a coluna do telefone, independente do dialeto do CSV. */
+function findPhoneColumn(headers: string[]): string | null {
+  const candidates = ['telefone', 'phone', 'whatsapp', 'celular', 'mobile']
+  const lower = headers.map((h) => h.toLowerCase())
+  for (const c of candidates) {
+    const idx = lower.findIndex((h) => h === c)
+    if (idx >= 0) return headers[idx]
+  }
+  for (const c of candidates) {
+    const idx = lower.findIndex((h) => h.includes(c))
+    if (idx >= 0) return headers[idx]
+  }
+  return null
+}
+
+function findNameColumn(headers: string[]): string | null {
+  const candidates = ['nome_empresa', 'nome', 'name', 'titulo', 'title', 'empresa']
+  const lower = headers.map((h) => h.toLowerCase())
+  for (const c of candidates) {
+    const idx = lower.findIndex((h) => h === c)
+    if (idx >= 0) return headers[idx]
+  }
+  return headers[0] ?? null
+}
+
+function buildExtractionTag(r: LeadExtractionRow): string {
+  const data = formatDateBr(r.created_at)
+  const fonte = r.source === 'instagram' ? 'Instagram' : 'Google Maps'
+  return `Extração ${fonte} · ${r.search_term} · ${r.location} · ${data}`
+}
+
+type LeadExtractorPageProps = {
+  onOpenZapVoice: () => void
+}
+
+export function LeadExtractorPage({ onOpenZapVoice }: LeadExtractorPageProps) {
   const [loading, setLoading] = useState(true)
   const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -61,6 +168,7 @@ export function LeadExtractorPage({ onOpenCrm }: LeadExtractorPageProps) {
 
   const [balance, setBalance] = useState(0)
   const [rows, setRows] = useState<LeadExtractionRow[]>([])
+  const [sendingId, setSendingId] = useState<string | null>(null)
 
   const [source, setSource] = useState<LeadExtractionSource>('google_maps')
   const [searchTerm, setSearchTerm] = useState('')
@@ -68,6 +176,17 @@ export function LeadExtractorPage({ onOpenCrm }: LeadExtractorPageProps) {
   const [state, setState] = useState('')
   const [city, setCity] = useState('')
   const [requestedAmount, setRequestedAmount] = useState(50)
+
+  const userIdRef = useRef<string | null>(null)
+  const isInstagram = source === 'instagram'
+
+  const searchTermPlaceholder = useMemo(
+    () =>
+      isInstagram
+        ? 'Ex.: @floripaweb, @zapifica'
+        : 'Ex.: petshops, auto peças, clínicas',
+    [isInstagram],
+  )
 
   const load = useCallback(async () => {
     setLoading(true)
@@ -110,10 +229,12 @@ export function LeadExtractorPage({ onOpenCrm }: LeadExtractorPageProps) {
       setBalance(prof.data.extraction_credits ?? 0)
     }
 
+    userIdRef.current = user.id
+
     const list = await supabase
       .from('lead_extractions')
       .select(
-        'id, user_id, source, search_term, location, requested_amount, status, result_url, created_at',
+        'id, user_id, source, search_term, location, requested_amount, status, result_url, extracted_count, created_at',
       )
       .eq('user_id', user.id)
       .order('created_at', { ascending: false })
@@ -133,6 +254,81 @@ export function LeadExtractorPage({ onOpenCrm }: LeadExtractorPageProps) {
     void load()
   }, [load])
 
+  // Realtime: quando a Apify terminar e o webhook atualizar a extração no banco,
+  // a tela reflete o novo status (e o saldo) sem F5 do usuário.
+  useEffect(() => {
+    let cancelled = false
+    let cleanup: (() => void) | null = null
+
+    void (async () => {
+      const {
+        data: { user },
+      } = await supabase.auth.getUser()
+      if (!user || cancelled) return
+
+      const channel = supabase
+        .channel(`lead_extractions:${user.id}`)
+        .on(
+          'postgres_changes',
+          {
+            event: '*',
+            schema: 'public',
+            table: 'lead_extractions',
+            filter: `user_id=eq.${user.id}`,
+          },
+          (payload) => {
+            const newRow = payload.new as LeadExtractionRow | null
+            const oldRow = payload.old as { id?: string } | null
+
+            if (payload.eventType === 'DELETE' && oldRow?.id) {
+              setRows((prev) => prev.filter((r) => r.id !== oldRow.id))
+              return
+            }
+
+            if (!newRow) return
+
+            setRows((prev) => {
+              const idx = prev.findIndex((r) => r.id === newRow.id)
+              if (idx === -1) {
+                return [newRow, ...prev]
+              }
+              const next = prev.slice()
+              next[idx] = { ...prev[idx], ...newRow }
+              return next
+            })
+
+            // Quando o backend reembolsa créditos parciais, a profile muda.
+            // Recarregamos somente o saldo (consulta leve) para refletir.
+            if (
+              payload.eventType === 'UPDATE' &&
+              (newRow.status === 'completed' || newRow.status === 'failed')
+            ) {
+              void supabase
+                .from('profiles')
+                .select('extraction_credits')
+                .eq('id', user.id)
+                .maybeSingle()
+                .then(({ data }) => {
+                  if (data && typeof data.extraction_credits === 'number') {
+                    setBalance(data.extraction_credits)
+                  }
+                })
+            }
+          },
+        )
+        .subscribe()
+
+      cleanup = () => {
+        void supabase.removeChannel(channel)
+      }
+    })()
+
+    return () => {
+      cancelled = true
+      if (cleanup) cleanup()
+    }
+  }, [])
+
   async function onSubmit(e: React.FormEvent) {
     e.preventDefault()
     setError(null)
@@ -143,10 +339,14 @@ export function LeadExtractorPage({ onOpenCrm }: LeadExtractorPageProps) {
       return
     }
     if (!searchTerm.trim()) {
-      setError('Informe o termo de busca.')
+      setError(
+        isInstagram
+          ? 'Informe ao menos um @ de perfil (ex.: @floripaweb).'
+          : 'Informe o termo de busca.',
+      )
       return
     }
-    if (!country.trim() || !state.trim() || !city.trim()) {
+    if (!isInstagram && (!country.trim() || !state.trim() || !city.trim())) {
       setError('Preencha país, estado e cidade.')
       return
     }
@@ -162,9 +362,9 @@ export function LeadExtractorPage({ onOpenCrm }: LeadExtractorPageProps) {
       body: {
         source,
         searchTerm: searchTerm.trim(),
-        country: country.trim(),
-        state: state.trim(),
-        city: city.trim(),
+        country: isInstagram ? '' : country.trim(),
+        state: isInstagram ? '' : state.trim(),
+        city: isInstagram ? '' : city.trim(),
         requestedAmount,
       },
     })
@@ -215,6 +415,105 @@ export function LeadExtractorPage({ onOpenCrm }: LeadExtractorPageProps) {
       setError('Resposta inesperada do servidor.')
     }
   }
+
+  /**
+   * Ponte Zap Voice: baixa o CSV gerado pelo webhook, fica só com as linhas
+   * que têm telefone, e insere os contatos na tabela `leads` (CRM/Zap Voice)
+   * usando o `tag` para agrupar por extração.
+   */
+  const sendToZapVoice = useCallback(
+    async (r: LeadExtractionRow) => {
+      if (!canDownloadLeadsFile(r) || !r.result_url) return
+      const userId = userIdRef.current
+      if (!userId) {
+        setError('Sessão inválida. Entre novamente.')
+        return
+      }
+
+      setError(null)
+      setMessage(null)
+      setSendingId(r.id)
+
+      try {
+        const res = await fetch(r.result_url, { cache: 'no-store' })
+        if (!res.ok) {
+          throw new Error(`Não consegui baixar o CSV (HTTP ${res.status}).`)
+        }
+        const csvText = await res.text()
+        const { headers, rows: csvRows } = parseSimpleCsv(csvText)
+        if (csvRows.length === 0) {
+          throw new Error('O arquivo de leads está vazio.')
+        }
+
+        const phoneCol = findPhoneColumn(headers)
+        if (!phoneCol) {
+          throw new Error(
+            'Não encontrei uma coluna de telefone no CSV (esperado "telefone" ou "phone").',
+          )
+        }
+        const nameCol = findNameColumn(headers)
+
+        const tag = buildExtractionTag(r)
+
+        const leadsPayload = csvRows
+          .map((row) => {
+            const phoneDigits = (row[phoneCol] ?? '').replace(/\D/g, '')
+            if (!phoneDigits) return null
+            const rawName =
+              (nameCol ? row[nameCol] : '') || `Lead ${phoneDigits.slice(-4)}`
+            return {
+              user_id: userId,
+              name: rawName.slice(0, 200),
+              phone: phoneDigits,
+              status: 'novo',
+              ai_enabled: true,
+              source: r.source === 'instagram' ? 'instagram' : 'google_maps',
+              tag,
+              extraction_id: r.id,
+            }
+          })
+          .filter(
+            (l): l is {
+              user_id: string
+              name: string
+              phone: string
+              status: string
+              ai_enabled: boolean
+              source: string
+              tag: string
+              extraction_id: string
+            } => l !== null,
+          )
+
+        if (leadsPayload.length === 0) {
+          throw new Error('Nenhum lead com telefone válido para enviar.')
+        }
+
+        // Lotes de 200 para não estourar payload do PostgREST.
+        let inserted = 0
+        for (let i = 0; i < leadsPayload.length; i += 200) {
+          const batch = leadsPayload.slice(i, i + 200)
+          const { error: insErr, count } = await supabase
+            .from('leads')
+            .insert(batch, { count: 'exact' })
+          if (insErr) {
+            throw new Error(`Falha ao inserir leads no CRM: ${insErr.message}`)
+          }
+          inserted += count ?? batch.length
+        }
+
+        setMessage(
+          `Enviei ${inserted} contato${inserted === 1 ? '' : 's'} para o Zap Voice (tag: "${tag}").`,
+        )
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : 'Falha ao enviar para o Zap Voice.'
+        setError(msg)
+      } finally {
+        setSendingId(null)
+      }
+    },
+    [],
+  )
 
   return (
     <div className="space-y-8">
@@ -273,58 +572,68 @@ export function LeadExtractorPage({ onOpenCrm }: LeadExtractorPageProps) {
             </div>
             <div className="sm:col-span-2">
               <label className="block text-sm font-medium text-zinc-700" htmlFor="le-term">
-                Termo de busca
+                {isInstagram ? 'Perfis do Instagram' : 'Termo de busca'}
               </label>
               <input
                 id="le-term"
                 value={searchTerm}
                 onChange={(e) => setSearchTerm(e.target.value)}
-                placeholder="Ex.: petshops, auto peças, clínicas"
+                placeholder={searchTermPlaceholder}
                 className="mt-1.5 w-full rounded-xl border border-zinc-200 bg-zinc-50 px-3 py-2.5 text-sm text-zinc-900 outline-none placeholder:text-zinc-400 focus:border-brand-200 focus:bg-white focus:ring-4 focus:ring-brand-600/15"
               />
+              {isInstagram ? (
+                <p className="mt-1.5 text-xs text-zinc-500">
+                  Liste os @ separados por vírgula. A localização é ignorada porque o
+                  Instagram extrai por perfil, não por região.
+                </p>
+              ) : null}
             </div>
-            <div>
-              <label className="block text-sm font-medium text-zinc-700" htmlFor="le-country">
-                País
-              </label>
-              <select
-                id="le-country"
-                value={country}
-                onChange={(e) => setCountry(e.target.value)}
-                className="mt-1.5 w-full rounded-xl border border-zinc-200 bg-zinc-50 px-3 py-2.5 text-sm text-zinc-900 outline-none focus:border-brand-200 focus:bg-white focus:ring-4 focus:ring-brand-600/15"
-              >
-                {COUNTRIES.map((c) => (
-                  <option key={c} value={c}>
-                    {c}
-                  </option>
-                ))}
-              </select>
-            </div>
-            <div>
-              <label className="block text-sm font-medium text-zinc-700" htmlFor="le-state">
-                Estado
-              </label>
-              <input
-                id="le-state"
-                value={state}
-                onChange={(e) => setState(e.target.value.toUpperCase())}
-                placeholder="Ex.: SC"
-                maxLength={2}
-                className="mt-1.5 w-full rounded-xl border border-zinc-200 bg-zinc-50 px-3 py-2.5 text-sm text-zinc-900 outline-none placeholder:text-zinc-400 focus:border-brand-200 focus:bg-white focus:ring-4 focus:ring-brand-600/15"
-              />
-            </div>
-            <div className="sm:col-span-2">
-              <label className="block text-sm font-medium text-zinc-700" htmlFor="le-city">
-                Cidade
-              </label>
-              <input
-                id="le-city"
-                value={city}
-                onChange={(e) => setCity(e.target.value)}
-                placeholder="Ex.: Florianópolis"
-                className="mt-1.5 w-full rounded-xl border border-zinc-200 bg-zinc-50 px-3 py-2.5 text-sm text-zinc-900 outline-none placeholder:text-zinc-400 focus:border-brand-200 focus:bg-white focus:ring-4 focus:ring-brand-600/15"
-              />
-            </div>
+            {!isInstagram ? (
+              <>
+                <div>
+                  <label className="block text-sm font-medium text-zinc-700" htmlFor="le-country">
+                    País
+                  </label>
+                  <select
+                    id="le-country"
+                    value={country}
+                    onChange={(e) => setCountry(e.target.value)}
+                    className="mt-1.5 w-full rounded-xl border border-zinc-200 bg-zinc-50 px-3 py-2.5 text-sm text-zinc-900 outline-none focus:border-brand-200 focus:bg-white focus:ring-4 focus:ring-brand-600/15"
+                  >
+                    {COUNTRIES.map((c) => (
+                      <option key={c} value={c}>
+                        {c}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-zinc-700" htmlFor="le-state">
+                    Estado
+                  </label>
+                  <input
+                    id="le-state"
+                    value={state}
+                    onChange={(e) => setState(e.target.value.toUpperCase())}
+                    placeholder="Ex.: SC"
+                    maxLength={2}
+                    className="mt-1.5 w-full rounded-xl border border-zinc-200 bg-zinc-50 px-3 py-2.5 text-sm text-zinc-900 outline-none placeholder:text-zinc-400 focus:border-brand-200 focus:bg-white focus:ring-4 focus:ring-brand-600/15"
+                  />
+                </div>
+                <div className="sm:col-span-2">
+                  <label className="block text-sm font-medium text-zinc-700" htmlFor="le-city">
+                    Cidade
+                  </label>
+                  <input
+                    id="le-city"
+                    value={city}
+                    onChange={(e) => setCity(e.target.value)}
+                    placeholder="Ex.: Florianópolis"
+                    className="mt-1.5 w-full rounded-xl border border-zinc-200 bg-zinc-50 px-3 py-2.5 text-sm text-zinc-900 outline-none placeholder:text-zinc-400 focus:border-brand-200 focus:bg-white focus:ring-4 focus:ring-brand-600/15"
+                  />
+                </div>
+              </>
+            ) : null}
             <div>
               <label className="block text-sm font-medium text-zinc-700" htmlFor="le-qty">
                 Quantidade de leads (máx. 200)
@@ -347,9 +656,17 @@ export function LeadExtractorPage({ onOpenCrm }: LeadExtractorPageProps) {
             </p>
           ) : null}
           {message ? (
-            <p className="mt-4 rounded-xl bg-emerald-50 px-3 py-2 text-sm text-emerald-900 ring-1 ring-emerald-200">
-              {message}
-            </p>
+            <div className="mt-4 flex flex-wrap items-center justify-between gap-3 rounded-xl bg-emerald-50 px-3 py-2 text-sm text-emerald-900 ring-1 ring-emerald-200">
+              <span>{message}</span>
+              <button
+                type="button"
+                onClick={() => onOpenZapVoice()}
+                className="inline-flex items-center gap-1 rounded-lg border border-emerald-300 bg-white px-2.5 py-1 text-xs font-medium text-emerald-900 transition hover:bg-emerald-50"
+              >
+                <Megaphone className="h-3.5 w-3.5" aria-hidden />
+                Abrir Zap Voice
+              </button>
+            </div>
           ) : null}
 
           <div className="mt-6">
@@ -440,11 +757,21 @@ export function LeadExtractorPage({ onOpenCrm }: LeadExtractorPageProps) {
                       </button>
                       <button
                         type="button"
-                        onClick={() => onOpenCrm()}
-                        className="inline-flex items-center gap-1 rounded-lg border border-brand-200 bg-brand-50/80 px-2.5 py-1.5 text-xs font-medium text-brand-900 transition hover:bg-brand-100"
+                        onClick={() => void sendToZapVoice(r)}
+                        disabled={!canDownloadLeadsFile(r) || sendingId === r.id}
+                        title={
+                          canDownloadLeadsFile(r)
+                            ? 'Importa os contatos com telefone para a base do Zap Voice'
+                            : 'Disponível quando a extração estiver concluída'
+                        }
+                        className="inline-flex items-center gap-1 rounded-lg border border-brand-200 bg-brand-50/80 px-2.5 py-1.5 text-xs font-medium text-brand-900 transition hover:bg-brand-100 disabled:cursor-not-allowed disabled:opacity-45"
                       >
-                        <FolderKanban className="h-3.5 w-3.5" />
-                        Enviar para o CRM
+                        {sendingId === r.id ? (
+                          <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden />
+                        ) : (
+                          <Megaphone className="h-3.5 w-3.5" aria-hidden />
+                        )}
+                        Enviar para Zap Voice
                       </button>
                     </div>
                   </td>

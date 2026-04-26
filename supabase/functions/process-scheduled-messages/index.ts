@@ -124,6 +124,68 @@ function stripDataUrlBase64(input: string): string {
   return t
 }
 
+/**
+ * Sleep simples — usado para o delay humanizado entre disparos e para esperar
+ * o efeito do `presence` na Evolution antes de enviar de fato a mensagem.
+ */
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms))
+}
+
+/**
+ * Delay humanizado entre 5s e 15s entre cada disparo. Reduz drasticamente a
+ * chance de ban por padrão de envio robotizado.
+ */
+function humanizedDelayMs(): number {
+  return Math.floor(Math.random() * (15000 - 5000 + 1)) + 5000
+}
+
+type EvolutionPresence = 'composing' | 'recording' | 'paused'
+
+function presenceForContent(contentType: ContentType): EvolutionPresence {
+  // Áudio = "gravando…" no WhatsApp; demais = "digitando…".
+  if (contentType === 'audio') return 'recording'
+  return 'composing'
+}
+
+/**
+ * Avisa a Evolution para mostrar "digitando…" / "gravando áudio…" antes do
+ * envio real. Usa o endpoint `chat/sendPresence/{instance}`. Falhas aqui não
+ * podem derrubar o disparo: logamos e seguimos.
+ */
+async function sendEvolutionPresence(
+  evolutionUrl: string,
+  evolutionApiKey: string,
+  instanceName: string,
+  number: string,
+  presence: EvolutionPresence,
+  delayMs: number,
+): Promise<void> {
+  const url = `${evolutionUrl}/chat/sendPresence/${encodeURIComponent(instanceName)}`
+  try {
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        apikey: evolutionApiKey,
+      },
+      body: JSON.stringify({
+        number,
+        presence,
+        delay: delayMs,
+      }),
+    })
+    if (!res.ok) {
+      const t = await res.text()
+      console.warn(
+        `[Agenda Suprema] presence ${presence} HTTP ${res.status}: ${t.slice(0, 200)}`,
+      )
+    }
+  } catch (e) {
+    console.warn('[Agenda Suprema] presence falhou:', e)
+  }
+}
+
 serve(async () => {
   console.log('[Agenda Suprema] Robô acordou! Buscando pendentes...')
 
@@ -411,6 +473,20 @@ serve(async () => {
           payload = { number: phone, ...plan.body }
         }
 
+        // Anti-ban / humanização: simula "digitando…" (texto) ou "gravando…"
+        // (áudio) por 2-5 segundos antes de mandar a mensagem de verdade.
+        const presence = presenceForContent(msg.content_type)
+        const presenceDelayMs = Math.floor(Math.random() * (5000 - 2000 + 1)) + 2000
+        await sendEvolutionPresence(
+          evolutionUrl,
+          evolutionApiKey,
+          instanceName,
+          phone,
+          presence,
+          presenceDelayMs,
+        )
+        await sleep(presenceDelayMs)
+
         const url = `${evolutionUrl}/${endpoint}/${encodeURIComponent(instanceName)}`
         const response = await fetch(url, {
           method: 'POST',
@@ -505,6 +581,15 @@ serve(async () => {
           .eq('id', msg.id)
       }
       failed += 1
+    }
+
+    // Anti-ban: cooldown aleatório entre 5s e 15s antes do próximo disparo.
+    // Só vale entre mensagens — depois da última do lote, não atrasa o retorno.
+    const isLast = msg === (candidates[candidates.length - 1] as ScheduledRow)
+    if (!isLast) {
+      const cooldown = humanizedDelayMs()
+      console.log(`[Agenda Suprema] Cooldown anti-ban: ${cooldown}ms`)
+      await sleep(cooldown)
     }
   }
 
