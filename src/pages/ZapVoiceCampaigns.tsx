@@ -1166,7 +1166,26 @@ export function ZapVoiceCampaignsPage() {
         const minS = Math.max(0, Number(c.min_delay_seconds) || 0)
         const maxS = Math.max(minS, Number(c.max_delay_seconds) || 0)
 
+        const { data: alreadyPending, error: pendErr } = await supabase
+          .from('scheduled_messages')
+          .select('lead_id')
+          .eq('user_id', userId)
+          .eq('zv_campaign_id', c.id)
+          .is('zv_funnel_step_id', null)
+          .eq('status', 'pending')
+        if (pendErr) {
+          console.warn('[ZapVoiceCampaigns] check isca duplicada:', pendErr.message)
+        }
+        const leadIdsComIscaPendente = new Set(
+          (alreadyPending ?? [])
+            .map((r) => (r as { lead_id: string | null }).lead_id)
+            .filter((x): x is string => Boolean(x)),
+        )
+
         for (const lead of withPhone) {
+          if (leadIdsComIscaPendente.has(lead.id)) {
+            continue
+          }
           const loc = lead.extraction_id
             ? locByEx.get(lead.extraction_id) ?? null
             : null
@@ -1176,7 +1195,7 @@ export function ZapVoiceCampaignsPage() {
             cidade: cityFromExtractionLocation(loc),
           }
 
-          // ISCA: mensagem da campanha; zv_funnel_step_id fica nulo.
+          // ISCA: somente o painel enfileira (zv_funnel_step_id nulo). Webhook nunca manda isca.
           cumulativeMs += pickRandomIntInclusive(minS, maxS) * 1000
           const scheduledAt = new Date(startMs + cumulativeMs).toISOString()
           const messageBody = applyMessageTemplate(isca, vars)
@@ -1219,6 +1238,12 @@ export function ZapVoiceCampaignsPage() {
             .update({ funnel_locked_until: lockUntilIso })
             .eq('id', lead.id)
             .eq('user_id', userId)
+        }
+
+        if (rows.length === 0) {
+          throw new Error(
+            'Nenhuma isca nova: todos os leads do público já têm isca pendente (ou tente de novo se houve conflito). A fila de isca vem só desta tela, não do webhook.',
+          )
         }
 
         for (let i = 0; i < rows.length; i += INSERT_CHUNK) {

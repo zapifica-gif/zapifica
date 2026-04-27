@@ -1,4 +1,5 @@
-// Gatilhos Zap Voice (inbound) — campanha (isca + gatilho) + fluxo (etapas em zv_funnels)
+// Inbound Zap Voice — gatilho + `zv_funnels` (fluxo). A isca (texto campanha) SÓ entra em `scheduled_messages`
+// pela ativação no painel; este webhook nunca reenfileira isca.
 import type { SupabaseClient } from 'https://esm.sh/@supabase/supabase-js@2'
 
 type FunnelRow = {
@@ -58,26 +59,6 @@ function triggerConditionSatisfied(
     default:
       return false
   }
-}
-
-function firstNameFromFullName(full: string): string {
-  const t = full.trim()
-  if (!t) return 'Cliente'
-  return t.split(/\s+/)[0] ?? t
-}
-
-function cityFromExtractionLocation(loc: string | null | undefined): string {
-  if (!loc) return ''
-  return loc.split(',')[0]?.trim() ?? ''
-}
-
-type TemplateVars = { nome: string; empresa: string; cidade: string }
-
-function applyMessageTemplate(template: string, vars: TemplateVars): string {
-  return template
-    .replaceAll('{nome}', vars.nome)
-    .replaceAll('{empresa}', vars.empresa)
-    .replaceAll('{cidade}', vars.cidade)
 }
 
 function leadTagForCampaign(c: CampaignRow): string {
@@ -165,13 +146,16 @@ async function handleActiveCampaignProgress(
       return { enqueued: false, reason: 'sem_proximo_passo', campaignId: progress.campaign_id, suppressAi: true }
     }
 
-    // Etapa 1: não revalida o gatilho da campanha (evita exigir a mesma palavra 2x). Só a etapa
-    // configura o avanço: auto, exact ou timer (timer enfileira sem depender de nova digitação).
+    // Etapa 1: em exato sem gatilho no cartão, usa trigger da campanha (resposta à isca do painel).
     const step = firstStep as FunnelRow
     const adv = (step.advance_type ?? 'auto') as 'auto' | 'exact' | 'timer'
     if (adv === 'exact') {
       const expectedNorm = normText(step.expected_trigger ?? '')
-      if (!expectedNorm || messageNorm !== expectedNorm) {
+      if (expectedNorm) {
+        if (messageNorm !== expectedNorm) {
+          return { enqueued: false, reason: 'gatilho_nao_bateu', campaignId: progress.campaign_id, suppressAi: true }
+        }
+      } else if (!triggerConditionSatisfied(cond, messageNorm, camp.trigger_keyword ?? '')) {
         return { enqueued: false, reason: 'gatilho_nao_bateu', campaignId: progress.campaign_id, suppressAi: true }
       }
     }
@@ -325,7 +309,7 @@ export async function processZapVoiceInbound(
     return { enqueued: false, reason: 'sem_match' }
   }
 
-  // Já inscrito nesta campanha (p.ex. maybeSingle quebrou com várias linhas no passado): nunca reenvia isca
+  // Já inscrito nesta campanha: segue fluxo (NUNCA reenfileirar isca no webhook; isca = só ativação no painel)
   const { data: progressForMatch, error: pfmErr } = await p.supabase
     .from('lead_campaign_progress')
     .select('id, campaign_id, next_step_order, total_steps, status, updated_at')
@@ -340,7 +324,7 @@ export async function processZapVoiceInbound(
   }
   if (progressForMatch?.[0]) {
     console.log(
-      '[ZapVoice inbound] cold start: lead já com progresso nesta campanha, segue fluxo',
+      '[ZapVoice inbound] progresso já existe: segue zv_funnels (não manda isca)',
       matched.id,
     )
     return await handleActiveCampaignProgress(
@@ -362,22 +346,9 @@ export async function processZapVoiceInbound(
     return { enqueued: false, reason: 'ja_concluida', campaignId: matched.id, suppressAi: true }
   }
 
-  const { count: pendingCount, error: dupErr } = await p.supabase
-    .from('scheduled_messages')
-    .select('*', { count: 'exact', head: true })
-    .eq('user_id', p.userId)
-    .eq('lead_id', p.leadId)
-    .eq('zv_campaign_id', matched.id)
-    .eq('status', 'pending')
-
-  if (dupErr) {
-    console.error('[ZapVoice inbound] duplicate check', dupErr.message)
-    return { enqueued: false, reason: 'erro_dedup' }
-  }
-  if ((pendingCount ?? 0) > 0) {
-    return { enqueued: false, reason: 'ja_na_fila', campaignId: matched.id }
-  }
-
+  // —— Inbound "orgânico": progresso ainda não existe p/ essa campanha (p.ex. gatilho sem ativação prévia) ——
+  // NÃO enfileirar isca Message aqui; isca só sobe pelo `activateCampaign` no painel.
+  // Aqui: cria progresso + 1ª etapa do fluxo, conforme gatilho bateu nesta mensagem.
   const { data: stepsRaw, error: sErr } = await p.supabase
     .from('zv_funnels')
     .select(
@@ -400,90 +371,25 @@ export async function processZapVoiceInbound(
     }
   }
 
-  const isca = (matched.isca_message ?? '').trim()
-  if (!isca) {
-    return { enqueued: false, reason: 'isca_vazia' }
+  if (ordered.length > 0) {
+    const t = ordered[0]!
+    if (t.media_type === 'text' && !t.message.trim()) {
+      return { enqueued: false, reason: 'etapa1_texto_vazia' }
+    }
   }
 
   const leadTag = leadTagForCampaign(matched)
-
   const { error: upErr } = await p.supabase
     .from('leads')
     .update({ source: 'meta_ads', tag: leadTag })
     .eq('id', p.leadId)
     .eq('user_id', p.userId)
-
   if (upErr) {
     console.error('[ZapVoice inbound] update lead', upErr.message)
     return { enqueued: false, reason: 'erro_lead' }
   }
 
-  const { data: lead, error: lErr } = await p.supabase
-    .from('leads')
-    .select('id, name, phone, tag, extraction_id')
-    .eq('id', p.leadId)
-    .eq('user_id', p.userId)
-    .maybeSingle()
-
-  if (lErr || !lead) {
-    return { enqueued: false, reason: 'lead_nao_recarregado' }
-  }
-
-  const L = lead as {
-    id: string
-    name: string
-    phone: string | null
-    tag: string | null
-    extraction_id: string | null
-  }
-
-  let loc: string | null = null
-  if (L.extraction_id) {
-    const { data: ex } = await p.supabase
-      .from('lead_extractions')
-      .select('location')
-      .eq('id', L.extraction_id)
-      .eq('user_id', p.userId)
-      .maybeSingle()
-    const location = (ex as { location: string | null } | null)?.location
-    if (location) loc = location
-  }
-
-  const vars: TemplateVars = {
-    nome: firstNameFromFullName(L.name),
-    empresa: L.name.trim() || 'sua empresa',
-    cidade: cityFromExtractionLocation(loc),
-  }
-  const messageBody = applyMessageTemplate(isca, vars)
-
   const startMs = Date.now()
-  const scheduledAt = new Date(startMs).toISOString()
-
-  const ins1 = await p.supabase.from('scheduled_messages').insert({
-    user_id: p.userId,
-    lead_id: p.leadId,
-    zv_campaign_id: matched.id,
-    zv_funnel_step_id: null,
-    is_active: true,
-    recipient_type: 'personal',
-    content_type: 'text',
-    message_body: messageBody || null,
-    media_url: null,
-    scheduled_at: scheduledAt,
-    status: 'pending',
-    recipient_phone: L.phone ?? p.phoneDigits,
-    event_id: null,
-    evolution_instance_name: p.instanceName,
-    min_delay_seconds:
-      typeof matched.min_delay_seconds === 'number' ? matched.min_delay_seconds : null,
-    max_delay_seconds:
-      typeof matched.max_delay_seconds === 'number' ? matched.max_delay_seconds : null,
-  })
-  if (ins1.error) {
-    console.error('[ZapVoice inbound] enqueue isca', ins1.error.message)
-    return { enqueued: false, reason: 'erro_fila' }
-  }
-
   const totalSteps = ordered.length
   if (totalSteps > 0) {
     const progIns = await p.supabase
@@ -499,10 +405,24 @@ export async function processZapVoiceInbound(
       .select('id, campaign_id, next_step_order, total_steps')
       .single()
     if (progIns.error) {
-      console.error('[ZapVoice inbound] progress insert', progIns.error.message)
-    } else if (progIns.data) {
-      // Mesma resposta do lead já bateu o gatilho da campanha: enfileira a etapa 1 do fluxo agora
-      // (sem exigir que ele digite o gatilho de novo em handleActiveCampaignProgress com next=1).
+      console.error('[ZapVoice inbound] progress insert (inbound orgânico)', progIns.error.message)
+      if (String(progIns.error.message ?? '').toLowerCase().includes('unique')) {
+        const { data: p2 } = await p.supabase
+          .from('lead_campaign_progress')
+          .select('id, campaign_id, next_step_order, total_steps, status, updated_at')
+          .eq('user_id', p.userId)
+          .eq('lead_id', p.leadId)
+          .eq('campaign_id', matched.id)
+          .in('status', ['active', 'awaiting_last_send'])
+          .order('updated_at', { ascending: false })
+          .limit(1)
+        if (p2?.[0]) {
+          return await handleActiveCampaignProgress(p, messageNorm, p2[0] as ProgressRow)
+        }
+      }
+      return { enqueued: false, reason: 'erro_progresso' }
+    }
+    if (progIns.data) {
       const pr = progIns.data as {
         id: string
         campaign_id: string
@@ -528,31 +448,26 @@ export async function processZapVoiceInbound(
       })
       if (!enq1.enqueued) {
         console.warn(
-          '[ZapVoice inbound] cold: progress criado, mas etapa 1 não enfileirada',
+          '[ZapVoice inbound] orgânico: etapa 1 não enfileirada',
           enq1.reason,
         )
-      } else {
-        console.log(
-          '[ZapVoice inbound] cold: isca + progresso + etapa 1 (gatilho campanha validado 1x)',
-          { campaignId: matched.id, leadId: p.leadId },
-        )
+        return { enqueued: false, reason: enq1.reason ?? 'erro_fila', campaignId: matched.id, suppressAi: true }
       }
+      const lockUntilIso = new Date(startMs + 6 * 60 * 60 * 1000).toISOString()
+      await p.supabase
+        .from('leads')
+        .update({ funnel_locked_until: lockUntilIso })
+        .eq('id', p.leadId)
+        .eq('user_id', p.userId)
+      console.log('[ZapVoice inbound] orgânico: progresso+etapa1 (sem isca; isca=apenas do painel)', {
+        campaignId: matched.id,
+        leadId: p.leadId,
+      })
+      return { enqueued: true, campaignId: matched.id, suppressAi: true }
     }
   }
 
-  const lockUntilIso = new Date(startMs + 6 * 60 * 60 * 1000).toISOString()
-  const { error: lockErr } = await p.supabase
-    .from('leads')
-    .update({ funnel_locked_until: lockUntilIso })
-    .eq('id', p.leadId)
-    .eq('user_id', p.userId)
-  if (lockErr) {
-    console.error('[ZapVoice inbound] lock lead', lockErr.message)
-  }
-
-  console.log('[ZapVoice inbound] enfileirado isca', { campaignId: matched.id, leadId: p.leadId, totalSteps })
-
-  return { enqueued: true, campaignId: matched.id, suppressAi: true }
+  return { enqueued: false, reason: 'sem_etapas', campaignId: matched.id, suppressAi: true }
 }
 
 async function enqueueFunnelStepAndAdvance(p: {
