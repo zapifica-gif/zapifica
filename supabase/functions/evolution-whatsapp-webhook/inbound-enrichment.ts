@@ -182,7 +182,7 @@ function bytesFromBase64(base64: string): Uint8Array {
   return bytes
 }
 
-const GEMINI_MODEL = 'gemini-1.5-flash'
+const GEMINI_MODEL = 'gemini-1.5-flash-latest'
 /** PTT / áudio WhatsApp — Gemini costuma aceitar melhor sem codecs na string. */
 const GEMINI_INLINE_AUDIO_MIME = 'audio/ogg'
 
