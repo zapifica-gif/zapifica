@@ -759,6 +759,13 @@ export function ZapVoiceCampaignsPage() {
       setSuccess(null)
       setActivating(true)
       try {
+        const pickRandomIntInclusive = (min: number, max: number) => {
+          const a = Math.ceil(min)
+          const b = Math.floor(max)
+          if (b < a) return a
+          return Math.floor(Math.random() * (b - a + 1)) + a
+        }
+
         const tags = normalizeTags(c.audience_tags)
         if (tags.length === 0) {
           throw new Error(
@@ -852,6 +859,12 @@ export function ZapVoiceCampaignsPage() {
         }
         const rows: Record<string, unknown>[] = []
 
+        // Anti-ban (isca): espaça os leads com delay cumulativo aleatório.
+        // Ex.: lead1 now+5s, lead2 now+15s, lead3 now+28s...
+        let cumulativeMs = 0
+        const minS = Math.max(0, Number(c.min_delay_seconds) || 0)
+        const maxS = Math.max(minS, Number(c.max_delay_seconds) || 0)
+
         for (const lead of withPhone) {
           const loc = lead.extraction_id
             ? locByEx.get(lead.extraction_id) ?? null
@@ -864,7 +877,8 @@ export function ZapVoiceCampaignsPage() {
 
           // ISCA ATIVA: ao adicionar lead na campanha (ativar), agenda APENAS a etapa 1 automaticamente.
           const step1 = ordered[0]!
-          const scheduledAt = new Date(startMs).toISOString()
+          cumulativeMs += pickRandomIntInclusive(minS, maxS) * 1000
+          const scheduledAt = new Date(startMs + cumulativeMs).toISOString()
           const rawMsg = step1.message ?? ''
           const messageBody = applyMessageTemplate(rawMsg, vars)
           const ct = step1.media_type
@@ -1030,16 +1044,16 @@ export function ZapVoiceCampaignsPage() {
         setError(`Falha ao excluir: ${e.message}`)
         return
       }
-      setCampaigns((prev) => prev.filter((c) => c.id !== id))
-      setSelectedId((prev) => {
-        if (prev === id) {
-          const remaining = campaigns.filter((c) => c.id !== id)
-          return remaining[0]?.id ?? null
-        }
-        return prev
+      setCampaigns((prev) => {
+        const next = prev.filter((c) => c.id !== id)
+        setSelectedId((sel) => {
+          if (sel !== id) return sel
+          return next[0]?.id ?? null
+        })
+        return next
       })
     },
-    [campaigns],
+    [],
   )
 
   // -------------------------------------------------------------------------

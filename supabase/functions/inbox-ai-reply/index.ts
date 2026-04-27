@@ -236,6 +236,35 @@ async function runPipeline(
   evolutionUrl: string,
   evolutionKey: string,
 ): Promise<Record<string, unknown>> {
+  // HARD LOCK absoluto: se há progresso ativo, a IA NÃO roda, ponto.
+  // Isso elimina corrida com o ZapVoice/inbound.
+  const { count: progCount, error: progErr } = await supabase
+    .from('lead_campaign_progress')
+    .select('id', { count: 'exact', head: true })
+    .eq('lead_id', triggerRow.lead_id)
+    .eq('status', 'active')
+  if (progErr) {
+    return { error: `progress: ${progErr.message}` }
+  }
+  if ((progCount ?? 0) > 0) {
+    return { ok: true, ignored: 'hard_lock_progress_active', lead_id: triggerRow.lead_id }
+  }
+
+  // HARD LOCK: se a última mensagem do lead estiver com ai_suppressed=true, aborta.
+  const { data: lastMsg, error: lastErr } = await supabase
+    .from('chat_messages')
+    .select('ai_suppressed, created_at')
+    .eq('lead_id', triggerRow.lead_id)
+    .order('created_at', { ascending: false })
+    .limit(1)
+    .maybeSingle()
+  if (lastErr) {
+    return { error: `last_msg: ${lastErr.message}` }
+  }
+  if ((lastMsg as { ai_suppressed?: boolean | null } | null)?.ai_suppressed === true) {
+    return { ok: true, ignored: 'hard_lock_last_message_suppressed', lead_id: triggerRow.lead_id }
+  }
+
   const { data: lead, error: leErr } = await supabase
     .from('leads')
     .select('id, user_id, phone, funnel_locked_until')

@@ -163,10 +163,14 @@ export async function processZapVoiceInbound(
       // Temporizado não avança por mensagem: ele é enfileirado quando a etapa anterior é enviada.
       return { enqueued: false, reason: 'timer_sem_interacao', campaignId: progress.campaign_id, suppressAi: true }
     }
-    const allowAdvance =
-      adv === 'auto'
-        ? true // qualquer texto novo do cliente
-        : (normText(step.expected_trigger ?? '') && messageNorm === normText(step.expected_trigger ?? ''))
+    // Regra de negócio (sequência Isca -> Gatilho):
+    // A Etapa 2 só avança com GATILHO EXATO, a menos que o tipo seja 'timer'.
+    const isStep2 = progress.next_step_order === 2
+    const mustBeExact = isStep2 ? true : adv === 'exact'
+    const expectedNorm = normText(step.expected_trigger ?? '')
+    const allowAdvance = mustBeExact
+      ? Boolean(expectedNorm) && messageNorm === expectedNorm
+      : true // auto: qualquer texto novo do cliente
 
     if (!allowAdvance) {
       return { enqueued: false, reason: 'gatilho_nao_bateu', campaignId: progress.campaign_id, suppressAi: true }
