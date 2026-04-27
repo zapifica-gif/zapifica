@@ -1,5 +1,15 @@
 import { useEffect, useMemo, useState } from 'react'
-import { Building2, Database, Loader2, LogIn, Plus, Shield } from 'lucide-react'
+import {
+  Building2,
+  Copy,
+  Database,
+  Loader2,
+  LogIn,
+  Pencil,
+  Plus,
+  Shield,
+  Trash2,
+} from 'lucide-react'
 import { supabase } from '../lib/supabase'
 import { useImpersonation } from '../contexts/ImpersonationContext'
 
@@ -10,6 +20,8 @@ type UserProfileRow = {
   role: string
   company_name: string | null
   company_logo_url: string | null
+  lead_credits?: number | null
+  is_active?: boolean | null
   created_at: string
 }
 
@@ -95,8 +107,22 @@ export function SuperAdminPage() {
   const [password, setPassword] = useState('')
   const [companyName, setCompanyName] = useState('')
   const [logoFile, setLogoFile] = useState<File | null>(null)
+  const [prefilledLogoUrl, setPrefilledLogoUrl] = useState<string>('')
   const [creating, setCreating] = useState(false)
   const [uploadingLogo, setUploadingLogo] = useState(false)
+
+  // editar cliente
+  const [editOpen, setEditOpen] = useState(false)
+  const [editClient, setEditClient] = useState<UserProfileRow | null>(null)
+  const [editCompanyName, setEditCompanyName] = useState('')
+  const [editCredits, setEditCredits] = useState<number>(50)
+  const [editLogoFile, setEditLogoFile] = useState<File | null>(null)
+  const [savingEdit, setSavingEdit] = useState(false)
+
+  // filtros da biblioteca
+  const [q, setQ] = useState('')
+  const [sourceFilter, setSourceFilter] = useState<string>('all')
+  const [tagFilter, setTagFilter] = useState<string>('all')
 
   useEffect(() => {
     let cancelled = false
@@ -134,8 +160,9 @@ export function SuperAdminPage() {
 
       const { data: all, error: listErr } = await supabase
         .from('user_profiles')
-        .select('user_id, role, company_name, company_logo_url, created_at')
+        .select('user_id, role, company_name, company_logo_url, lead_credits, is_active, created_at')
         .eq('role', 'client')
+        .eq('is_active', true)
         .order('created_at', { ascending: false })
       if (listErr) {
         if (!cancelled) setError(listErr.message)
@@ -182,6 +209,51 @@ export function SuperAdminPage() {
     }))
   }, [leads, companyByUser])
 
+  const sourceOptions = useMemo(() => {
+    const set = new Set<string>()
+    for (const l of leadsWithCompany) {
+      const s = (l.source ?? '').trim()
+      if (s) set.add(s)
+    }
+    return ['all', ...[...set].sort()]
+  }, [leadsWithCompany])
+
+  const tagOptions = useMemo(() => {
+    const set = new Set<string>()
+    for (const l of leadsWithCompany) {
+      const t = (l.tag ?? '').trim()
+      if (t) set.add(t)
+    }
+    return ['all', ...[...set].sort((a, b) => a.localeCompare(b))]
+  }, [leadsWithCompany])
+
+  const filteredLeads = useMemo(() => {
+    const term = q.trim().toLowerCase()
+    return leadsWithCompany.filter((l) => {
+      if (sourceFilter !== 'all' && (l.source ?? '') !== sourceFilter) return false
+      if (tagFilter !== 'all' && (l.tag ?? '') !== tagFilter) return false
+      if (!term) return true
+      const name = (l.name ?? '').toLowerCase()
+      const phone = (l.phone ?? '').replace(/\D/g, '')
+      return name.includes(term) || phone.includes(term.replace(/\D/g, ''))
+    })
+  }, [leadsWithCompany, q, sourceFilter, tagFilter])
+
+  async function uploadCompanyLogo(file: File): Promise<string> {
+    const {
+      data: { user },
+    } = await supabase.auth.getUser()
+    if (!user) throw new Error('Sessão inválida.')
+    const safeName = file.name.replace(/[^a-zA-Z0-9._-]+/g, '_').slice(0, 80) || 'logo'
+    const path = `${user.id}/${Date.now()}_${safeName}`
+    const up = await supabase.storage
+      .from('company_logos')
+      .upload(path, file, { upsert: true, cacheControl: '3600' })
+    if (up.error) throw new Error(up.error.message)
+    const { data: pub } = supabase.storage.from('company_logos').getPublicUrl(path)
+    return pub.publicUrl
+  }
+
   const handleCreate = async () => {
     setError(null)
     setSuccess(null)
@@ -193,32 +265,19 @@ export function SuperAdminPage() {
     }
     setCreating(true)
 
-    let logoUrl = ''
+    let logoUrl = (prefilledLogoUrl ?? '').trim()
     if (logoFile) {
-      setUploadingLogo(true)
-      const {
-        data: { user },
-      } = await supabase.auth.getUser()
-      if (!user) {
+      try {
+        setUploadingLogo(true)
+        logoUrl = await uploadCompanyLogo(logoFile)
+      } catch (e) {
         setUploadingLogo(false)
         setCreating(false)
-        setError('Sessão inválida. Faça login novamente.')
+        setError(`Falha ao enviar logo: ${e instanceof Error ? e.message : String(e)}`)
         return
-      }
-      const safeName = logoFile.name.replace(/[^a-zA-Z0-9._-]+/g, '_').slice(0, 80) || 'logo'
-      const path = `${user.id}/${Date.now()}_${safeName}`
-      const up = await supabase.storage
-        .from('company_logos')
-        .upload(path, logoFile, { upsert: true, cacheControl: '3600' })
-      if (up.error) {
+      } finally {
         setUploadingLogo(false)
-        setCreating(false)
-        setError(`Falha ao enviar logo: ${up.error.message}`)
-        return
       }
-      const { data: pub } = supabase.storage.from('company_logos').getPublicUrl(path)
-      logoUrl = pub.publicUrl
-      setUploadingLogo(false)
     }
 
     const r = await callCreateTenant({
@@ -237,11 +296,13 @@ export function SuperAdminPage() {
     setPassword('')
     setCompanyName('')
     setLogoFile(null)
+    setPrefilledLogoUrl('')
     // refresh list
     const { data: all } = await supabase
       .from('user_profiles')
-      .select('user_id, role, company_name, company_logo_url, created_at')
+      .select('user_id, role, company_name, company_logo_url, lead_credits, is_active, created_at')
       .eq('role', 'client')
+      .eq('is_active', true)
       .order('created_at', { ascending: false })
     const rows = (all ?? []) as UserProfileRow[]
     setClients(rows)
@@ -250,6 +311,91 @@ export function SuperAdminPage() {
       map.set(r2.user_id, (r2.company_name ?? '').trim() || 'Sem nome')
     }
     setCompanyByUser(map)
+  }
+
+  const openEdit = (c: UserProfileRow) => {
+    setEditClient(c)
+    setEditCompanyName((c.company_name ?? '').trim())
+    setEditCredits(typeof c.lead_credits === 'number' ? c.lead_credits : 50)
+    setEditLogoFile(null)
+    setEditOpen(true)
+  }
+
+  const saveEdit = async () => {
+    if (!editClient) return
+    setError(null)
+    setSuccess(null)
+    setSavingEdit(true)
+    try {
+      let logoUrl = (editClient.company_logo_url ?? '').trim() || null
+      if (editLogoFile) {
+        logoUrl = await uploadCompanyLogo(editLogoFile)
+      }
+      const patch = {
+        company_name: editCompanyName.trim() || null,
+        company_logo_url: logoUrl,
+        lead_credits: Math.max(0, Math.floor(editCredits || 0)),
+      }
+      const { error: upErr } = await supabase
+        .from('user_profiles')
+        .update(patch)
+        .eq('user_id', editClient.user_id)
+      if (upErr) throw new Error(upErr.message)
+      setSuccess('Cliente atualizado.')
+      setEditOpen(false)
+      setEditClient(null)
+      // refresh list/map
+      const { data: all } = await supabase
+        .from('user_profiles')
+        .select('user_id, role, company_name, company_logo_url, lead_credits, is_active, created_at')
+        .eq('role', 'client')
+        .eq('is_active', true)
+        .order('created_at', { ascending: false })
+      const rows = (all ?? []) as UserProfileRow[]
+      setClients(rows)
+      const map = new Map<string, string>()
+      for (const r2 of rows) map.set(r2.user_id, (r2.company_name ?? '').trim() || 'Sem nome')
+      setCompanyByUser(map)
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e))
+    } finally {
+      setSavingEdit(false)
+    }
+  }
+
+  const softDelete = async (c: UserProfileRow) => {
+    if (!confirm(`Tem certeza que deseja desativar "${(c.company_name ?? 'Sem nome').trim()}"?`)) {
+      return
+    }
+    setError(null)
+    setSuccess(null)
+    const { error: upErr } = await supabase
+      .from('user_profiles')
+      .update({ is_active: false })
+      .eq('user_id', c.user_id)
+    if (upErr) {
+      setError(upErr.message)
+      return
+    }
+    setSuccess('Cliente desativado (soft delete).')
+    setClients((prev) => prev.filter((x) => x.user_id !== c.user_id))
+    setCompanyByUser((prev) => {
+      const next = new Map(prev)
+      next.delete(c.user_id)
+      return next
+    })
+  }
+
+  const duplicateClient = (c: UserProfileRow) => {
+    setTab('clientes')
+    setNewOpen(true)
+    setEmail('')
+    setPassword('')
+    setCompanyName((c.company_name ?? '').trim())
+    setPrefilledLogoUrl((c.company_logo_url ?? '').trim())
+    setLogoFile(null)
+    setSuccess('Dados do cliente foram pré-preenchidos. Informe e-mail e senha para criar a cópia.')
+    window.setTimeout(() => setSuccess(null), 6000)
   }
 
   if (loading) {
@@ -442,6 +588,7 @@ export function SuperAdminPage() {
                   <tr className="border-b border-zinc-200 bg-zinc-50/70 text-[11px] font-semibold uppercase tracking-wider text-zinc-500">
                     <th className="px-4 py-3">Empresa</th>
                     <th className="px-4 py-3">Logo</th>
+                    <th className="px-4 py-3">Créditos</th>
                     <th className="px-4 py-3">UID</th>
                     <th className="px-4 py-3">Criado em</th>
                     <th className="px-4 py-3">Ações</th>
@@ -464,6 +611,9 @@ export function SuperAdminPage() {
                           <div className="h-8 w-8 rounded-full bg-zinc-100 ring-1 ring-zinc-200" />
                         )}
                       </td>
+                      <td className="px-4 py-3 text-zinc-800 tabular-nums">
+                        {typeof c.lead_credits === 'number' ? c.lead_credits : '—'}
+                      </td>
                       <td className="px-4 py-3 font-mono text-xs text-zinc-600">
                         {c.user_id}
                       </td>
@@ -471,22 +621,48 @@ export function SuperAdminPage() {
                         {formatDateBr(c.created_at)}
                       </td>
                       <td className="px-4 py-3">
-                        <button
-                          type="button"
-                          className="inline-flex items-center gap-2 rounded-xl border border-zinc-200 bg-white px-3 py-2 text-xs font-semibold text-zinc-700 transition hover:border-brand-300 hover:bg-brand-50 hover:text-brand-800"
-                          title="Acessar como cliente"
-                          onClick={() => {
-                            const name =
-                              (c.company_name ?? '').trim() || c.user_id.slice(0, 8)
-                            impersonate({
-                              targetUserId: c.user_id,
-                              targetCompanyName: name,
-                            })
-                          }}
-                        >
-                          <LogIn className="h-3.5 w-3.5" aria-hidden />
-                          Acessar painel
-                        </button>
+                        <div className="flex flex-wrap items-center gap-2">
+                          <button
+                            type="button"
+                            className="inline-flex items-center gap-2 rounded-xl border border-zinc-200 bg-white px-3 py-2 text-xs font-semibold text-zinc-700 transition hover:border-brand-300 hover:bg-brand-50 hover:text-brand-800"
+                            title="Acessar como cliente"
+                            onClick={() => {
+                              const name =
+                                (c.company_name ?? '').trim() || c.user_id.slice(0, 8)
+                              impersonate({
+                                targetUserId: c.user_id,
+                                targetCompanyName: name,
+                              })
+                            }}
+                          >
+                            <LogIn className="h-3.5 w-3.5" aria-hidden />
+                            Acessar painel
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => openEdit(c)}
+                            className="inline-flex h-9 w-9 items-center justify-center rounded-xl border border-zinc-200 bg-white text-zinc-700 transition hover:border-brand-300 hover:bg-brand-50 hover:text-brand-800"
+                            title="Editar"
+                          >
+                            <Pencil className="h-4 w-4" aria-hidden />
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => duplicateClient(c)}
+                            className="inline-flex h-9 w-9 items-center justify-center rounded-xl border border-zinc-200 bg-white text-zinc-700 transition hover:border-brand-300 hover:bg-brand-50 hover:text-brand-800"
+                            title="Duplicar"
+                          >
+                            <Copy className="h-4 w-4" aria-hidden />
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => void softDelete(c)}
+                            className="inline-flex h-9 w-9 items-center justify-center rounded-xl border border-rose-200 bg-rose-50 text-rose-800 transition hover:bg-rose-100"
+                            title="Excluir (soft delete)"
+                          >
+                            <Trash2 className="h-4 w-4" aria-hidden />
+                          </button>
+                        </div>
                       </td>
                     </tr>
                   ))}
@@ -512,10 +688,41 @@ export function SuperAdminPage() {
               {leads.length}
             </span>
           </div>
-          <div className="mt-5 space-y-3">
+          <div className="mt-5 flex flex-wrap gap-2">
+            <input
+              value={q}
+              onChange={(e) => setQ(e.target.value)}
+              placeholder="Buscar por nome ou telefone…"
+              className="h-10 min-w-[240px] flex-1 rounded-xl border border-zinc-200 bg-zinc-50 px-3 text-sm outline-none focus:border-brand-300 focus:bg-white focus:ring-4 focus:ring-brand-600/15"
+            />
+            <select
+              value={sourceFilter}
+              onChange={(e) => setSourceFilter(e.target.value)}
+              className="h-10 rounded-xl border border-zinc-200 bg-zinc-50 px-3 text-sm outline-none focus:border-brand-300 focus:bg-white focus:ring-4 focus:ring-brand-600/15"
+            >
+              {sourceOptions.map((s) => (
+                <option key={s} value={s}>
+                  {s === 'all' ? 'Todas as origens' : s}
+                </option>
+              ))}
+            </select>
+            <select
+              value={tagFilter}
+              onChange={(e) => setTagFilter(e.target.value)}
+              className="h-10 rounded-xl border border-zinc-200 bg-zinc-50 px-3 text-sm outline-none focus:border-brand-300 focus:bg-white focus:ring-4 focus:ring-brand-600/15"
+            >
+              {tagOptions.map((t) => (
+                <option key={t} value={t}>
+                  {t === 'all' ? 'Todas as tags' : t}
+                </option>
+              ))}
+            </select>
+          </div>
+
+          <div className="mt-4 space-y-3">
             {(() => {
-              const groups = new Map<string, Array<(typeof leadsWithCompany)[number]>>()
-              for (const l of leadsWithCompany) {
+              const groups = new Map<string, Array<(typeof filteredLeads)[number]>>()
+              for (const l of filteredLeads) {
                 const key = l.company
                 const arr = groups.get(key) ?? []
                 arr.push(l)
@@ -580,6 +787,85 @@ export function SuperAdminPage() {
             Dica: isso já é a “gaveta por cliente”. Próximo passo é paginação e filtros por origem/tag.
           </p>
         </section>
+      ) : null}
+
+      {editOpen && editClient ? (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-zinc-950/40 p-4">
+          <div className="w-full max-w-lg overflow-hidden rounded-2xl border border-zinc-200 bg-white shadow-xl">
+            <div className="flex items-start justify-between gap-3 border-b border-zinc-100 px-5 py-4">
+              <div>
+                <p className="text-xs font-semibold uppercase tracking-wider text-zinc-500">
+                  Editar cliente
+                </p>
+                <h3 className="mt-1 text-lg font-semibold text-zinc-900">
+                  {(editClient.company_name ?? '').trim() || 'Sem nome'}
+                </h3>
+              </div>
+              <button
+                type="button"
+                onClick={() => setEditOpen(false)}
+                className="rounded-xl border border-zinc-200 bg-white px-3 py-1.5 text-xs font-semibold text-zinc-700 hover:bg-zinc-50"
+              >
+                Fechar
+              </button>
+            </div>
+            <div className="space-y-3 px-5 py-4">
+              <div>
+                <label className="mb-1 block text-xs font-medium text-zinc-700">
+                  Nome da empresa
+                </label>
+                <input
+                  value={editCompanyName}
+                  onChange={(e) => setEditCompanyName(e.target.value)}
+                  className="w-full rounded-xl border border-zinc-200 bg-white px-3 py-2 text-sm shadow-inner focus:border-brand-300 focus:outline-none focus:ring-2 focus:ring-brand-500/20"
+                />
+              </div>
+              <div>
+                <label className="mb-1 block text-xs font-medium text-zinc-700">
+                  Créditos de busca (lead_credits)
+                </label>
+                <input
+                  type="number"
+                  min={0}
+                  value={editCredits}
+                  onChange={(e) => setEditCredits(Math.max(0, Number(e.target.value) || 0))}
+                  className="w-full rounded-xl border border-zinc-200 bg-white px-3 py-2 text-sm tabular-nums shadow-inner focus:border-brand-300 focus:outline-none focus:ring-2 focus:ring-brand-500/20"
+                />
+              </div>
+              <div>
+                <label className="mb-1 block text-xs font-medium text-zinc-700">
+                  Trocar logo (arquivo)
+                </label>
+                <input
+                  type="file"
+                  accept="image/*"
+                  onChange={(e) => setEditLogoFile(e.target.files?.[0] ?? null)}
+                  className="w-full rounded-xl border border-zinc-200 bg-white px-3 py-2 text-sm shadow-inner file:mr-3 file:rounded-lg file:border-0 file:bg-zinc-100 file:px-3 file:py-1.5 file:text-xs file:font-semibold file:text-zinc-700 hover:file:bg-zinc-200/70 focus:border-brand-300 focus:outline-none focus:ring-2 focus:ring-brand-500/20"
+                />
+              </div>
+            </div>
+            <div className="flex items-center justify-end gap-2 border-t border-zinc-100 px-5 py-4">
+              <button
+                type="button"
+                onClick={() => setEditOpen(false)}
+                className="rounded-xl border border-zinc-200 bg-white px-4 py-2 text-sm font-semibold text-zinc-700 hover:bg-zinc-50"
+              >
+                Cancelar
+              </button>
+              <button
+                type="button"
+                onClick={() => void saveEdit()}
+                disabled={savingEdit}
+                className="inline-flex items-center gap-2 rounded-xl bg-brand-600 px-4 py-2 text-sm font-bold text-white hover:bg-brand-700 disabled:opacity-60"
+              >
+                {savingEdit ? (
+                  <Loader2 className="h-4 w-4 animate-spin" aria-hidden />
+                ) : null}
+                Salvar
+              </button>
+            </div>
+          </div>
+        </div>
       ) : null}
     </div>
   )

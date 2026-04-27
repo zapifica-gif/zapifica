@@ -185,8 +185,25 @@ serve(async (req) => {
       auth: { persistSession: false, autoRefreshToken: false, detectSessionInUrl: false },
     })
 
-    const { data: deduceRows, error: dedErr } = await supabase.rpc('try_deduct_extraction_credits', {
-      p_user_id: user.id,
+    // Impersonation: superadmin pode criar extração em nome de um cliente.
+    let effectiveUserId = user.id
+    const rawTarget = typeof o.target_user_id === 'string' ? o.target_user_id.trim() : ''
+    if (rawTarget && rawTarget !== user.id) {
+      const { data: prof } = await supabase
+        .from('user_profiles')
+        .select('role')
+        .eq('user_id', user.id)
+        .maybeSingle()
+      const role = (prof as { role?: string } | null)?.role ?? 'client'
+      if (role !== 'superadmin') {
+        return jsonResponse({ ok: false, error: 'Forbidden (impersonation)' }, 403)
+      }
+      effectiveUserId = rawTarget
+    }
+
+    // Créditos Freemium (lead_credits) — reserva no disparo
+    const { data: deduceRows, error: dedErr } = await supabase.rpc('try_deduct_lead_credits', {
+      p_user_id: effectiveUserId,
       p_amount: requestedAmount,
     })
     if (dedErr) {
@@ -205,7 +222,7 @@ serve(async (req) => {
     const { data: row, error: insErr } = await supabase
       .from('lead_extractions')
       .insert({
-        user_id: user.id,
+        user_id: effectiveUserId,
         source,
         search_term: searchTerm,
         location,
@@ -217,8 +234,8 @@ serve(async (req) => {
       .single()
 
     if (insErr || !row) {
-      await supabase.rpc('refund_extraction_credits', {
-        p_user_id: user.id,
+      await supabase.rpc('refund_lead_credits', {
+        p_user_id: effectiveUserId,
         p_amount: requestedAmount,
       })
       return jsonResponse(
@@ -290,8 +307,8 @@ serve(async (req) => {
             .from('lead_extractions')
             .update({ status: 'failed' })
             .eq('id', rowId)
-          await supabase.rpc('refund_extraction_credits', {
-            p_user_id: user.id,
+          await supabase.rpc('refund_lead_credits', {
+            p_user_id: effectiveUserId,
             p_amount: requestedAmount,
           })
           return jsonResponse(
@@ -327,8 +344,8 @@ serve(async (req) => {
         .from('lead_extractions')
         .update({ status: 'failed' })
         .eq('id', rowId)
-      await supabase.rpc('refund_extraction_credits', {
-        p_user_id: user.id,
+      await supabase.rpc('refund_lead_credits', {
+        p_user_id: effectiveUserId,
         p_amount: requestedAmount,
       })
       return jsonResponse(

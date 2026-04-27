@@ -362,7 +362,7 @@ serve(async (req) => {
         .from('lead_extractions')
         .update({ status: 'failed' })
         .eq('id', extractionId)
-      await supabase.rpc('refund_extraction_credits', {
+      await supabase.rpc('refund_lead_credits', {
         p_user_id: userId,
         p_amount: requestedAmount,
       })
@@ -387,7 +387,7 @@ serve(async (req) => {
         .from('lead_extractions')
         .update({ status: 'failed' })
         .eq('id', extractionId)
-      await supabase.rpc('refund_extraction_credits', {
+      await supabase.rpc('refund_lead_credits', {
         p_user_id: userId,
         p_amount: requestedAmount,
       })
@@ -423,7 +423,7 @@ serve(async (req) => {
         .from('lead_extractions')
         .update({ status: 'failed' })
         .eq('id', extractionId)
-      await supabase.rpc('refund_extraction_credits', {
+      await supabase.rpc('refund_lead_credits', {
         p_user_id: userId,
         p_amount: requestedAmount,
       })
@@ -439,13 +439,13 @@ serve(async (req) => {
     const refundAmount = Math.max(0, requestedAmount - extractedCount)
 
     if (refundAmount > 0) {
-      const { error: refundErr } = await supabase.rpc('refund_partial_credits', {
+      const { error: refundErr } = await supabase.rpc('refund_partial_lead_credits', {
         p_user_id: userId,
         p_extraction_id: extractionId,
         p_amount: refundAmount,
       })
       if (refundErr) {
-        console.error('[apify-webhook] refund_partial_credits falhou:', refundErr)
+        console.error('[apify-webhook] refund_partial_lead_credits falhou:', refundErr)
       }
     }
 
@@ -475,7 +475,7 @@ serve(async (req) => {
       .from('lead_extractions')
       .update({ status: 'failed' })
       .eq('id', extractionId)
-    await supabase.rpc('refund_extraction_credits', {
+    await supabase.rpc('refund_lead_credits', {
       p_user_id: userId,
       p_amount: requestedAmount,
     })

@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Download, Loader2, Megaphone, Search } from 'lucide-react'
 import { supabase } from '../lib/supabase'
+import { useImpersonation } from '../contexts/ImpersonationContext'
 
 type LeadExtractionSource = 'google_maps' | 'instagram'
 type LeadExtractionStatus = 'pending' | 'processing' | 'completed' | 'failed'
@@ -241,6 +242,7 @@ type LeadExtractorPageProps = {
 }
 
 export function LeadExtractorPage({ onOpenZapVoice }: LeadExtractorPageProps) {
+  const { state: imp } = useImpersonation()
   const [loading, setLoading] = useState(true)
   const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -281,42 +283,27 @@ export function LeadExtractorPage({ onOpenZapVoice }: LeadExtractorPageProps) {
       return
     }
 
+    const effectiveUserId = imp.targetUserId ?? user.id
     const prof = await supabase
-      .from('profiles')
-      .select('id, extraction_credits')
-      .eq('id', user.id)
+      .from('user_profiles')
+      .select('lead_credits')
+      .eq('user_id', effectiveUserId)
       .maybeSingle()
-
     if (prof.error) {
-      setError(`Falha ao carregar perfil: ${prof.error.message}`)
+      setError(`Falha ao carregar créditos: ${prof.error.message}`)
       setLoading(false)
       return
     }
+    setBalance((prof.data as { lead_credits?: number } | null)?.lead_credits ?? 0)
 
-    if (!prof.data) {
-      const ins = await supabase
-        .from('profiles')
-        .insert({ id: user.id, phone: null, extraction_credits: 0 })
-        .select('id, extraction_credits')
-        .single()
-      if (ins.error) {
-        setError(`Falha ao criar perfil: ${ins.error.message}`)
-        setLoading(false)
-        return
-      }
-      setBalance(ins.data.extraction_credits ?? 0)
-    } else {
-      setBalance(prof.data.extraction_credits ?? 0)
-    }
-
-    userIdRef.current = user.id
+    userIdRef.current = effectiveUserId
 
     const list = await supabase
       .from('lead_extractions')
       .select(
         'id, user_id, source, search_term, location, requested_amount, status, result_url, extracted_count, created_at',
       )
-      .eq('user_id', user.id)
+      .eq('user_id', effectiveUserId)
       .order('created_at', { ascending: false })
       .limit(50)
 
@@ -345,16 +332,17 @@ export function LeadExtractorPage({ onOpenZapVoice }: LeadExtractorPageProps) {
         data: { user },
       } = await supabase.auth.getUser()
       if (!user || cancelled) return
+      const effectiveUserId = imp.targetUserId ?? user.id
 
       const channel = supabase
-        .channel(`lead_extractions:${user.id}`)
+        .channel(`lead_extractions:${effectiveUserId}`)
         .on(
           'postgres_changes',
           {
             event: '*',
             schema: 'public',
             table: 'lead_extractions',
-            filter: `user_id=eq.${user.id}`,
+            filter: `user_id=eq.${effectiveUserId}`,
           },
           (payload) => {
             const newRow = payload.new as LeadExtractionRow | null
@@ -384,13 +372,13 @@ export function LeadExtractorPage({ onOpenZapVoice }: LeadExtractorPageProps) {
               (newRow.status === 'completed' || newRow.status === 'failed')
             ) {
               void supabase
-                .from('profiles')
-                .select('extraction_credits')
-                .eq('id', user.id)
+                .from('user_profiles')
+                .select('lead_credits')
+                .eq('user_id', effectiveUserId)
                 .maybeSingle()
                 .then(({ data }) => {
-                  if (data && typeof data.extraction_credits === 'number') {
-                    setBalance(data.extraction_credits)
+                  if (data && typeof (data as { lead_credits?: number }).lead_credits === 'number') {
+                    setBalance((data as { lead_credits: number }).lead_credits)
                   }
                 })
             }
@@ -407,7 +395,7 @@ export function LeadExtractorPage({ onOpenZapVoice }: LeadExtractorPageProps) {
       cancelled = true
       if (cleanup) cleanup()
     }
-  }, [])
+  }, [imp.targetUserId])
 
   async function onSubmit(e: React.FormEvent) {
     e.preventDefault()
@@ -446,6 +434,7 @@ export function LeadExtractorPage({ onOpenZapVoice }: LeadExtractorPageProps) {
         state: state.trim(),
         city: city.trim(),
         requestedAmount,
+        ...(imp.targetUserId ? { target_user_id: imp.targetUserId } : {}),
       },
     })
     setSubmitting(false)
