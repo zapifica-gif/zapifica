@@ -306,12 +306,55 @@ function datetimeLocalToIso(s: string): string | null {
   return d.toISOString()
 }
 
-/** Variáveis dinâmicas suportadas no editor de mensagem (preview-only). */
-const MESSAGE_VARIABLES = [
-  { key: '{nome}', helper: 'Primeiro nome do contato' },
-  { key: '{empresa}', helper: 'Nome da empresa do lead' },
-  { key: '{cidade}', helper: 'Cidade da extração' },
+/**
+ * Variáveis dinâmicas: isca (agendamento) substitui {nome}/{empresa}/{cidade} ao ativar;
+ * demais chaves e envio pós-isca vêm de `user_settings` + data/hora no worker/Edge.
+ */
+const MESSAGE_VARIABLES: readonly { key: string; helper: string }[] = [
+  { key: '{nome}', helper: 'Primeiro nome do lead (também na isca agendada)' },
+  { key: '{cidade}', helper: 'Cidade (extração do lead; isca agendada)' },
+  { key: '{empresa}', helper: 'Legado: nome exibido ao agendar a isca' },
+  { key: '{empresa_nome}', helper: 'Nome da empresa (Configurações → dados da empresa)' },
+  { key: '{empresa_endereço}', helper: 'Endereço (Configurações)' },
+  { key: '{saudacao_tempo}', helper: 'Bom dia / Boa tarde / Boa noite (fuso de São Paulo)' },
+  { key: '{vendedor_nome}', helper: 'Primeiro nome do vendedor (Configurações)' },
+  { key: '{telefone_contato}', helper: 'Telefone de contato (Configurações)' },
+  { key: '{hoje_data}', helper: 'Data de hoje, dd/mm/aaaa (no envio)' },
+  { key: '{dia_semana}', helper: 'Dia da semana por extenso (no envio)' },
+  { key: '{hora_atual}', helper: 'Hora atual HH:mm (no envio)' },
+  { key: '{cliente_primeiro_nome}', helper: 'Primeiro nome (substituição no envio)' },
+  { key: '{cliente_nome}', helper: 'Nome completo (substituição no envio)' },
 ] as const
+
+function MessageVariableChips(props: {
+  variables: readonly { key: string; helper: string }[]
+  onInsert: (key: string) => void
+  className?: string
+}) {
+  const { variables, onInsert, className } = props
+  return (
+    <div
+      className={`rounded-xl border border-zinc-100 bg-gradient-to-br from-zinc-50/80 to-brand-50/20 p-2.5 ${className ?? ''}`}
+    >
+      <p className="mb-2 text-[10px] font-semibold uppercase tracking-wider text-zinc-500">
+        Variáveis (clique para inserir no fim do texto)
+      </p>
+      <div className="flex flex-wrap gap-1.5">
+        {variables.map((v) => (
+          <button
+            type="button"
+            key={v.key}
+            onClick={() => onInsert(v.key)}
+            title={v.helper}
+            className="inline-flex max-w-full items-center truncate rounded-full border border-brand-200/90 bg-white px-2.5 py-1 text-[10px] font-mono font-semibold text-brand-800 shadow-sm transition hover:border-brand-400 hover:bg-brand-50/90"
+          >
+            {v.key}
+          </button>
+        ))}
+      </div>
+    </div>
+  )
+}
 
 const INSERT_CHUNK = 120
 
@@ -1548,6 +1591,11 @@ export function ZapVoiceCampaignsPage() {
                   onChange={(e) => setNewIscaMessage(e.target.value)}
                   className="w-full rounded-lg border border-zinc-200 bg-white px-3 py-2 text-sm shadow-inner focus:border-brand-300 focus:outline-none focus:ring-2 focus:ring-brand-500/20"
                 />
+                <MessageVariableChips
+                  variables={MESSAGE_VARIABLES}
+                  onInsert={(key) => setNewIscaMessage((prev) => prev + key)}
+                  className="mt-2"
+                />
               </div>
               <div>
                 <label className="mb-1 block text-xs font-medium text-zinc-700">
@@ -1960,6 +2008,19 @@ export function ZapVoiceCampaignsPage() {
                       }
                       className="w-full max-w-xl rounded-lg border border-zinc-200 bg-white px-3 py-2 text-sm shadow-inner focus:border-brand-300 focus:outline-none focus:ring-2 focus:ring-brand-500/20"
                     />
+                    <MessageVariableChips
+                      variables={MESSAGE_VARIABLES}
+                      onInsert={(key) => {
+                        setCampaigns((prev) =>
+                          prev.map((c) =>
+                            c.id === selected.id
+                              ? { ...c, isca_message: (c.isca_message ?? '') + key }
+                              : c,
+                          ),
+                        )
+                      }}
+                      className="mt-2 max-w-xl"
+                    />
                   </div>
                   <div>
                     <label className="mb-1 block text-xs font-medium text-zinc-700">
@@ -2026,17 +2087,9 @@ export function ZapVoiceCampaignsPage() {
                       {flows.find((f) => f.id === selectedFlowId)?.name ?? '—'}
                     </h3>
                     <p className="mt-0.5 text-xs text-zinc-500">
-                      Cada etapa é uma mensagem WhatsApp na ordem do roteiro.
-                      Use variáveis como{' '}
-                      {MESSAGE_VARIABLES.map((v, i) => (
-                        <span key={v.key}>
-                          <code className="rounded bg-zinc-100 px-1 font-mono text-[10px] text-brand-700">
-                            {v.key}
-                          </code>
-                          {i < MESSAGE_VARIABLES.length - 1 ? ', ' : ''}
-                        </span>
-                      ))}
-                      .
+                      Cada etapa é uma mensagem WhatsApp na ordem do roteiro. Use os botões de
+                      variáveis no cartão da etapa para inserir dados do lead, da empresa e do
+                      horário.
                     </p>
                   </div>
                   <button
@@ -2483,19 +2536,11 @@ function StepCard({
               }
               className="w-full resize-y rounded-xl border border-zinc-200 bg-white px-3 py-2.5 text-sm leading-relaxed text-zinc-900 shadow-inner focus:border-brand-300 focus:outline-none focus:ring-2 focus:ring-brand-500/20"
             />
-            <div className="mt-2 flex flex-wrap gap-1.5">
-              {MESSAGE_VARIABLES.map((v) => (
-                <button
-                  key={v.key}
-                  type="button"
-                  onClick={() => setMessage((prev) => `${prev}${v.key}`)}
-                  title={v.helper}
-                  className="rounded-md border border-zinc-200 bg-white px-1.5 py-0.5 font-mono text-[10px] font-semibold text-brand-700 transition hover:border-brand-300 hover:bg-brand-50"
-                >
-                  {v.key}
-                </button>
-              ))}
-            </div>
+            <MessageVariableChips
+              variables={MESSAGE_VARIABLES}
+              onInsert={(key) => setMessage((prev) => prev + key)}
+              className="mt-2"
+            />
           </div>
           {localError ? (
             <p className="text-xs font-medium text-rose-600" role="alert">

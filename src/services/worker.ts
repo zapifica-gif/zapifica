@@ -143,21 +143,30 @@ async function renderMessageTemplate(params: {
   const [leadRes, setRes] = await Promise.all([leadPromise, settingsPromise])
   const leadName = (leadRes.data as { name?: string | null } | null)?.name ?? null
   const settings = (setRes.data as UserSettingsRow | null) ?? null
+  const fn = firstName(leadName)
+  const full = (leadName ?? '').trim() || 'Cliente'
+  const agencia = (settings?.agencia_nome ?? '').trim()
+  const ender = (settings?.endereco ?? '').trim()
+  const vend = (settings?.vendedor_primeiro_nome ?? '').trim()
 
   const rep: Record<string, string> = {
     '{saudacao_tempo}': greetingByTime(now),
     '{hoje_data}': formatDateBR(now),
     '{dia_semana}': weekdayBR(now),
     '{hora_atual}': timeHHMM(now),
-    '{cliente_primeiro_nome}': firstName(leadName),
-    '{cliente_nome}': (leadName ?? '').trim() || 'Cliente',
-    '{agencia_nome}': (settings?.agencia_nome ?? '').trim(),
-    '{vendedor_primeiro_nome}': (settings?.vendedor_primeiro_nome ?? '').trim(),
+    '{cliente_primeiro_nome}': fn,
+    '{cliente_nome}': full,
+    '{nome}': fn,
+    '{agencia_nome}': agencia,
+    '{empresa_nome}': agencia,
+    '{vendedor_primeiro_nome}': vend,
+    '{vendedor_nome}': vend,
     '{telefone_contato}': (settings?.telefone_contato ?? '').trim(),
     '{instagram_empresa}': (settings?.instagram_empresa ?? '').trim(),
     '{site_empresa}': (settings?.site_empresa ?? '').trim(),
     '{avalie_google}': (settings?.avalie_google ?? '').trim(),
-    '{endereco}': (settings?.endereco ?? '').trim(),
+    '{endereco}': ender,
+    '{empresa_endereço}': ender,
     '{telefones}': (settings?.telefones ?? []).filter(Boolean).join(' / '),
   }
 
