@@ -738,6 +738,14 @@ serve(async () => {
       if (msg.lead_id && msg.zv_campaign_id) {
         // Avanço temporizado: ao ENVIAR uma etapa, se o próximo passo for timer,
         // enfileira automaticamente (sem esperar resposta do lead).
+        const { data: zvCampRow } = await supabase
+          .from('zv_campaigns')
+          .select('flow_id')
+          .eq('user_id', msg.user_id)
+          .eq('id', msg.zv_campaign_id)
+          .maybeSingle()
+        const zvFlowId = (zvCampRow as { flow_id: string | null } | null)?.flow_id ?? null
+
         const { data: prog2 } = await supabase
           .from('lead_campaign_progress')
           .select('id, next_step_order, total_steps, status')
@@ -747,7 +755,7 @@ serve(async () => {
           .in('status', ['active', 'awaiting_last_send'])
           .maybeSingle()
 
-        if (prog2 && (prog2 as any).status === 'active') {
+        if (prog2 && zvFlowId && (prog2 as any).status === 'active') {
           const nextOrder = Number((prog2 as any).next_step_order ?? 0)
           const totalSteps = Number((prog2 as any).total_steps ?? 0)
           if (nextOrder >= 2 && nextOrder <= totalSteps) {
@@ -756,7 +764,7 @@ serve(async () => {
               .select(
                 'id, step_order, message, media_type, media_url, advance_type, min_delay_seconds, max_delay_seconds',
               )
-              .eq('campaign_id', msg.zv_campaign_id)
+              .eq('flow_id', zvFlowId)
               .eq('step_order', nextOrder)
               .maybeSingle()
 

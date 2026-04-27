@@ -17,11 +17,11 @@ type FunnelRow = {
 
 type TriggerCondition = 'equals' | 'contains' | 'starts_with' | 'not_contains'
 
+/** Webhook não usa isca_message (isca só é agendada no painel). */
 type CampaignRow = {
   id: string
   name: string
   flow_id: string
-  isca_message: string
   audience_tags: string[] | null
   trigger_keyword: string | null
   trigger_condition: TriggerCondition
@@ -266,26 +266,18 @@ export async function processZapVoiceInbound(
     .eq('lead_id', p.leadId)
     .in('status', ['active', 'awaiting_last_send'])
     .order('updated_at', { ascending: false })
-    .limit(1)
+    .limit(25)
 
   if (progErr) {
     console.error('[ZapVoice inbound] progress read', progErr.message)
   }
 
-  const prog0 = progList?.[0]
-  if (prog0 && typeof prog0.campaign_id === 'string') {
-    return await handleActiveCampaignProgress(
-      p,
-      messageNorm,
-      prog0 as ProgressRow,
-    )
-  }
+  const progressed = (progList ?? []) as ProgressRow[]
 
-  // Cold start: campanha ativa que casa gatilho
   const { data: campaigns, error: cErr } = await p.supabase
     .from('zv_campaigns')
     .select(
-      'id, name, flow_id, isca_message, audience_tags, trigger_keyword, trigger_condition, min_delay_seconds, max_delay_seconds, created_at',
+      'id, name, flow_id, audience_tags, trigger_keyword, trigger_condition, min_delay_seconds, max_delay_seconds, created_at',
     )
     .eq('user_id', p.userId)
     .eq('status', 'active')
@@ -305,34 +297,16 @@ export async function processZapVoiceInbound(
     }
   }
 
-  if (!matched) {
-    return { enqueued: false, reason: 'sem_match' }
-  }
-
-  // Já inscrito nesta campanha: segue fluxo (NUNCA reenfileirar isca no webhook; isca = só ativação no painel)
-  const { data: progressForMatch, error: pfmErr } = await p.supabase
-    .from('lead_campaign_progress')
-    .select('id, campaign_id, next_step_order, total_steps, status, updated_at')
-    .eq('user_id', p.userId)
-    .eq('lead_id', p.leadId)
-    .eq('campaign_id', matched.id)
-    .in('status', ['active', 'awaiting_last_send'])
-    .order('updated_at', { ascending: false })
-    .limit(1)
-  if (pfmErr) {
-    console.error('[ZapVoice inbound] progress read (match)', pfmErr.message)
-  }
-  if (progressForMatch?.[0]) {
-    console.log(
-      '[ZapVoice inbound] progresso já existe: segue zv_funnels (não manda isca)',
-      matched.id,
-    )
-    return await handleActiveCampaignProgress(
-      p,
-      messageNorm,
-      progressForMatch[0] as ProgressRow,
-    )
-  }
+  // 1) Gatilho de campanha bateu → prioriza SEMPRE o progresso dessa campanha (evita prog de outro funil “roubar” a mensagem).
+  if (matched) {
+    const progForMatched = progressed.find((x) => x.campaign_id === matched.id)
+    if (progForMatched) {
+      console.log(
+        '[ZapVoice inbound] gatilho + progresso da mesma campanha; segue zv_funnels (não isca)',
+        matched.id,
+      )
+      return await handleActiveCampaignProgress(p, messageNorm, progForMatched)
+    }
 
   const { count: doneCount, error: doneErr } = await p.supabase
     .from('lead_campaign_completions')
@@ -467,7 +441,23 @@ export async function processZapVoiceInbound(
     }
   }
 
-  return { enqueued: false, reason: 'sem_etapas', campaignId: matched.id, suppressAi: true }
+    return { enqueued: false, reason: 'sem_etapas', campaignId: matched.id, suppressAi: true }
+  }
+
+  // 2) Nenhum gatilho de campanha: continua funil já ativo (ex.: etapa 2+ com expected_trigger).
+  let lastGatilho: ZapVoiceInboundResult | null = null
+  for (const prog of progressed) {
+    const res = await handleActiveCampaignProgress(p, messageNorm, prog)
+    if (res.enqueued) return res
+    if (res.reason === 'gatilho_nao_bateu') {
+      lastGatilho = res
+      continue
+    }
+    if (res.reason && res.reason !== 'sem_match') return res
+  }
+  if (lastGatilho) return lastGatilho
+
+  return { enqueued: false, reason: 'sem_match' }
 }
 
 async function enqueueFunnelStepAndAdvance(p: {
