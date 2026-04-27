@@ -433,6 +433,8 @@ export function ZapVoiceCampaignsPage() {
   )
   const [newTriggerCondition, setNewTriggerCondition] = useState<ZvTriggerCondition>('equals')
   const [newTriggerKeyword, setNewTriggerKeyword] = useState('')
+  /** Fluxo existente (`zv_flows`) vinculado à nova campanha — nunca criar fluxo ao criar campanha. */
+  const [newCampaignFlowId, setNewCampaignFlowId] = useState('')
   const [creating, setCreating] = useState(false)
   const [historyStats, setHistoryStats] = useState<
     Record<string, { firstAt: string | null; leadCount: number }>
@@ -710,6 +712,14 @@ export function ZapVoiceCampaignsPage() {
     setSelectedFlowId(flows[0]!.id)
   }, [voiceSubTab, flows, selectedFlowId])
 
+  /** Ao abrir "Nova Campanha", garante fluxo válido quando `flows` carrega depois. */
+  useEffect(() => {
+    if (!newOpen || flows.length === 0) return
+    setNewCampaignFlowId((cur) =>
+      cur && flows.some((f) => f.id === cur) ? cur : flows[0]!.id,
+    )
+  }, [newOpen, flows])
+
   // -------------------------------------------------------------------------
   // Mutations: campanha
   // -------------------------------------------------------------------------
@@ -720,24 +730,15 @@ export function ZapVoiceCampaignsPage() {
       setError('Dê um nome para a campanha.')
       return
     }
+    if (!newCampaignFlowId || !flows.some((f) => f.id === newCampaignFlowId)) {
+      setError('Selecione um fluxo existente (guia Fluxos). Campanhas não criam fluxo automaticamente.')
+      return
+    }
     setCreating(true)
     setError(null)
     setSuccess(null)
     try {
       const startIso = datetimeLocalToIso(newScheduledStartLocal)
-      const flowIns = await supabase
-        .from('zv_flows')
-        .insert({
-          user_id: userId,
-          name: `${newName.trim()} — fluxo`,
-          description: newDescription.trim() || null,
-        })
-        .select('id')
-        .single()
-      if (flowIns.error || !flowIns.data) {
-        throw new Error(flowIns.error?.message ?? 'Falha ao criar fluxo da campanha.')
-      }
-      const flowId = (flowIns.data as { id: string }).id
 
       const insert = await supabase
         .from('zv_campaigns')
@@ -747,7 +748,7 @@ export function ZapVoiceCampaignsPage() {
           description: newDescription.trim() || null,
           audience_tags: normalizeTags(newAudienceTags),
           scheduled_start_at: startIso,
-          flow_id: flowId,
+          flow_id: newCampaignFlowId,
           isca_message: newIscaMessage.trim() || 'Olá {nome}, tudo bem?',
           trigger_condition: newTriggerCondition,
           trigger_keyword: newTriggerKeyword.trim() || null,
@@ -776,24 +777,12 @@ export function ZapVoiceCampaignsPage() {
         trigger_keyword: ins.trigger_keyword?.trim() ? ins.trigger_keyword.trim() : null,
         isca_message: (ins.isca_message ?? '').trim() || '',
         trigger_condition: (ins.trigger_condition ?? 'equals') as ZvTriggerCondition,
-        flow_id: (ins.flow_id ?? flowId) as string,
+        flow_id: (ins.flow_id ?? newCampaignFlowId) as string,
         scheduled_start_at: ins.scheduled_start_at ?? null,
       } as Campaign
 
       setCampaigns((prev) => [created, ...prev])
-      setFlows((prev) => [
-        {
-          id: flowId,
-          user_id: userId,
-          name: `${newName.trim()} — fluxo`,
-          description: newDescription.trim() || null,
-          created_at: new Date().toISOString(),
-          updated_at: new Date().toISOString(),
-        },
-        ...prev,
-      ])
       setSelectedId(created.id)
-      setSelectedFlowId(flowId)
       setNewOpen(false)
       setNewName('')
       setNewAudienceTags([])
@@ -802,8 +791,9 @@ export function ZapVoiceCampaignsPage() {
       setNewIscaMessage('Olá {nome}, tudo bem? Aqui é da equipe Zapifica…')
       setNewTriggerCondition('equals')
       setNewTriggerKeyword('')
+      setNewCampaignFlowId('')
       setSuccess(
-        'Campanha e fluxo criados. Edite a isca e as etapas do fluxo nas guias Campanhas e Fluxos.',
+        'Campanha criada em rascunho. Ajuste a isca e o gatilho aqui; as etapas ficam no fluxo que você escolheu (guia Fluxos).',
       )
       window.setTimeout(() => setSuccess(null), 5000)
     } catch (e) {
@@ -819,6 +809,8 @@ export function ZapVoiceCampaignsPage() {
     newIscaMessage,
     newTriggerCondition,
     newTriggerKeyword,
+    newCampaignFlowId,
+    flows,
     userId,
   ])
 
@@ -1716,7 +1708,18 @@ export function ZapVoiceCampaignsPage() {
 
           <button
             type="button"
-            onClick={() => setNewOpen((v) => !v)}
+            onClick={() => {
+              setNewOpen((prev) => {
+                const next = !prev
+                if (!prev && flows.length > 0) {
+                  setNewCampaignFlowId((cur) =>
+                    cur && flows.some((f) => f.id === cur) ? cur : flows[0]!.id,
+                  )
+                }
+                if (prev) setNewCampaignFlowId('')
+                return next
+              })
+            }}
             className="group inline-flex w-full items-center justify-center gap-2 rounded-xl bg-gradient-to-r from-brand-600 via-brand-700 to-brand-700 px-4 py-3 text-sm font-bold text-white shadow-[0_10px_32px_rgba(106,0,184,0.35)] transition hover:from-brand-500 hover:to-brand-600"
           >
             <Plus className="h-4 w-4" aria-hidden />
@@ -1735,6 +1738,32 @@ export function ZapVoiceCampaignsPage() {
                   placeholder="Black Friday Petshops SC"
                   className="w-full rounded-lg border border-zinc-200 bg-white px-3 py-2 text-sm shadow-inner focus:border-brand-300 focus:outline-none focus:ring-2 focus:ring-brand-500/20"
                 />
+              </div>
+
+              <div>
+                <label className="mb-1 block text-xs font-medium text-zinc-700">
+                  Fluxo de automação
+                </label>
+                {flows.length === 0 ? (
+                  <p className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-900">
+                    Não há fluxos cadastrados. Abra a guia <b>Fluxos</b>, crie um fluxo com as etapas e volte aqui para criar a campanha.
+                  </p>
+                ) : (
+                  <select
+                    value={newCampaignFlowId}
+                    onChange={(e) => setNewCampaignFlowId(e.target.value)}
+                    className="w-full rounded-lg border border-zinc-200 bg-white px-3 py-2 text-sm shadow-inner focus:border-brand-300 focus:outline-none focus:ring-2 focus:ring-brand-500/20"
+                  >
+                    {flows.map((f) => (
+                      <option key={f.id} value={f.id}>
+                        {f.name}
+                      </option>
+                    ))}
+                  </select>
+                )}
+                <p className="mt-1 text-[11px] text-zinc-500">
+                  A campanha usa um fluxo já existente; nada é criado automaticamente na guia Fluxos.
+                </p>
               </div>
 
               <div>
@@ -1820,7 +1849,7 @@ export function ZapVoiceCampaignsPage() {
                   className="w-full rounded-lg border border-zinc-200 bg-white px-3 py-2 text-sm shadow-inner focus:border-brand-300 focus:outline-none focus:ring-2 focus:ring-brand-500/20"
                 />
                 <p className="mt-1 text-[11px] text-zinc-500">
-                  Um fluxo vazio será criado; edite as etapas em &quot;Fluxos&quot; depois.
+                  Após a isca, o lead precisa enviar esta palavra (ou regra) para entrar no fluxo escolhido acima.
                 </p>
               </div>
 
@@ -1828,7 +1857,7 @@ export function ZapVoiceCampaignsPage() {
                 <button
                   type="button"
                   onClick={() => void createCampaign()}
-                  disabled={creating}
+                  disabled={creating || flows.length === 0 || !newCampaignFlowId}
                   className="inline-flex flex-1 items-center justify-center gap-1.5 rounded-lg bg-brand-600 px-3 py-2 text-xs font-semibold text-white shadow-sm transition hover:bg-brand-700 disabled:opacity-60"
                 >
                   {creating ? (
@@ -1840,7 +1869,10 @@ export function ZapVoiceCampaignsPage() {
                 </button>
                 <button
                   type="button"
-                  onClick={() => setNewOpen(false)}
+                  onClick={() => {
+                    setNewOpen(false)
+                    setNewCampaignFlowId('')
+                  }}
                   className="inline-flex items-center justify-center rounded-lg border border-zinc-200 bg-white px-3 py-2 text-xs font-medium text-zinc-700 transition hover:bg-zinc-50"
                 >
                   Cancelar
