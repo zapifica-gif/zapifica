@@ -751,6 +751,20 @@ serve(async (req) => {
       continue
     }
 
+    // Idempotência: se este msgId já foi salvo no CRM, NÃO processe de novo.
+    // Isso impede avanço múltiplo “do nada” quando a Evolution reenfileira histórico
+    // ou envia batches com mensagens repetidas.
+    const { count: existingCount, error: exErr } = await supabase
+      .from('chat_messages')
+      .select('id', { count: 'exact', head: true })
+      .eq('evolution_message_id', item.msgId)
+    if (exErr) {
+      console.warn('[evolution-whatsapp-webhook] dedupe chat_messages falhou:', exErr.message)
+    } else if ((existingCount ?? 0) > 0) {
+      skipped.push(`dup_msg:${item.msgId}`)
+      continue
+    }
+
     const phoneDigits = toEvolutionDigits(item.remoteJid)
     if (!phoneDigits || phoneDigits.includes('@')) {
       skipped.push(`badJid:${item.remoteJid}`)
@@ -863,23 +877,14 @@ serve(async (req) => {
     let zvReason: string | null = null
     let zvCampaignId: string | undefined = undefined
 
-    const isPlaceholderReply =
-      /^\[(imagem|vídeo|documento|mensagem)\]$/i.test(
-        (replyText || '').trim(),
-      ) && !audioTranscript
-    const zvText =
-      contentType === 'audio'
-        ? (audioTranscript ?? '').trim()
-        : (replyText || '').trim()
-    const zvContent: 'text' | 'image' | 'document' =
-      contentType === 'audio'
-        ? 'text'
-        : contentType === 'image'
-          ? 'image'
-          : contentType === 'document'
-            ? 'document'
-            : 'text'
-    const canTryZapVoice = !isPlaceholderReply && zvText.length > 0
+    // Critério ULTRA restrito para iniciar/avançar funil:
+    // - apenas texto (mensagem nova do cliente)
+    // - texto não vazio e não placeholder
+    const zvText = (replyText || '').trim()
+    const canTryZapVoice =
+      contentType === 'text' &&
+      zvText.length > 0 &&
+      !/^\[(imagem|áudio|vídeo|documento|mensagem)\]$/i.test(zvText)
     if (canTryZapVoice) {
       const leadDisplayName =
         index.rows.find((r) => r.id === ensured.id)?.name ??
@@ -893,7 +898,7 @@ serve(async (req) => {
         phoneDigits,
         leadName: leadDisplayName,
         messageText: zvText,
-        contentType: zvContent,
+        contentType: 'text',
       })
       zvSuppress = zv.suppressAi === true
       zvReason = zv.reason ?? null

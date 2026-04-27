@@ -95,8 +95,11 @@ export type ZapVoiceInboundParams = {
 export async function processZapVoiceInbound(
   p: ZapVoiceInboundParams,
 ): Promise<ZapVoiceInboundResult> {
-  if (p.contentType === 'audio') {
-    return { enqueued: false, reason: 'audio_sem_transcricao' }
+  // Regra do produto: ZapVoice é estritamente conversacional por TEXTO.
+  // - Passo 1: palavra-chave exata (texto)
+  // - Avanço: depende de nova mensagem de texto do cliente
+  if (p.contentType !== 'text') {
+    return { enqueued: false, reason: 'ignorado_nao_texto' }
   }
 
   const raw = p.messageText.trim()
@@ -156,7 +159,7 @@ export async function processZapVoiceInbound(
     const adv = (step.advance_type ?? 'auto') as 'auto' | 'exact'
     const allowAdvance =
       adv === 'auto'
-        ? true
+        ? true // qualquer texto novo do cliente
         : (normText(step.expected_trigger ?? '') && messageNorm === normText(step.expected_trigger ?? ''))
 
     if (!allowAdvance) {
