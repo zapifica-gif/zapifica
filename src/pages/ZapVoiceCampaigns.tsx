@@ -35,6 +35,7 @@ import {
 } from 'lucide-react'
 import { supabase } from '../lib/supabase'
 import { ContactsBasePanel } from '../components/zapvoice/ContactsBasePanel'
+import { ZapVoiceReportsTab } from './zapvoice/ZapVoiceReportsTab'
 
 // ---------------------------------------------------------------------------
 // Tipos
@@ -45,6 +46,17 @@ type CampaignStatus = 'draft' | 'active' | 'paused' | 'completed'
 /** Alinhado ao enum `public.zv_funnel_media_type` (Supabase). */
 export type FunnelMediaType = 'text' | 'image' | 'video' | 'audio' | 'document'
 
+export type ZvTriggerCondition = 'equals' | 'contains' | 'starts_with' | 'not_contains'
+
+type ZvFlow = {
+  id: string
+  user_id: string
+  name: string
+  description: string | null
+  created_at: string
+  updated_at: string
+}
+
 type Campaign = {
   id: string
   user_id: string
@@ -52,12 +64,16 @@ type Campaign = {
   description: string | null
   /** Tags de público (OR): o disparo considera qualquer lead com uma delas. */
   audience_tags: string[] | null
-  /** Início do funil agendado (futuro); mensagens somam atrasos a partir daqui. */
+  /** Início do funil agendado (futuro); a isca e o fluxo somam atrasos a partir daqui. */
   scheduled_start_at: string | null
-  /** Frases exatas (Meta Ads) — legado; preferir `trigger_keyword` para a isca. */
-  inbound_triggers: string[] | null
-  /** Palavra-chave exata após a isca (avanço para o passo 2). */
+  /** Texto da isca (primeiro disparo ativo). */
+  isca_message: string
+  /** Regra de comparação com a palavra-chave. */
+  trigger_condition: ZvTriggerCondition
+  /** Palavra-chave (gatilho). */
   trigger_keyword: string | null
+  /** Fluxo de automação (etapas em zv_funnels). */
+  flow_id: string
   status: CampaignStatus
   min_delay_seconds: number
   max_delay_seconds: number
@@ -67,7 +83,7 @@ type Campaign = {
 
 type FunnelStep = {
   id: string
-  campaign_id: string
+  flow_id: string
   step_order: number
   message: string
   media_type: FunnelMediaType
@@ -349,6 +365,11 @@ export function ZapVoiceCampaignsPage() {
   const [userId, setUserId] = useState<string | null>(null)
   const [campaigns, setCampaigns] = useState<Campaign[]>([])
   const [selectedId, setSelectedId] = useState<string | null>(null)
+  const [flows, setFlows] = useState<ZvFlow[]>([])
+  const [voiceSubTab, setVoiceSubTab] = useState<'campanhas' | 'fluxos' | 'relatorios'>(
+    'campanhas',
+  )
+  const [selectedFlowId, setSelectedFlowId] = useState<string | null>(null)
   const [audienceOptions, setAudienceOptions] = useState<AudienceTagOption[]>([])
 
   const [steps, setSteps] = useState<FunnelStep[]>([])
@@ -362,7 +383,10 @@ export function ZapVoiceCampaignsPage() {
   const [newAudienceTags, setNewAudienceTags] = useState<string[]>([])
   const [newDescription, setNewDescription] = useState('')
   const [newScheduledStartLocal, setNewScheduledStartLocal] = useState('')
-  const [newInboundTriggers, setNewInboundTriggers] = useState<string[]>([])
+  const [newIscaMessage, setNewIscaMessage] = useState(
+    'Olá {nome}, tudo bem? Aqui é da equipe Zapifica…',
+  )
+  const [newTriggerCondition, setNewTriggerCondition] = useState<ZvTriggerCondition>('equals')
   const [newTriggerKeyword, setNewTriggerKeyword] = useState('')
   const [creating, setCreating] = useState(false)
   const [historyStats, setHistoryStats] = useState<
@@ -467,6 +491,19 @@ export function ZapVoiceCampaignsPage() {
     [],
   )
 
+  const loadFlows = useCallback(async (uid: string) => {
+    const { data, error: e } = await supabase
+      .from('zv_flows')
+      .select('id, user_id, name, description, created_at, updated_at')
+      .eq('user_id', uid)
+      .order('created_at', { ascending: false })
+    if (e) {
+      console.error('[ZapVoiceCampaigns] flows:', e.message)
+      return
+    }
+    setFlows((data ?? []) as ZvFlow[])
+  }, [])
+
   const loadCampaigns = useCallback(async () => {
     setLoading(true)
     setError(null)
@@ -483,7 +520,7 @@ export function ZapVoiceCampaignsPage() {
     const list = await supabase
       .from('zv_campaigns')
       .select(
-        'id, user_id, name, description, audience_tags, scheduled_start_at, inbound_triggers, trigger_keyword, status, min_delay_seconds, max_delay_seconds, created_at, updated_at',
+        'id, user_id, name, description, audience_tags, scheduled_start_at, isca_message, trigger_condition, trigger_keyword, flow_id, status, min_delay_seconds, max_delay_seconds, created_at, updated_at',
       )
       .eq('user_id', user.id)
       .order('created_at', { ascending: false })
@@ -497,16 +534,20 @@ export function ZapVoiceCampaignsPage() {
     const rows = (list.data ?? []).map((r) => {
       const c = r as {
         audience_tags?: string[] | null
-        inbound_triggers?: string[] | null
         trigger_keyword?: string | null
         scheduled_start_at?: string | null
+        isca_message?: string | null
+        trigger_condition?: ZvTriggerCondition | null
+        flow_id?: string | null
       }
       const kw = (c.trigger_keyword ?? '').trim()
       return {
         ...(r as Campaign),
         audience_tags: normalizeTags(c.audience_tags),
-        inbound_triggers: normalizeInboundTriggers(c.inbound_triggers),
         trigger_keyword: kw || null,
+        isca_message: (c.isca_message ?? '').trim() || '',
+        trigger_condition: (c.trigger_condition ?? 'equals') as ZvTriggerCondition,
+        flow_id: (c.flow_id ?? '') as string,
         scheduled_start_at: c.scheduled_start_at ?? null,
       } as Campaign
     })
@@ -525,17 +566,18 @@ export function ZapVoiceCampaignsPage() {
     })
 
     await loadAudienceOptions(user.id)
+    await loadFlows(user.id)
     setLoading(false)
-  }, [loadAudienceOptions])
+  }, [loadAudienceOptions, loadFlows])
 
-  const loadSteps = useCallback(async (campaignId: string) => {
+  const loadSteps = useCallback(async (flowId: string) => {
     setStepsLoading(true)
     const { data, error: e } = await supabase
       .from('zv_funnels')
       .select(
-        'id, campaign_id, step_order, message, media_type, media_url, delay_seconds, expected_trigger, advance_type, min_delay_seconds, max_delay_seconds, created_at, updated_at',
+        'id, flow_id, step_order, message, media_type, media_url, delay_seconds, expected_trigger, advance_type, min_delay_seconds, max_delay_seconds, created_at, updated_at',
       )
-      .eq('campaign_id', campaignId)
+      .eq('flow_id', flowId)
       .order('step_order', { ascending: true })
     if (e) {
       setError(`Falha ao carregar etapas: ${e.message}`)
@@ -605,12 +647,18 @@ export function ZapVoiceCampaignsPage() {
   }, [userId, selected?.id, tagsKey])
 
   useEffect(() => {
-    if (mainTab !== 'campanhas' || !selectedId) {
-      setSteps([])
+    if (mainTab !== 'campanhas' || voiceSubTab !== 'fluxos' || !selectedFlowId) {
+      if (mainTab !== 'campanhas' || voiceSubTab !== 'fluxos') setSteps([])
       return
     }
-    void loadSteps(selectedId)
-  }, [selectedId, loadSteps, mainTab])
+    void loadSteps(selectedFlowId)
+  }, [mainTab, voiceSubTab, selectedFlowId, loadSteps])
+
+  useEffect(() => {
+    if (voiceSubTab !== 'fluxos' || flows.length === 0) return
+    if (selectedFlowId && flows.some((f) => f.id === selectedFlowId)) return
+    setSelectedFlowId(flows[0]!.id)
+  }, [voiceSubTab, flows, selectedFlowId])
 
   // -------------------------------------------------------------------------
   // Mutations: campanha
@@ -627,6 +675,20 @@ export function ZapVoiceCampaignsPage() {
     setSuccess(null)
     try {
       const startIso = datetimeLocalToIso(newScheduledStartLocal)
+      const flowIns = await supabase
+        .from('zv_flows')
+        .insert({
+          user_id: userId,
+          name: `${newName.trim()} — fluxo`,
+          description: newDescription.trim() || null,
+        })
+        .select('id')
+        .single()
+      if (flowIns.error || !flowIns.data) {
+        throw new Error(flowIns.error?.message ?? 'Falha ao criar fluxo da campanha.')
+      }
+      const flowId = (flowIns.data as { id: string }).id
+
       const insert = await supabase
         .from('zv_campaigns')
         .insert({
@@ -635,14 +697,16 @@ export function ZapVoiceCampaignsPage() {
           description: newDescription.trim() || null,
           audience_tags: normalizeTags(newAudienceTags),
           scheduled_start_at: startIso,
-          inbound_triggers: normalizeInboundTriggers(newInboundTriggers),
+          flow_id: flowId,
+          isca_message: newIscaMessage.trim() || 'Olá {nome}, tudo bem?',
+          trigger_condition: newTriggerCondition,
           trigger_keyword: newTriggerKeyword.trim() || null,
           status: 'draft' as CampaignStatus,
           min_delay_seconds: 2,
           max_delay_seconds: 15,
         })
         .select(
-          'id, user_id, name, description, audience_tags, scheduled_start_at, inbound_triggers, trigger_keyword, status, min_delay_seconds, max_delay_seconds, created_at, updated_at',
+          'id, user_id, name, description, audience_tags, scheduled_start_at, isca_message, trigger_condition, trigger_keyword, flow_id, status, min_delay_seconds, max_delay_seconds, created_at, updated_at',
         )
         .single()
       if (insert.error || !insert.data) {
@@ -650,47 +714,63 @@ export function ZapVoiceCampaignsPage() {
       }
       const ins = insert.data as {
         audience_tags?: string[] | null
-        inbound_triggers?: string[] | null
         trigger_keyword?: string | null
         scheduled_start_at?: string | null
+        isca_message?: string | null
+        trigger_condition?: string | null
+        flow_id?: string | null
       }
       const created = {
         ...(insert.data as object),
         audience_tags: normalizeTags(ins.audience_tags),
-        inbound_triggers: normalizeInboundTriggers(ins.inbound_triggers),
         trigger_keyword: ins.trigger_keyword?.trim() ? ins.trigger_keyword.trim() : null,
+        isca_message: (ins.isca_message ?? '').trim() || '',
+        trigger_condition: (ins.trigger_condition ?? 'equals') as ZvTriggerCondition,
+        flow_id: (ins.flow_id ?? flowId) as string,
         scheduled_start_at: ins.scheduled_start_at ?? null,
       } as Campaign
 
-      // Cria automaticamente uma Etapa 1 vazia para o usuário já editar.
-      await supabase.from('zv_funnels').insert({
-        campaign_id: created.id,
-        step_order: 1,
-        message: 'Olá {nome}, tudo bem? Aqui é da equipe Zapifica…',
-        media_type: 'text',
-        media_url: null,
-        delay_seconds: 0,
-        expected_trigger: null,
-        advance_type: 'auto',
-      })
-
       setCampaigns((prev) => [created, ...prev])
+      setFlows((prev) => [
+        {
+          id: flowId,
+          user_id: userId,
+          name: `${newName.trim()} — fluxo`,
+          description: newDescription.trim() || null,
+          created_at: new Date().toISOString(),
+          updated_at: new Date().toISOString(),
+        },
+        ...prev,
+      ])
       setSelectedId(created.id)
+      setSelectedFlowId(flowId)
       setNewOpen(false)
       setNewName('')
       setNewAudienceTags([])
       setNewDescription('')
       setNewScheduledStartLocal('')
-      setNewInboundTriggers([])
+      setNewIscaMessage('Olá {nome}, tudo bem? Aqui é da equipe Zapifica…')
+      setNewTriggerCondition('equals')
       setNewTriggerKeyword('')
-      setSuccess('Campanha criada. Agora monte o roteiro de mensagens.')
+      setSuccess(
+        'Campanha e fluxo criados. Edite a isca e as etapas do fluxo nas guias Campanhas e Fluxos.',
+      )
       window.setTimeout(() => setSuccess(null), 5000)
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Erro ao criar campanha.')
     } finally {
       setCreating(false)
     }
-  }, [newName, newDescription, newAudienceTags, newScheduledStartLocal, newInboundTriggers, newTriggerKeyword, userId])
+  }, [
+    newName,
+    newDescription,
+    newAudienceTags,
+    newScheduledStartLocal,
+    newIscaMessage,
+    newTriggerCondition,
+    newTriggerKeyword,
+    userId,
+  ])
 
   const updateCampaign = useCallback(
     async (id: string, patch: Partial<Campaign>) => {
@@ -708,6 +788,26 @@ export function ZapVoiceCampaignsPage() {
     },
     [],
   )
+
+  const createEmptyFlow = useCallback(async () => {
+    if (!userId) return
+    const name = window.prompt('Nome do novo fluxo:', 'Novo fluxo')?.trim()
+    if (!name) return
+    const { data, error: e } = await supabase
+      .from('zv_flows')
+      .insert({ user_id: userId, name, description: null })
+      .select('id, user_id, name, description, created_at, updated_at')
+      .single()
+    if (e || !data) {
+      setError(e?.message ?? 'Falha ao criar fluxo.')
+      return
+    }
+    setFlows((prev) => [data as ZvFlow, ...prev])
+    setSelectedFlowId((data as ZvFlow).id)
+    setVoiceSubTab('fluxos')
+    setSuccess('Fluxo criado. Adicione etapas abaixo.')
+    window.setTimeout(() => setSuccess(null), 4000)
+  }, [userId])
 
   /** Remove agendamentos pendentes desta campanha (re-ativação sem duplicar). */
   const clearPendingForCampaign = useCallback(
@@ -760,7 +860,7 @@ export function ZapVoiceCampaignsPage() {
   )
 
   const activateCampaign = useCallback(
-    async (c: Campaign, funnelSteps: FunnelStep[]) => {
+    async (c: Campaign) => {
       if (!userId) {
         setError('Sessão inválida.')
         return
@@ -783,11 +883,23 @@ export function ZapVoiceCampaignsPage() {
           )
         }
 
-        const ordered = [...funnelSteps].sort(
-          (a, b) => a.step_order - b.step_order,
-        )
+        const isca = (c.isca_message ?? '').trim()
+        if (!isca) {
+          throw new Error('Preencha a mensagem da isca na guia Campanhas antes de ativar.')
+        }
+
+        const { data: stepsData, error: stepsErr } = await supabase
+          .from('zv_funnels')
+          .select(
+            'id, flow_id, step_order, message, media_type, media_url, delay_seconds, expected_trigger, advance_type, min_delay_seconds, max_delay_seconds, created_at, updated_at',
+          )
+          .eq('flow_id', c.flow_id)
+          .order('step_order', { ascending: true })
+        if (stepsErr) throw new Error(stepsErr.message)
+
+        const ordered = [...(stepsData ?? [])] as FunnelStep[]
         if (ordered.length === 0) {
-          throw new Error('Adicione ao menos uma etapa no funil.')
+          throw new Error('Adicione ao menos uma etapa no fluxo vinculado (guia Fluxos).')
         }
 
         for (const s of ordered) {
@@ -885,34 +997,28 @@ export function ZapVoiceCampaignsPage() {
             cidade: cityFromExtractionLocation(loc),
           }
 
-          // ISCA ATIVA: ao adicionar lead na campanha (ativar), agenda APENAS a etapa 1 automaticamente.
-          const step1 = ordered[0]!
+          // ISCA: mensagem da campanha; zv_funnel_step_id fica nulo.
           cumulativeMs += pickRandomIntInclusive(minS, maxS) * 1000
           const scheduledAt = new Date(startMs + cumulativeMs).toISOString()
-          const rawMsg = step1.message ?? ''
-          const messageBody = applyMessageTemplate(rawMsg, vars)
-          const ct = step1.media_type
-          const mUrl = ct === 'text' ? null : step1.media_url?.trim() ?? null
+          const messageBody = applyMessageTemplate(isca, vars)
 
           rows.push({
             user_id: userId,
             lead_id: lead.id,
             zv_campaign_id: c.id,
-            zv_funnel_step_id: step1.id,
+            zv_funnel_step_id: null,
             is_active: true,
             recipient_type: 'personal',
-            content_type: ct,
+            content_type: 'text',
             message_body: messageBody || null,
-            media_url: mUrl,
+            media_url: null,
             scheduled_at: scheduledAt,
             status: 'pending',
             recipient_phone: lead.phone,
-            // Snapshot anti-ban (campanha). Etapas temporizadas podem sobrescrever no backend.
             min_delay_seconds: c.min_delay_seconds,
             max_delay_seconds: c.max_delay_seconds,
           })
 
-          // Cria/atualiza progresso (modo conversacional).
           await supabase
             .from('lead_campaign_progress')
             .upsert(
@@ -920,9 +1026,9 @@ export function ZapVoiceCampaignsPage() {
                 user_id: userId,
                 lead_id: lead.id,
                 campaign_id: c.id,
-                next_step_order: 2,
+                next_step_order: 1,
                 total_steps: ordered.length,
-                status: ordered.length === 1 ? 'awaiting_last_send' : 'active',
+                status: ordered.length === 1 ? 'active' : 'active',
               },
               { onConflict: 'user_id,lead_id,campaign_id' },
             )
@@ -964,9 +1070,9 @@ export function ZapVoiceCampaignsPage() {
             ? ` A fila começa em ${formatDateBr(new Date(startMs).toISOString())}.`
             : ''
         setSuccess(
-          `Campanha ativa: ${total} disparo(s) de isca (Etapa 1) agendado(s) para ${nLeads} lead${
+          `Campanha ativa: ${total} isca(s) agendada(s) para ${nLeads} lead${
             nLeads === 1 ? '' : 's'
-          }. As próximas etapas dependem do Tipo de avanço (Resposta / Gatilho exato / Temporizado).${inicioFila}`,
+          }. O gatilho e o fluxo (guia Fluxos) definem a sequência após a resposta.${inicioFila}`,
         )
         window.setTimeout(() => setSuccess(null), 8000)
       } catch (err) {
@@ -1046,7 +1152,7 @@ export function ZapVoiceCampaignsPage() {
 
   const deleteCampaign = useCallback(
     async (id: string) => {
-      if (!confirm('Excluir esta campanha e todas as suas etapas? Essa ação não tem volta.')) {
+      if (!confirm('Excluir esta campanha? O fluxo vinculado permanece (guia Fluxos).')) {
         return
       }
       const { error: e } = await supabase.from('zv_campaigns').delete().eq('id', id)
@@ -1071,12 +1177,12 @@ export function ZapVoiceCampaignsPage() {
   // -------------------------------------------------------------------------
 
   const addStep = useCallback(async () => {
-    if (!selected) return
+    if (!selectedFlowId) return
     const nextOrder = (steps[steps.length - 1]?.step_order ?? 0) + 1
     const { data, error: e } = await supabase
       .from('zv_funnels')
       .insert({
-        campaign_id: selected.id,
+        flow_id: selectedFlowId,
         step_order: nextOrder,
         message: '',
         media_type: 'text',
@@ -1088,7 +1194,7 @@ export function ZapVoiceCampaignsPage() {
         max_delay_seconds: null,
       })
       .select(
-        'id, campaign_id, step_order, message, media_type, media_url, delay_seconds, expected_trigger, advance_type, min_delay_seconds, max_delay_seconds, created_at, updated_at',
+        'id, flow_id, step_order, message, media_type, media_url, delay_seconds, expected_trigger, advance_type, min_delay_seconds, max_delay_seconds, created_at, updated_at',
       )
       .single()
     if (e || !data) {
@@ -1096,7 +1202,7 @@ export function ZapVoiceCampaignsPage() {
       return
     }
     setSteps((prev) => [...prev, data as FunnelStep])
-  }, [selected, steps])
+  }, [selectedFlowId, steps])
 
   const saveStep = useCallback(
     async (
@@ -1150,7 +1256,7 @@ export function ZapVoiceCampaignsPage() {
       const a = steps[idx]
       const b = steps[swap]
 
-      // Truque para evitar conflito do unique(campaign_id, step_order):
+      // Truque para evitar conflito do unique(flow_id, step_order):
       // primeiro joga `a` para um valor temporário, depois ajusta os dois.
       const tempOrder = -1 - idx
       await supabase
@@ -1214,7 +1320,7 @@ export function ZapVoiceCampaignsPage() {
           </h2>
           <p className="mt-1 max-w-2xl text-sm leading-relaxed text-zinc-600">
             {mainTab === 'campanhas'
-              ? 'Funis, agendamento de início, gatilhos do Meta (respostas rápidas) e tráfego pago — tudo no mesmo fluxo.'
+              ? 'Campanhas (isca e gatilho), fluxos de automação e relatórios — organizados em abas abaixo.'
               : mainTab === 'contatos'
                 ? 'Unifique e limpe a base: importe CSV, Google Contacts e acompanhe origens como no Google Contacts.'
                 : 'Visualize campanhas concluídas: data do primeiro disparo e quantos leads receberam mensagens agendadas.'}
@@ -1270,6 +1376,38 @@ export function ZapVoiceCampaignsPage() {
         </button>
       </div>
 
+      {mainTab === 'campanhas' ? (
+        <div className="mb-2 flex flex-wrap gap-1 border-b border-zinc-100">
+          {(
+            [
+              { id: 'campanhas' as const, label: 'Campanhas (isca & gatilho)' },
+              { id: 'fluxos' as const, label: 'Fluxos (automação)' },
+              { id: 'relatorios' as const, label: 'Relatórios' },
+            ] as const
+          ).map(({ id, label }) => (
+            <button
+              key={id}
+              type="button"
+              onClick={() => setVoiceSubTab(id)}
+              className={`inline-flex items-center gap-2 border-b-2 px-3 py-2 text-sm font-medium transition ${
+                voiceSubTab === id
+                  ? 'border-brand-600 text-brand-800'
+                  : 'border-transparent text-zinc-500 hover:text-zinc-800'
+              }`}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
+      ) : null}
+
+      {mainTab === 'campanhas' && voiceSubTab === 'relatorios' && userId ? (
+        <ZapVoiceReportsTab
+          userId={userId}
+          campaigns={campaigns.map((c) => ({ id: c.id, name: c.name }))}
+        />
+      ) : null}
+
       {mainTab === 'contatos' && userId ? (
         <ContactsBasePanel
           userId={userId}
@@ -1281,11 +1419,52 @@ export function ZapVoiceCampaignsPage() {
         />
       ) : null}
 
-      {/* Painel duplo: funis (rascunho, ativa, pausada) */}
-      {mainTab === 'campanhas' ? (
+      {/* Campanhas / Fluxos: painel duplo (Relatórios fica fora) */}
+      {mainTab === 'campanhas' && voiceSubTab !== 'relatorios' ? (
       <div className="grid gap-6 lg:grid-cols-[360px_minmax(0,1fr)]">
-        {/* COLUNA ESQUERDA: lista de campanhas */}
+        {/* COLUNA ESQUERDA: campanhas ou fluxos */}
         <aside className="rounded-2xl border border-zinc-200/90 bg-white p-4 shadow-sm ring-1 ring-zinc-100/80">
+          {voiceSubTab === 'fluxos' ? (
+            <div className="space-y-3">
+              <div className="flex items-center justify-between gap-2 px-1">
+                <p className="text-xs font-semibold uppercase tracking-wider text-zinc-500">
+                  Seus fluxos
+                </p>
+                <span className="text-xs tabular-nums text-zinc-400">{flows.length}</span>
+              </div>
+              <button
+                type="button"
+                onClick={() => void createEmptyFlow()}
+                className="inline-flex w-full items-center justify-center gap-2 rounded-xl border border-brand-300 bg-brand-50 px-3 py-2.5 text-xs font-semibold text-brand-800 hover:bg-brand-100"
+              >
+                <Plus className="h-3.5 w-3.5" aria-hidden />
+                Novo fluxo
+              </button>
+              <div className="max-h-[420px] space-y-1.5 overflow-y-auto">
+                {flows.map((f) => {
+                  const active = f.id === selectedFlowId
+                  return (
+                    <button
+                      key={f.id}
+                      type="button"
+                      onClick={() => setSelectedFlowId(f.id)}
+                      className={`w-full rounded-lg border px-3 py-2 text-left text-sm transition ${
+                        active
+                          ? 'border-brand-300 bg-brand-50/80 text-brand-900'
+                          : 'border-zinc-200 bg-white text-zinc-800 hover:border-brand-200'
+                      }`}
+                    >
+                      {f.name}
+                    </button>
+                  )
+                })}
+                {flows.length === 0 ? (
+                  <p className="px-1 text-xs text-zinc-500">Nenhum fluxo ainda. Crie um acima.</p>
+                ) : null}
+              </div>
+            </div>
+          ) : (
+            <>
           <div className="flex items-center justify-between gap-2 px-1 pb-3">
             <p className="text-xs font-semibold uppercase tracking-wider text-zinc-500">
               Rascunho, ativa e pausada
@@ -1361,7 +1540,33 @@ export function ZapVoiceCampaignsPage() {
 
               <div>
                 <label className="mb-1 block text-xs font-medium text-zinc-700">
-                  Gatilho (resposta exata após a isca)
+                  Mensagem da isca
+                </label>
+                <textarea
+                  rows={3}
+                  value={newIscaMessage}
+                  onChange={(e) => setNewIscaMessage(e.target.value)}
+                  className="w-full rounded-lg border border-zinc-200 bg-white px-3 py-2 text-sm shadow-inner focus:border-brand-300 focus:outline-none focus:ring-2 focus:ring-brand-500/20"
+                />
+              </div>
+              <div>
+                <label className="mb-1 block text-xs font-medium text-zinc-700">
+                  Regra do gatilho
+                </label>
+                <select
+                  value={newTriggerCondition}
+                  onChange={(e) => setNewTriggerCondition(e.target.value as ZvTriggerCondition)}
+                  className="w-full rounded-lg border border-zinc-200 bg-white px-3 py-2 text-sm"
+                >
+                  <option value="equals">Igual a</option>
+                  <option value="contains">Contém</option>
+                  <option value="starts_with">Começa com</option>
+                  <option value="not_contains">Não contém</option>
+                </select>
+              </div>
+              <div>
+                <label className="mb-1 block text-xs font-medium text-zinc-700">
+                  Palavra-chave (gatilho)
                 </label>
                 <input
                   value={newTriggerKeyword}
@@ -1370,20 +1575,8 @@ export function ZapVoiceCampaignsPage() {
                   className="w-full rounded-lg border border-zinc-200 bg-white px-3 py-2 text-sm shadow-inner focus:border-brand-300 focus:outline-none focus:ring-2 focus:ring-brand-500/20"
                 />
                 <p className="mt-1 text-[11px] text-zinc-500">
-                  O lead precisa digitar isso (sem ser outra frase) para o funil avançar do passo 1
-                  (isca) para o passo 2. Você pode editar depois no cabeçalho da campanha.
+                  Um fluxo vazio será criado; edite as etapas em &quot;Fluxos&quot; depois.
                 </p>
-              </div>
-
-              <div>
-                <p className="mb-1 text-xs font-medium text-zinc-700">
-                  Frases extra de entrada (Meta Ads, opcional)
-                </p>
-                <PhraseChipsInput
-                  value={newInboundTriggers}
-                  onChange={setNewInboundTriggers}
-                  help="Mensagens exatas adicionais que colocam o lead no funil (anúncio). O gatilho principal após a isca é o campo acima."
-                />
               </div>
 
               <div className="flex items-center gap-2">
@@ -1464,16 +1657,17 @@ export function ZapVoiceCampaignsPage() {
               })
             )}
           </div>
+            </>
+          )}
         </aside>
 
-        {/* COLUNA DIREITA: editor de funil */}
+        {/* COLUNA DIREITA: campanha ou etapas do fluxo */}
         <section className="space-y-5">
-          {!selected ? (
+          {voiceSubTab === 'campanhas' && !selected ? (
             <div className="rounded-2xl border border-dashed border-zinc-200 bg-white p-10 text-center text-sm text-zinc-500 shadow-sm">
-              Selecione uma campanha à esquerda — ou crie a primeira para
-              começar a montar o funil.
+              Selecione uma campanha à esquerda — ou crie a primeira para começar.
             </div>
-          ) : (
+          ) : voiceSubTab === 'campanhas' && selected ? (
             <>
               {/* Header da campanha */}
               <div className="rounded-2xl border border-zinc-200/90 bg-white p-5 shadow-sm ring-1 ring-zinc-100/80">
@@ -1533,7 +1727,7 @@ export function ZapVoiceCampaignsPage() {
                     {selected.status !== 'active' ? (
                       <button
                         type="button"
-                        onClick={() => void activateCampaign(selected, steps)}
+                        onClick={() => void activateCampaign(selected)}
                         disabled={activating}
                         className="inline-flex items-center gap-1.5 rounded-xl bg-emerald-500 px-3 py-2 text-xs font-bold uppercase tracking-wide text-white shadow-sm transition hover:bg-emerald-600 disabled:cursor-not-allowed disabled:opacity-60"
                       >
@@ -1679,15 +1873,11 @@ export function ZapVoiceCampaignsPage() {
                   <div className="rounded-xl border border-zinc-200 bg-zinc-50/60 p-3">
                     <p className="flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-wider text-zinc-500">
                       <Zap className="h-3 w-3" aria-hidden />
-                      Etapas
+                      Automação
                     </p>
-                    <p className="mt-1.5 text-2xl font-semibold tabular-nums text-zinc-900">
-                      {steps.length}
-                    </p>
+                    <p className="mt-1.5 text-sm font-medium text-zinc-800">Fluxo vinculado</p>
                     <p className="mt-0.5 text-[11px] text-zinc-500">
-                      {steps.length === 0
-                        ? 'Adicione a primeira mensagem do funil.'
-                        : 'Arraste para reordenar.'}
+                      As etapas pós-isca ficam na guia <b>Fluxos</b> (automação).
                     </p>
                   </div>
                 </div>
@@ -1752,31 +1942,88 @@ export function ZapVoiceCampaignsPage() {
                     </p>
                   </div>
                   <div>
-                    <h4 className="mb-1 text-xs font-semibold text-zinc-800">
-                      Frases extra de entrada (Meta Ads, opcional)
-                    </h4>
-                    <PhraseChipsInput
-                      value={normalizeInboundTriggers(selected.inbound_triggers)}
-                      onChange={(next) => {
+                    <label className="mb-1 block text-xs font-medium text-zinc-700">
+                      Mensagem da isca (primeiro disparo)
+                    </label>
+                    <textarea
+                      rows={4}
+                      value={selected.isca_message ?? ''}
+                      onChange={(e) => {
                         setCampaigns((prev) =>
                           prev.map((c) =>
-                            c.id === selected.id ? { ...c, inbound_triggers: next } : c,
+                            c.id === selected.id ? { ...c, isca_message: e.target.value } : c,
                           ),
                         )
-                        void updateCampaign(selected.id, { inbound_triggers: next })
                       }}
-                      help="Mensagens exatas adicionais para entrar no funil pelo anúncio. O gatilho pós-isca é o campo acima."
+                      onBlur={(e) =>
+                        void updateCampaign(selected.id, { isca_message: e.target.value.trim() || '' })
+                      }
+                      className="w-full max-w-xl rounded-lg border border-zinc-200 bg-white px-3 py-2 text-sm shadow-inner focus:border-brand-300 focus:outline-none focus:ring-2 focus:ring-brand-500/20"
                     />
+                  </div>
+                  <div>
+                    <label className="mb-1 block text-xs font-medium text-zinc-700">
+                      Regra do gatilho (comparar com a palavra-chave)
+                    </label>
+                    <select
+                      value={selected.trigger_condition}
+                      onChange={(e) => {
+                        const v = e.target.value as ZvTriggerCondition
+                        setCampaigns((prev) =>
+                          prev.map((c) =>
+                            c.id === selected.id ? { ...c, trigger_condition: v } : c,
+                          ),
+                        )
+                        void updateCampaign(selected.id, { trigger_condition: v })
+                      }}
+                      className="w-full max-w-md rounded-lg border border-zinc-200 bg-white px-3 py-2 text-sm"
+                    >
+                      <option value="equals">Igual a (texto normalizado)</option>
+                      <option value="contains">Contém</option>
+                      <option value="starts_with">Começa com</option>
+                      <option value="not_contains">Não contém</option>
+                    </select>
+                  </div>
+                  <div>
+                    <label className="mb-1 block text-xs font-medium text-zinc-700">
+                      Fluxo de automação
+                    </label>
+                    <select
+                      value={selected.flow_id}
+                      onChange={(e) => {
+                        const v = e.target.value
+                        setCampaigns((prev) =>
+                          prev.map((c) => (c.id === selected.id ? { ...c, flow_id: v } : c)),
+                        )
+                        void updateCampaign(selected.id, { flow_id: v })
+                      }}
+                      className="w-full max-w-md rounded-lg border border-zinc-200 bg-white px-3 py-2 text-sm"
+                    >
+                      {flows.map((f) => (
+                        <option key={f.id} value={f.id}>
+                          {f.name}
+                        </option>
+                      ))}
+                    </select>
                   </div>
                 </div>
               </div>
-
-              {/* Editor de etapas */}
+            </>
+          ) : null}
+          {voiceSubTab === 'fluxos' && !selectedFlowId ? (
+            <div className="rounded-2xl border border-dashed border-zinc-200 bg-white p-10 text-center text-sm text-zinc-500 shadow-sm">
+              Selecione um fluxo à esquerda ou crie um novo.
+            </div>
+          ) : null}
+          {voiceSubTab === 'fluxos' && selectedFlowId ? (
+              <>
+              {/* Editor de etapas do fluxo */}
               <div className="rounded-2xl border border-zinc-200/90 bg-white p-5 shadow-sm ring-1 ring-zinc-100/80">
                 <div className="mb-4 flex items-end justify-between gap-3">
                   <div>
                     <h3 className="text-base font-semibold text-zinc-900">
-                      Funil de mensagens
+                      Fluxo:{' '}
+                      {flows.find((f) => f.id === selectedFlowId)?.name ?? '—'}
                     </h3>
                     <p className="mt-0.5 text-xs text-zinc-500">
                       Cada etapa é uma mensagem WhatsApp na ordem do roteiro.
@@ -1836,7 +2083,7 @@ export function ZapVoiceCampaignsPage() {
                 )}
               </div>
             </>
-          )}
+          ) : null}
         </section>
       </div>
       ) : null}
