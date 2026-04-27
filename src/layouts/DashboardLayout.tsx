@@ -1,9 +1,10 @@
-import type { ReactNode } from 'react'
+import { useEffect, useState, type ReactNode } from 'react'
 import { Bell, Search } from 'lucide-react'
 import {
   Sidebar,
   type DashboardNavId,
 } from '../components/Sidebar'
+import { supabase } from '../lib/supabase'
 
 type DashboardLayoutProps = {
   activeNav: DashboardNavId
@@ -18,9 +19,32 @@ export function DashboardLayout({
   title,
   children,
 }: DashboardLayoutProps) {
+  const [isSuperadmin, setIsSuperadmin] = useState(false)
+
+  useEffect(() => {
+    let cancelled = false
+    void (async () => {
+      const {
+        data: { user },
+      } = await supabase.auth.getUser()
+      if (!user) return
+      const { data: prof } = await supabase
+        .from('user_profiles')
+        .select('role')
+        .eq('user_id', user.id)
+        .maybeSingle()
+      if (cancelled) return
+      const role = (prof as { role?: string } | null)?.role ?? 'client'
+      setIsSuperadmin(role === 'superadmin')
+    })()
+    return () => {
+      cancelled = true
+    }
+  }, [])
+
   return (
     <div className="flex min-h-dvh bg-zinc-50">
-      <Sidebar active={activeNav} onNavigate={onNavigate} />
+      <Sidebar active={activeNav} onNavigate={onNavigate} isSuperadmin={isSuperadmin} />
       <div className="flex min-w-0 flex-1 flex-col">
         <header className="sticky top-0 z-10 flex items-center justify-between gap-4 border-b border-zinc-200/80 bg-white/80 px-6 py-4 backdrop-blur-md">
           <div>

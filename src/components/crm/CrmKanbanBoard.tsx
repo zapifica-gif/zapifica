@@ -34,6 +34,7 @@ import { toEvolutionDigits } from '../../lib/phoneBrazil'
 import { supabase } from '../../lib/supabase'
 import { ChatWindow } from './ChatWindow'
 import { NewLeadModal } from './NewLeadModal'
+import { useImpersonation } from '../../contexts/ImpersonationContext'
 
 /** Alinhado ao enum/texto do campo `status` em `public.leads`. */
 export type ColumnId = 'novo' | 'em_atendimento' | 'negociacao' | 'fechado'
@@ -272,6 +273,7 @@ const dropAnimation: DropAnimation = {
 type DragStartInfo = { leadId: string; column: ColumnId }
 
 export function CrmKanbanBoard() {
+  const { state: imp } = useImpersonation()
   const [columns, setColumns] = useState<Record<ColumnId, string[]>>(emptyColumns)
   const [leadsMap, setLeadsMap] = useState<Record<string, Lead>>({})
   const [loading, setLoading] = useState(true)
@@ -318,11 +320,12 @@ export function CrmKanbanBoard() {
         }
         return
       }
+      const effectiveUserId = imp.targetUserId ?? user.id
 
       const { data, error } = await supabase
         .from('leads')
         .select('id, name, phone, status')
-        .eq('user_id', user.id)
+        .eq('user_id', effectiveUserId)
         .order('created_at', { ascending: true })
 
       if (error) {
@@ -361,16 +364,17 @@ export function CrmKanbanBoard() {
         data: { user },
       } = await supabase.auth.getUser()
       if (!user || cancelled) return
+      const effectiveUserId = imp.targetUserId ?? user.id
 
       channel = supabase
-        .channel(`leads-realtime-${user.id}`)
+        .channel(`leads-realtime-${effectiveUserId}`)
         .on(
           'postgres_changes',
           {
             event: '*',
             schema: 'public',
             table: 'leads',
-            filter: `user_id=eq.${user.id}`,
+            filter: `user_id=eq.${effectiveUserId}`,
           },
           () => {
             void fetchLeads({ background: true })
@@ -513,6 +517,7 @@ export function CrmKanbanBoard() {
         return
       }
 
+      const effectiveUserId = imp.targetUserId ?? user.id
       const { error } = await supabase
         .from('leads')
         .update({
@@ -520,7 +525,7 @@ export function CrmKanbanBoard() {
           updated_at: new Date().toISOString(),
         })
         .eq('id', dragStart.leadId)
-        .eq('user_id', user.id)
+        .eq('user_id', effectiveUserId)
 
       if (error) {
         setPersistError('Não foi possível salvar a coluna. Desfazendo movimento.')
@@ -577,13 +582,14 @@ export function CrmKanbanBoard() {
       }
     }
 
+    const effectiveUserId = imp.targetUserId ?? user.id
     const { data, error } = await supabase
       .from('leads')
       .insert({
         name: nome,
         phone: phoneDigits,
         status: 'novo',
-        user_id: user.id,
+        user_id: effectiveUserId,
       })
       .select('id, name, phone, status')
       .single()

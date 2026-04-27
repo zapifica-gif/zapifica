@@ -1,6 +1,7 @@
 import {
   Brain,
   CalendarDays,
+  Crown,
   Home,
   LogOut,
   Megaphone,
@@ -19,6 +20,7 @@ export type DashboardNavId =
   | 'zv-campaigns'
   | 'lead-extractor'
   | 'settings'
+  | 'superadmin'
 
 type NavItem = {
   id: DashboardNavId
@@ -39,9 +41,13 @@ const items: NavItem[] = [
 type SidebarProps = {
   active: DashboardNavId
   onNavigate: (id: DashboardNavId) => void
+  isSuperadmin?: boolean
 }
 
-export function Sidebar({ active, onNavigate }: SidebarProps) {
+export function Sidebar({ active, onNavigate, isSuperadmin = false }: SidebarProps) {
+  const visibleItems = isSuperadmin
+    ? [...items, { id: 'superadmin' as const, label: 'Painel da Agência', icon: Crown }]
+    : items
   return (
     <aside className="flex h-full w-64 shrink-0 flex-col border-r border-zinc-800/80 bg-zinc-950 text-zinc-100">
       <div className="border-b border-zinc-800/80 px-5 py-5">
@@ -60,7 +66,7 @@ export function Sidebar({ active, onNavigate }: SidebarProps) {
       </div>
 
       <nav className="flex flex-1 flex-col gap-1 p-3" aria-label="Principal">
-        {items.map(({ id, label, icon: Icon }) => {
+        {visibleItems.map(({ id, label, icon: Icon }) => {
           const isActive = active === id
           return (
             <button

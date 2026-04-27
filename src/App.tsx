@@ -11,6 +11,8 @@ import { SettingsPage } from './pages/SettingsPage'
 import { ZapVoiceCampaignsPage } from './pages/ZapVoiceCampaigns'
 import { LeadExtractorPage } from './pages/LeadExtractor'
 import type { DashboardNavId } from './components/Sidebar'
+import { SuperAdminPage } from './pages/SuperAdmin'
+import { ImpersonationProvider, useImpersonation } from './contexts/ImpersonationContext'
 
 function navTitle(id: DashboardNavId): string {
   switch (id) {
@@ -28,6 +30,8 @@ function navTitle(id: DashboardNavId): string {
       return 'Extrator de Leads'
     case 'settings':
       return 'Configurações'
+    case 'superadmin':
+      return 'Painel da Agência'
     default:
       return 'Zapifica'
   }
@@ -55,9 +59,33 @@ function DashboardContent({
       return <LeadExtractorPage onOpenZapVoice={() => onNavigate('zv-campaigns')} />
     case 'settings':
       return <SettingsPage />
+    case 'superadmin':
+      return <SuperAdminPage />
     default:
       return <HomePage />
   }
+}
+
+function ImpersonationBanner() {
+  const { state, clear } = useImpersonation()
+  if (!state.targetUserId) return null
+  const label = state.targetCompanyName?.trim() || state.targetUserId.slice(0, 8)
+  return (
+    <div className="sticky top-0 z-20 border-b border-rose-300 bg-rose-50 px-4 py-2 text-sm text-rose-900">
+      <div className="mx-auto flex max-w-[1400px] flex-wrap items-center justify-between gap-2">
+        <p className="font-semibold">
+          Você está visualizando o painel do cliente <span className="underline">{label}</span>.
+        </p>
+        <button
+          type="button"
+          onClick={clear}
+          className="rounded-lg border border-rose-300 bg-white px-3 py-1 text-xs font-bold text-rose-800 hover:bg-rose-100"
+        >
+          Sair do modo cliente
+        </button>
+      </div>
+    </div>
+  )
 }
 
 function AuthLoadingScreen() {
@@ -112,12 +140,15 @@ export default function App() {
   }
 
   return (
-    <DashboardLayout
-      activeNav={activeNav}
-      onNavigate={setActiveNav}
-      title={navTitle(activeNav)}
-    >
-      <DashboardContent activeNav={activeNav} onNavigate={setActiveNav} />
-    </DashboardLayout>
+    <ImpersonationProvider>
+      <DashboardLayout
+        activeNav={activeNav}
+        onNavigate={setActiveNav}
+        title={navTitle(activeNav)}
+      >
+        <ImpersonationBanner />
+        <DashboardContent activeNav={activeNav} onNavigate={setActiveNav} />
+      </DashboardLayout>
+    </ImpersonationProvider>
   )
 }

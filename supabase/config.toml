@@ -18,3 +18,6 @@ verify_jwt = true
 
 [functions.apify-webhook]
 verify_jwt = false
+
+[functions.create-tenant]
+verify_jwt = true
