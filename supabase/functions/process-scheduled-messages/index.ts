@@ -609,8 +609,22 @@ serve(async () => {
       }
 
       // Se este agendamento pertence a um funil (Zap Voice), e não existem mais
-      // mensagens pendentes/processing para este lead+campanha, libera a IA.
+      // mensagens pendentes/processing para este lead+campanha, FINALIZA:
+      // - se houver progress.awaiting_last_send, grava completion e remove progress
+      // - se não houver progress, é o modo “enfileiramento em massa”: grava completion também
       if (msg.lead_id && msg.zv_campaign_id) {
+        const { data: prog, error: progErr } = await supabase
+          .from('lead_campaign_progress')
+          .select('id, status')
+          .eq('user_id', msg.user_id)
+          .eq('lead_id', msg.lead_id)
+          .eq('campaign_id', msg.zv_campaign_id)
+          .in('status', ['active', 'awaiting_last_send'])
+          .maybeSingle()
+        if (progErr) {
+          console.warn('[Agenda Suprema] Falha ao ler progress:', progErr.message)
+        }
+
         const { count, error: cntErr } = await supabase
           .from('scheduled_messages')
           .select('id', { count: 'exact', head: true })
@@ -623,18 +637,45 @@ serve(async () => {
         if (cntErr) {
           console.warn('[Agenda Suprema] Falha ao checar fim do funil:', cntErr.message)
         } else if ((count ?? 0) === 0) {
-          const { error: unlockErr } = await supabase
-            .from('leads')
-            .update({ funnel_locked_until: null })
-            .eq('id', msg.lead_id)
-            .eq('user_id', msg.user_id)
-          if (unlockErr) {
-            console.warn('[Agenda Suprema] Falha ao liberar funil no lead:', unlockErr.message)
-          } else {
-            console.log('[Agenda Suprema] Funil finalizado — IA liberada', {
-              lead_id: msg.lead_id,
-              zv_campaign_id: msg.zv_campaign_id,
-            })
+          const isAwaiting =
+            prog && typeof (prog as any).status === 'string'
+              ? String((prog as any).status) === 'awaiting_last_send'
+              : false
+
+          if (!prog || isAwaiting) {
+            const { error: compErr } = await supabase
+              .from('lead_campaign_completions')
+              .insert({
+                user_id: msg.user_id,
+                lead_id: msg.lead_id,
+                campaign_id: msg.zv_campaign_id,
+              })
+            if (compErr && compErr.code !== '23505') {
+              console.warn('[Agenda Suprema] Falha ao gravar completion:', compErr.message)
+            }
+            if (prog && (prog as any).id) {
+              const { error: delErr } = await supabase
+                .from('lead_campaign_progress')
+                .delete()
+                .eq('id', (prog as any).id)
+              if (delErr) {
+                console.warn('[Agenda Suprema] Falha ao remover progress:', delErr.message)
+              }
+            }
+
+            const { error: unlockErr } = await supabase
+              .from('leads')
+              .update({ funnel_locked_until: null })
+              .eq('id', msg.lead_id)
+              .eq('user_id', msg.user_id)
+            if (unlockErr) {
+              console.warn('[Agenda Suprema] Falha ao liberar funil no lead:', unlockErr.message)
+            } else {
+              console.log('[Agenda Suprema] Campanha finalizada — IA liberada', {
+                lead_id: msg.lead_id,
+                zv_campaign_id: msg.zv_campaign_id,
+              })
+            }
           }
         }
       }

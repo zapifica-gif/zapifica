@@ -72,6 +72,7 @@ type FunnelStep = {
   media_url: string | null
   delay_seconds: number
   expected_trigger: string | null
+  advance_type?: 'auto' | 'exact' | null
   created_at: string
   updated_at: string
 }
@@ -524,7 +525,7 @@ export function ZapVoiceCampaignsPage() {
     const { data, error: e } = await supabase
       .from('zv_funnels')
       .select(
-        'id, campaign_id, step_order, message, media_type, media_url, delay_seconds, expected_trigger, created_at, updated_at',
+        'id, campaign_id, step_order, message, media_type, media_url, delay_seconds, expected_trigger, advance_type, created_at, updated_at',
       )
       .eq('campaign_id', campaignId)
       .order('step_order', { ascending: true })
@@ -659,6 +660,7 @@ export function ZapVoiceCampaignsPage() {
         media_url: null,
         delay_seconds: 0,
         expected_trigger: null,
+        advance_type: 'auto',
       })
 
       setCampaigns((prev) => [created, ...prev])
@@ -1043,9 +1045,10 @@ export function ZapVoiceCampaignsPage() {
         media_url: null,
         delay_seconds: 0,
         expected_trigger: null,
+        advance_type: 'auto',
       })
       .select(
-        'id, campaign_id, step_order, message, media_type, media_url, delay_seconds, expected_trigger, created_at, updated_at',
+        'id, campaign_id, step_order, message, media_type, media_url, delay_seconds, expected_trigger, advance_type, created_at, updated_at',
       )
       .single()
     if (e || !data) {
@@ -1061,7 +1064,7 @@ export function ZapVoiceCampaignsPage() {
       patch: Partial<
         Pick<
           FunnelStep,
-          'message' | 'media_type' | 'media_url' | 'delay_seconds' | 'expected_trigger'
+          'message' | 'media_type' | 'media_url' | 'delay_seconds' | 'expected_trigger' | 'advance_type'
         >
       >,
     ) => {
@@ -1829,7 +1832,7 @@ type StepCardProps = {
     patch: Partial<
       Pick<
         FunnelStep,
-        'message' | 'media_type' | 'media_url' | 'delay_seconds' | 'expected_trigger'
+        'message' | 'media_type' | 'media_url' | 'delay_seconds' | 'expected_trigger' | 'advance_type'
       >
     >,
   ) => void
@@ -1855,6 +1858,9 @@ function StepCard({
   const [mediaUrl, setMediaUrl] = useState(step.media_url ?? '')
   const [delaySeconds, setDelaySeconds] = useState(step.delay_seconds)
   const [trigger, setTrigger] = useState(step.expected_trigger ?? '')
+  const [advanceType, setAdvanceType] = useState<'auto' | 'exact'>(
+    (step.advance_type ?? 'auto') as 'auto' | 'exact',
+  )
   const [uploading, setUploading] = useState(false)
   const [localError, setLocalError] = useState<string | null>(null)
 
@@ -1864,7 +1870,16 @@ function StepCard({
     setMediaUrl(step.media_url ?? '')
     setDelaySeconds(step.delay_seconds)
     setTrigger(step.expected_trigger ?? '')
-  }, [step.id, step.message, step.media_type, step.media_url, step.delay_seconds, step.expected_trigger])
+    setAdvanceType((step.advance_type ?? 'auto') as 'auto' | 'exact')
+  }, [
+    step.id,
+    step.message,
+    step.media_type,
+    step.media_url,
+    step.delay_seconds,
+    step.expected_trigger,
+    step.advance_type,
+  ])
 
   const mediaNeedsUrl = mediaType !== 'text'
   const dirty =
@@ -1872,7 +1887,8 @@ function StepCard({
     mediaType !== step.media_type ||
     (mediaUrl || '').trim() !== (step.media_url ?? '').trim() ||
     delaySeconds !== step.delay_seconds ||
-    (trigger || '') !== (step.expected_trigger ?? '')
+    (trigger || '') !== (step.expected_trigger ?? '') ||
+    (advanceType || 'auto') !== ((step.advance_type ?? 'auto') as 'auto' | 'exact')
 
   const handlePickMediaType = (next: FunnelMediaType) => {
     setLocalError(null)
@@ -1911,12 +1927,22 @@ function StepCard({
       setLocalError('Informe a URL da mídia ou faça upload (tipos de imagem, vídeo, áudio e arquivo exigem link público).')
       return
     }
+    if (advanceType === 'exact' && index !== 1 && !trigger.trim()) {
+      setLocalError('Para “gatilho exato”, preencha o Gatilho esperado.')
+      return
+    }
+    if (index === 1) {
+      // Passo 1 sempre depende do gatilho da campanha; não usa advance_type/expected_trigger do step.
+      setAdvanceType('auto')
+      setTrigger('')
+    }
     onSave({
       message,
       media_type: mediaType,
       media_url: mediaType === 'text' ? null : mediaUrl.trim() || null,
       delay_seconds: delaySeconds,
-      expected_trigger: trigger.trim() || null,
+      expected_trigger: index === 1 ? null : trigger.trim() || null,
+      advance_type: index === 1 ? 'auto' : advanceType,
     })
   }
 
@@ -2131,6 +2157,56 @@ function StepCard({
             </p>
           </div>
 
+          {index === 1 ? (
+            <div className="rounded-xl border border-zinc-200 bg-zinc-50/60 p-3">
+              <p className="text-[11px] font-semibold uppercase tracking-wider text-zinc-500">
+                Tipo de avanço
+              </p>
+              <p className="mt-1 text-[11px] text-zinc-600">
+                A 1ª etapa sempre exige a palavra-chave exata do gatilho da campanha.
+              </p>
+            </div>
+          ) : (
+            <div className="rounded-xl border border-zinc-200 bg-zinc-50/60 p-3">
+              <p className="text-[11px] font-semibold uppercase tracking-wider text-zinc-500">
+                Tipo de avanço
+              </p>
+              <div className="mt-2 grid gap-2">
+                <label className="flex cursor-pointer items-center gap-2 text-sm text-zinc-700">
+                  <input
+                    type="radio"
+                    name={`advance-${step.id}`}
+                    checked={advanceType === 'auto'}
+                    onChange={() => setAdvanceType('auto')}
+                  />
+                  <span>
+                    Avanço automático (qualquer resposta)
+                  </span>
+                </label>
+                <label className="flex cursor-pointer items-center gap-2 text-sm text-zinc-700">
+                  <input
+                    type="radio"
+                    name={`advance-${step.id}`}
+                    checked={advanceType === 'exact'}
+                    onChange={() => setAdvanceType('exact')}
+                  />
+                  <span>
+                    Avanço por gatilho exato
+                  </span>
+                </label>
+              </div>
+              {advanceType === 'exact' ? (
+                <p className="mt-2 text-[11px] text-zinc-600">
+                  Preencha o campo <b>Gatilho esperado</b> abaixo. O lead precisa digitar exatamente essa palavra/frase.
+                </p>
+              ) : (
+                <p className="mt-2 text-[11px] text-zinc-600">
+                  O lead avança assim que responder qualquer coisa (texto/legenda/transcrição).
+                </p>
+              )}
+            </div>
+          )}
+
           <div>
             <label className="mb-1.5 flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wider text-zinc-500">
               <Sparkles className="h-3 w-3" aria-hidden />
@@ -2143,7 +2219,11 @@ function StepCard({
               className="w-full rounded-lg border border-zinc-200 bg-white px-2.5 py-2 text-sm shadow-inner focus:border-brand-300 focus:outline-none focus:ring-2 focus:ring-brand-500/20"
             />
             <p className="mt-1 text-[10px] text-zinc-500">
-              Palavras que avançam o lead para a próxima etapa.
+              {index === 1
+                ? 'Não se aplica na 1ª etapa (o gatilho fica na campanha).'
+                : advanceType === 'exact'
+                  ? 'Obrigatório quando o Tipo de avanço é “gatilho exato”.'
+                  : 'Opcional (não é usado no avanço automático).'}
             </p>
           </div>
 

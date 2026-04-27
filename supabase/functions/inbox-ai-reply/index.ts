@@ -41,6 +41,7 @@ type ChatMessageRow = {
   sender_type: string
   content_type: string
   message_body: string | null
+  ai_suppressed?: boolean | null
   created_at: string
 }
 
@@ -101,6 +102,12 @@ function extractInsertRecord(
     return { type, table, record: rec as Record<string, unknown> }
   }
   return { type, table, record: null }
+}
+
+function boolValue(value: unknown): boolean | null {
+  if (value === true) return true
+  if (value === false) return false
+  return null
 }
 
 /** Formato de mensagens compatível com Chat Completions (DeepSeek). */
@@ -430,10 +437,14 @@ serve(async (req) => {
     sender_type: 'cliente',
     content_type: typeof record.content_type === 'string' ? record.content_type : 'text',
     message_body: typeof record.message_body === 'string' ? record.message_body : null,
+    ai_suppressed: boolValue(record.ai_suppressed) ?? null,
     created_at: typeof record.created_at === 'string' ? record.created_at : new Date().toISOString(),
   }
   if (!triggerRow.lead_id) {
     return jsonResponse({ error: 'record.lead_id em falta' }, 400)
+  }
+  if (triggerRow.ai_suppressed === true) {
+    return jsonResponse({ ok: true, ignored: 'ai_suppressed_on_message', lead_id: triggerRow.lead_id })
   }
 
   const supabase = createClient(supabaseUrl, serviceKey, {

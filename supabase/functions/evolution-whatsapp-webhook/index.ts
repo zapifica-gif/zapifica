@@ -857,29 +857,12 @@ serve(async (req) => {
       continue
     }
 
-    const { error: insErr } = await supabase.from('chat_messages').insert({
-      lead_id: ensured.id,
-      sender_type: 'cliente',
-      content_type: dbContentType,
-      message_body: finalBody,
-      evolution_message_id: item.msgId,
-      media_url: upload.url,
-    })
+    // ZapVoice (gatilho / avanço) precisa acontecer ANTES da IA e também
+    // marcar a mensagem com ai_suppressed para o inbox-ai-reply abortar sem corrida.
+    let zvSuppress = false
+    let zvReason: string | null = null
+    let zvCampaignId: string | undefined = undefined
 
-    if (insErr) {
-      if (insErr.code === '23505') {
-        skipped.push(`dup:${item.msgId}`)
-        continue
-      }
-      errors.push(`msg:${item.msgId}:${insErr.message}`)
-      continue
-    }
-    saved += 1
-
-    // ───────────────────────────────────────────────────────────────────────
-    // Zap Voice — gatilhos (Meta / respostas rápidas) -> scheduled_messages
-    // Compara o texto "novo" (ou transcrição de áudio), sem o bloco de citação.
-    // ───────────────────────────────────────────────────────────────────────
     const isPlaceholderReply =
       /^\[(imagem|vídeo|documento|mensagem)\]$/i.test(
         (replyText || '').trim(),
@@ -912,18 +895,43 @@ serve(async (req) => {
         messageText: zvText,
         contentType: zvContent,
       })
-      if (zv.enqueued) {
-        zvEnqueued += 1
-      } else if (
-        zv.reason &&
-        zv.reason !== 'sem_match' &&
-        zv.reason !== 'ja_na_fila'
-      ) {
-        console.log('[ZapVoice inbound] skip', {
-          reason: zv.reason,
-          campaignId: zv.campaignId,
+      zvSuppress = zv.suppressAi === true
+      zvReason = zv.reason ?? null
+      zvCampaignId = zv.campaignId
+    }
+
+    const { error: insErr } = await supabase.from('chat_messages').insert({
+      lead_id: ensured.id,
+      sender_type: 'cliente',
+      content_type: dbContentType,
+      message_body: finalBody,
+      evolution_message_id: item.msgId,
+      media_url: upload.url,
+      ai_suppressed: zvSuppress,
+      ai_suppress_reason: zvSuppress ? (zvReason ?? 'zapvoice') : null,
+    })
+
+    if (insErr) {
+      if (insErr.code === '23505') {
+        skipped.push(`dup:${item.msgId}`)
+        continue
+      }
+      errors.push(`msg:${item.msgId}:${insErr.message}`)
+      continue
+    }
+    saved += 1
+
+    if (zvSuppress) {
+      if (zvReason && zvReason !== 'sem_match') {
+        console.log('[ZapVoice inbound] handled', {
+          reason: zvReason,
+          campaignId: zvCampaignId,
           msgId: item.msgId,
         })
+      }
+      if (zvReason === 'avancou' || zvReason === 'ja_concluida') {
+        // conta como “processado pelo ZapVoice” (observabilidade)
+        zvEnqueued += 1
       }
     }
 
@@ -941,6 +949,10 @@ serve(async (req) => {
           !/^\[imagem\]$/i.test((replyText || '').trim())))
 
     if (hasAiMaterial) {
+      if (zvSuppress) {
+        skipped.push(`ai_suppressed:${item.msgId}`)
+        continue
+      }
       const { data: leadAi, error: aiErr } = await supabase
         .from('leads')
         .select('id, ai_enabled, funnel_locked_until')

@@ -493,9 +493,18 @@ export async function checkAndSendScheduledMessages(
           }
         }
 
-        // Libera IA quando terminar o funil para este lead (sem pendentes/processing).
+        // Finalização de campanha + unlock da IA (mesma regra da Edge Function).
         if (row.lead_id && row.zv_campaign_id) {
-          const { count, error: cntErr } = await supabase
+          const { data: prog } = await supabase
+            .from('lead_campaign_progress')
+            .select('id, status')
+            .eq('user_id', row.user_id)
+            .eq('lead_id', row.lead_id)
+            .eq('campaign_id', row.zv_campaign_id)
+            .in('status', ['active', 'awaiting_last_send'])
+            .maybeSingle()
+
+          const { count } = await supabase
             .from('scheduled_messages')
             .select('id', { count: 'exact', head: true })
             .eq('user_id', row.user_id)
@@ -504,12 +513,34 @@ export async function checkAndSendScheduledMessages(
             .in('status', ['pending', 'processing'])
             .eq('is_active', true)
 
-          if (!cntErr && (count ?? 0) === 0) {
-            await supabase
-              .from('leads')
-              .update({ funnel_locked_until: null })
-              .eq('id', row.lead_id)
-              .eq('user_id', row.user_id)
+          if ((count ?? 0) === 0) {
+            const isAwaiting =
+              prog && typeof (prog as any).status === 'string'
+                ? String((prog as any).status) === 'awaiting_last_send'
+                : false
+            if (!prog || isAwaiting) {
+              const { error: compErr } = await supabase
+                .from('lead_campaign_completions')
+                .insert({
+                  user_id: row.user_id,
+                  lead_id: row.lead_id,
+                  campaign_id: row.zv_campaign_id,
+                })
+              if (compErr && (compErr as any).code !== '23505') {
+                console.warn('[worker] completion insert:', compErr.message)
+              }
+              if (prog && (prog as any).id) {
+                await supabase
+                  .from('lead_campaign_progress')
+                  .delete()
+                  .eq('id', (prog as any).id)
+              }
+              await supabase
+                .from('leads')
+                .update({ funnel_locked_until: null })
+                .eq('id', row.lead_id)
+                .eq('user_id', row.user_id)
+            }
           }
         }
       } else if (oks.length > 0) {
