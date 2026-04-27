@@ -5,6 +5,9 @@
 // Acionada por: Supabase **Database Webhook** (INSERT em chat_messages), ou
 // teste via curl com o mesmo corpo.
 //
+// Ordem com o ZapVoice: no início do pipeline há um atraso aleatório de 5–6 s
+// (sem acessar o banco) para o evolution-whatsapp-webhook concluir antes das queries da IA.
+//
 // Secrets obrigatórios:
 //   * DEEPSEEK_API_KEY
 //   * INBOX_AI_WEBHOOK_SECRET   (o Dashboard do DB Webhook envia: Authorization: Bearer <isto>)
@@ -52,37 +55,13 @@ type LeadRow = {
   funnel_locked_until?: string | null
 }
 
-type TriggerCondition = 'equals' | 'contains' | 'starts_with' | 'not_contains'
-
-function normText(s: string): string {
-  return s
-    .toLowerCase()
-    .replace(/\s+/g, ' ')
-    .trim()
+/** Espera o webhook do Evolution/ZapVoice gravar progresso antes da IA consultar o banco (evita corrida). */
+function inboxIaEntryDelayMs(): number {
+  return Math.floor(Math.random() * (6000 - 5000 + 1)) + 5000
 }
 
-/** Igual ao motor do ZapVoice: evita IA quando o texto é gatilho de campanha. */
-function triggerConditionSatisfied(
-  condition: TriggerCondition,
-  messageNorm: string,
-  keywordRaw: string,
-): boolean {
-  const kw = normText(keywordRaw)
-  if (condition === 'not_contains') {
-    if (!kw) return false
-    return !messageNorm.includes(kw)
-  }
-  if (!kw) return false
-  switch (condition) {
-    case 'equals':
-      return messageNorm === kw
-    case 'contains':
-      return messageNorm.includes(kw)
-    case 'starts_with':
-      return messageNorm.startsWith(kw)
-    default:
-      return false
-  }
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms))
 }
 
 function instanceNameFromUserId(userId: string): string {
@@ -269,6 +248,9 @@ async function runPipeline(
   evolutionUrl: string,
   evolutionKey: string,
 ): Promise<Record<string, unknown>> {
+  // Antes de qualquer query: dá ao evolution-whatsapp-webhook prioridade para criar/atualizar o funil.
+  await sleep(inboxIaEntryDelayMs())
+
   const { data: lead, error: leErr } = await supabase
     .from('leads')
     .select('id, user_id, phone, funnel_locked_until')
@@ -283,37 +265,6 @@ async function runPipeline(
   }
 
   const leadData = lead as LeadRow
-
-  // HARD BLOCK (antes do LLM): gatilho de campanha ativa → mensagem é do funil, não da IA.
-  if (triggerRow.content_type === 'text') {
-    const raw = (triggerRow.message_body ?? '').trim()
-    if (
-      raw &&
-      !/^\[(imagem|áudio|vídeo|documento|mensagem)\]$/i.test(raw)
-    ) {
-      const messageNorm = normText(raw)
-      const { data: campRows, error: campErr } = await supabase
-        .from('zv_campaigns')
-        .select('id, trigger_keyword, trigger_condition')
-        .eq('user_id', leadData.user_id)
-        .eq('status', 'active')
-      if (campErr) {
-        return { error: `zv_campaigns: ${campErr.message}` }
-      }
-      for (const row of campRows ?? []) {
-        const cond = ((row as { trigger_condition?: string }).trigger_condition ??
-          'equals') as TriggerCondition
-        const kw = (row as { trigger_keyword?: string | null }).trigger_keyword ?? ''
-        if (triggerConditionSatisfied(cond, messageNorm, kw)) {
-          return {
-            ok: true,
-            ignored: 'campaign_trigger_reserved',
-            lead_id: triggerRow.lead_id,
-          }
-        }
-      }
-    }
-  }
 
   // HARD LOCK: progresso ZapVoice (active ou aguardando último envio), sempre no mesmo user_id.
   const { count: progCount, error: progErr } = await supabase
