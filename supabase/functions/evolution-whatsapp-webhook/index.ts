@@ -792,17 +792,20 @@ serve(async (req) => {
       }
       if (b64 && geminiKey) {
         const tw = await transcribeAudioGemini(geminiKey, b64, media.mimeType)
-        if (tw.text) {
-          audioTranscript = tw.text
-          replyText = `[Áudio Transcrito]: ${tw.text}`
+        if (tw.ok) {
+          audioTranscript = tw.transcript
+          replyText = `[Áudio Transcrito]: ${tw.transcript}`
         } else {
-          replyText = '[Áudio não transcrito devido a erro técnico]'
+          replyText = tw.chatMessage
         }
       } else {
-        if (!geminiKey && b64) {
+        if (!b64) {
+          replyText =
+            '[Erro: sem base64 de áudio (ative webhookBase64 e/ou getBase64 na Evolution)]'
+        } else if (!geminiKey) {
           console.warn('[Zapifica] GEMINI_API_KEY ausente; não dá para transcrever o áudio.')
+          replyText = '[Erro: GEMINI_API_KEY não configurada]'
         }
-        replyText = '[Áudio não transcrito devido a erro técnico]'
       }
     }
 

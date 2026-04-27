@@ -183,15 +183,21 @@ function bytesFromBase64(base64: string): Uint8Array {
 }
 
 const GEMINI_MODEL = 'gemini-1.5-flash'
+/** PTT / áudio WhatsApp — Gemini costuma aceitar melhor sem codecs na string. */
+const GEMINI_INLINE_AUDIO_MIME = 'audio/ogg'
+
+export type GeminiTranscribeResult =
+  | { ok: true; transcript: string }
+  | { ok: false; chatMessage: string }
 
 export async function transcribeAudioGemini(
   geminiKey: string,
   base64: string,
-  mimeType: string,
-): Promise<{ text: string | null; error: string | null }> {
+  _mimeType: string,
+): Promise<GeminiTranscribeResult> {
   const key = geminiKey.trim()
   if (!key) {
-    return { text: null, error: 'GEMINI_API_KEY ausente' }
+    return { ok: false, chatMessage: '[Erro: GEMINI_API_KEY não configurada]' }
   }
 
   // Gemini exige base64 cru. A Evolution às vezes manda Data URI:
@@ -202,12 +208,18 @@ export async function transcribeAudioGemini(
     .replace(/\s/g, '')
 
   if (!cleanBase64) {
-    return { text: null, error: 'base64 vazio após limpeza' }
+    return {
+      ok: false,
+      chatMessage:
+        '[Erro: Áudio vazio ou Base64 inválido vindo da Evolution]',
+    }
   }
 
-  const mt = (
-    (mimeType || 'audio/ogg').split(';')[0]?.trim() || 'audio/ogg'
-  ).toLowerCase()
+  // Padding exigido por decoders/base64 estritos (Gemini)
+  let finalBase64 = cleanBase64
+  while (finalBase64.length % 4 !== 0) {
+    finalBase64 += '='
+  }
 
   const url =
     `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=` +
@@ -218,7 +230,7 @@ export async function transcribeAudioGemini(
     'Retorne APENAS o texto exato do que foi falado, sem explicações adicionais.'
 
   try {
-    const res = await fetch(url, {
+    const response = await fetch(url, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -226,17 +238,26 @@ export async function transcribeAudioGemini(
           {
             parts: [
               { text: prompt },
-              { inline_data: { mime_type: mt, data: cleanBase64 } },
+              {
+                inline_data: {
+                  mime_type: GEMINI_INLINE_AUDIO_MIME,
+                  data: finalBase64,
+                },
+              },
             ],
           },
         ],
       }),
     })
 
-    const raw = await res.text()
-    if (!res.ok) {
-      console.error('Erro na API do Gemini:', res.status, raw)
-      return { text: null, error: `Gemini ${res.status}: ${raw.slice(0, 600)}` }
+    const raw = await response.text()
+    if (!response.ok) {
+      const errText = raw
+      console.error('Erro na API do Gemini:', response.status, errText)
+      return {
+        ok: false,
+        chatMessage: `[Erro Gemini Status ${response.status}: ${errText.substring(0, 150)}]`,
+      }
     }
 
     let out: string | null = null
@@ -253,17 +274,21 @@ export async function transcribeAudioGemini(
 
     if (!out) {
       console.error('Erro na API do Gemini: resposta sem texto', {
-        mimeType: mt,
-        base64Len: cleanBase64.length,
+        mimeType: GEMINI_INLINE_AUDIO_MIME,
+        base64Len: finalBase64.length,
         raw: raw.slice(0, 600),
       })
-      return { text: null, error: 'resposta vazia' }
+      return {
+        ok: false,
+        chatMessage: `[Erro Gemini: resposta sem texto. ${raw.substring(0, 150)}]`,
+      }
     }
 
-    return { text: out, error: null }
+    return { ok: true, transcript: out }
   } catch (error) {
     console.error('Erro no try/catch do Gemini:', error)
-    return { text: null, error: error instanceof Error ? error.message : String(error) }
+    const msg = error instanceof Error ? error.message : String(error)
+    return { ok: false, chatMessage: `[Erro de Código: ${msg}]` }
   }
 }
 
