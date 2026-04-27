@@ -19,9 +19,11 @@ import {
   LayoutGrid,
   ListTodo,
   Loader2,
+  Copy,
   Megaphone,
   MessageSquare,
   Mic,
+  Pencil,
   Pause,
   Play,
   Plus,
@@ -448,6 +450,11 @@ export function ZapVoiceCampaignsPage() {
     [selected],
   )
 
+  const selectedFlow = useMemo(
+    () => flows.find((f) => f.id === selectedFlowId) ?? null,
+    [flows, selectedFlowId],
+  )
+
   const activeCampaigns = useMemo(
     () =>
       campaigns.filter(
@@ -851,6 +858,135 @@ export function ZapVoiceCampaignsPage() {
     setSuccess('Fluxo criado. Adicione etapas abaixo.')
     window.setTimeout(() => setSuccess(null), 4000)
   }, [userId])
+
+  const openFlowForEdit = useCallback((flowId: string) => {
+    setSelectedFlowId(flowId)
+    setVoiceSubTab('fluxos')
+  }, [])
+
+  const renameFlow = useCallback(
+    async (f: ZvFlow) => {
+      const name = window.prompt('Nome do fluxo:', f.name)?.trim()
+      if (!name) return
+      setError(null)
+      const { error: e } = await supabase.from('zv_flows').update({ name }).eq('id', f.id)
+      if (e) {
+        setError(`Falha ao renomear o fluxo: ${e.message}`)
+        return
+      }
+      setFlows((prev) => prev.map((x) => (x.id === f.id ? { ...x, name } : x)))
+      setSuccess('Fluxo atualizado.')
+      window.setTimeout(() => setSuccess(null), 3000)
+    },
+    [],
+  )
+
+  const duplicateFlow = useCallback(
+    async (f: ZvFlow) => {
+      if (!userId) {
+        setError('Sessão inválida.')
+        return
+      }
+      setError(null)
+      const base = `Cópia de ${f.name}`.trim()
+      const newName = base.slice(0, 200)
+      const { data: ins, error: insE } = await supabase
+        .from('zv_flows')
+        .insert({
+          user_id: userId,
+          name: newName,
+          description: f.description ?? null,
+        })
+        .select('id, user_id, name, description, created_at, updated_at')
+        .single()
+      if (insE || !ins) {
+        setError(insE?.message ?? 'Falha ao duplicar o fluxo.')
+        return
+      }
+      const newFlow = ins as ZvFlow
+        const { data: oldSteps, error: stE } = await supabase
+        .from('zv_funnels')
+        .select(
+          'step_order, message, media_type, media_url, delay_seconds, expected_trigger, advance_type, min_delay_seconds, max_delay_seconds',
+        )
+        .eq('flow_id', f.id)
+        .order('step_order', { ascending: true })
+      if (stE) {
+        await supabase.from('zv_flows').delete().eq('id', newFlow.id)
+        setError(`Falha ao ler etapas: ${stE.message}`)
+        return
+      }
+      if (oldSteps && oldSteps.length > 0) {
+        const rows = (oldSteps as {
+          step_order: number
+          message: string
+          media_type: FunnelMediaType
+          media_url: string | null
+          delay_seconds: number
+          expected_trigger: string | null
+          advance_type: string | null
+          min_delay_seconds: number | null
+          max_delay_seconds: number | null
+        }[]).map((s) => ({
+            flow_id: newFlow.id,
+            step_order: s.step_order,
+            message: s.message,
+            media_type: s.media_type,
+            media_url: s.media_url,
+            delay_seconds: s.delay_seconds,
+            expected_trigger: s.expected_trigger,
+            advance_type: s.advance_type,
+            min_delay_seconds: s.min_delay_seconds,
+            max_delay_seconds: s.max_delay_seconds,
+          }),
+        )
+        const { error: inStepE } = await supabase.from('zv_funnels').insert(rows)
+        if (inStepE) {
+          await supabase.from('zv_flows').delete().eq('id', newFlow.id)
+          setError(`Falha ao copiar etapas: ${inStepE.message}`)
+          return
+        }
+      }
+      setFlows((prev) => [newFlow, ...prev])
+      setSelectedFlowId(newFlow.id)
+      setVoiceSubTab('fluxos')
+      setSuccess('Fluxo duplicado. Revise o nome e as etapas à direita.')
+      window.setTimeout(() => setSuccess(null), 5000)
+    },
+    [userId],
+  )
+
+  const deleteFlow = useCallback(
+    async (f: ZvFlow) => {
+      setError(null)
+      const n = (campaigns as Campaign[]).filter((c) => c.flow_id === f.id).length
+      if (n > 0) {
+        setError(
+          `Não é possível excluir: ${n} campanha(s) usam este fluxo. Na guia Campanhas, vincule outro fluxo a cada campanha (ou exclua a campanha) e tente de novo.`,
+        )
+        return
+      }
+      if (
+        !window.confirm(
+          `Excluir o fluxo "${f.name}"? As etapas serão apagadas junto. Esta ação não pode ser desfeita.`,
+        )
+      ) {
+        return
+      }
+      const { error: e } = await supabase.from('zv_flows').delete().eq('id', f.id)
+      if (e) {
+        setError(`Falha ao excluir o fluxo: ${e.message}`)
+        return
+      }
+      setFlows((prev) => prev.filter((x) => x.id !== f.id))
+      if (selectedFlowId === f.id) {
+        setSelectedFlowId(null)
+      }
+      setSuccess('Fluxo excluído.')
+      window.setTimeout(() => setSuccess(null), 4000)
+    },
+    [campaigns, selectedFlowId],
+  )
 
   /** Remove agendamentos pendentes desta campanha (re-ativação sem duplicar). */
   const clearPendingForCampaign = useCallback(
@@ -1487,18 +1623,54 @@ export function ZapVoiceCampaignsPage() {
                 {flows.map((f) => {
                   const active = f.id === selectedFlowId
                   return (
-                    <button
+                    <div
                       key={f.id}
-                      type="button"
-                      onClick={() => setSelectedFlowId(f.id)}
-                      className={`w-full rounded-lg border px-3 py-2 text-left text-sm transition ${
+                      className={`flex w-full min-w-0 items-stretch gap-0.5 overflow-hidden rounded-lg border text-sm transition ${
                         active
                           ? 'border-brand-300 bg-brand-50/80 text-brand-900'
                           : 'border-zinc-200 bg-white text-zinc-800 hover:border-brand-200'
                       }`}
                     >
-                      {f.name}
-                    </button>
+                      <button
+                        type="button"
+                        onClick={() => openFlowForEdit(f.id)}
+                        className="min-w-0 flex-1 px-2.5 py-2 text-left font-medium"
+                      >
+                        <span className="line-clamp-2 break-words">{f.name}</span>
+                      </button>
+                      <div
+                        className="flex shrink-0 flex-col justify-center gap-0.5 border-l border-zinc-200/70 bg-white/50 py-0.5 pr-0.5 pl-0.5"
+                        onClick={(e) => e.stopPropagation()}
+                        onKeyDown={(e) => e.stopPropagation()}
+                      >
+                        <div className="flex items-center gap-0.5">
+                          <button
+                            type="button"
+                            onClick={() => openFlowForEdit(f.id)}
+                            className="inline-flex h-7 w-7 items-center justify-center rounded-md text-zinc-500 transition hover:bg-brand-100 hover:text-brand-800"
+                            title="Editar etapas (abre o fluxo à direita)"
+                          >
+                            <Pencil className="h-3.5 w-3.5" aria-hidden />
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => void duplicateFlow(f)}
+                            className="inline-flex h-7 w-7 items-center justify-center rounded-md text-zinc-500 transition hover:bg-brand-100 hover:text-brand-800"
+                            title="Duplicar fluxo"
+                          >
+                            <Copy className="h-3.5 w-3.5" aria-hidden />
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => void deleteFlow(f)}
+                            className="inline-flex h-7 w-7 items-center justify-center rounded-md text-rose-500 transition hover:bg-rose-50"
+                            title="Excluir fluxo"
+                          >
+                            <Trash2 className="h-3.5 w-3.5" aria-hidden />
+                          </button>
+                        </div>
+                      </div>
+                    </div>
                   )
                 })}
                 {flows.length === 0 ? (
@@ -2082,9 +2254,17 @@ export function ZapVoiceCampaignsPage() {
               <div className="rounded-2xl border border-zinc-200/90 bg-white p-5 shadow-sm ring-1 ring-zinc-100/80">
                 <div className="mb-4 flex items-end justify-between gap-3">
                   <div>
-                    <h3 className="text-base font-semibold text-zinc-900">
-                      Fluxo:{' '}
-                      {flows.find((f) => f.id === selectedFlowId)?.name ?? '—'}
+                    <h3 className="flex flex-wrap items-center gap-2 text-base font-semibold text-zinc-900">
+                      <span>Fluxo: {selectedFlow?.name ?? '—'}</span>
+                      {selectedFlow ? (
+                        <button
+                          type="button"
+                          onClick={() => void renameFlow(selectedFlow)}
+                          className="text-xs font-semibold text-brand-700 underline decoration-brand-300 underline-offset-2 transition hover:text-brand-900"
+                        >
+                          Renomear
+                        </button>
+                      ) : null}
                     </h3>
                     <p className="mt-0.5 text-xs text-zinc-500">
                       Cada etapa é uma mensagem WhatsApp na ordem do roteiro. Use os botões de
@@ -2340,11 +2520,11 @@ function StepCard({
       setLocalError('Informe a URL da mídia ou faça upload (tipos de imagem, vídeo, áudio e arquivo exigem link público).')
       return
     }
-    if (advanceType === 'exact' && index !== 1 && !trigger.trim()) {
+    if (advanceType === 'exact' && !trigger.trim()) {
       setLocalError('Para “gatilho exato”, preencha o Gatilho esperado.')
       return
     }
-    if (advanceType === 'timer' && index !== 1) {
+    if (advanceType === 'timer') {
       if (!Number.isFinite(stepMinDelay) || !Number.isFinite(stepMaxDelay)) {
         setLocalError('Delay mínimo/máximo inválido.')
         return
@@ -2354,20 +2534,15 @@ function StepCard({
         return
       }
     }
-    if (index === 1) {
-      // Passo 1 sempre depende do gatilho da campanha; não usa advance_type/expected_trigger do step.
-      setAdvanceType('auto')
-      setTrigger('')
-    }
     onSave({
       message,
       media_type: mediaType,
       media_url: mediaType === 'text' ? null : mediaUrl.trim() || null,
       delay_seconds: delaySeconds,
-      expected_trigger: index === 1 ? null : trigger.trim() || null,
-      advance_type: index === 1 ? 'auto' : advanceType,
-      min_delay_seconds: index === 1 ? null : advanceType === 'timer' ? stepMinDelay : null,
-      max_delay_seconds: index === 1 ? null : advanceType === 'timer' ? stepMaxDelay : null,
+      expected_trigger: trigger.trim() || null,
+      advance_type: advanceType,
+      min_delay_seconds: advanceType === 'timer' ? stepMinDelay : null,
+      max_delay_seconds: advanceType === 'timer' ? stepMaxDelay : null,
     })
   }
 
@@ -2379,7 +2554,7 @@ function StepCard({
             {index}
           </span>
           <span className="text-sm font-semibold text-zinc-800">
-            {index === 1 ? 'Mensagem inicial' : `Etapa ${index}`}
+            Etapa {String(index).padStart(2, '0')}
           </span>
           {saving ? (
             <span className="inline-flex items-center gap-1 text-[10px] font-medium text-brand-700">
@@ -2569,133 +2744,108 @@ function StepCard({
             </div>
             <p className="mt-1 text-[10px] text-zinc-500">
               {index === 1
-                ? '0 = manda assim que iniciar a campanha.'
-                : 'Tempo desde a etapa anterior.'}
+                ? 'Atraso após a confirmação do gatilho da campanha, antes de enfileirar esta etapa. Use 0 para o menor atraso possível.'
+                : 'Tempo decorrido desde a etapa anterior (enviada e processada).'}
             </p>
           </div>
 
-          {index === 1 ? (
-            <div className="rounded-xl border border-zinc-200 bg-zinc-50/60 p-3">
-              <p className="text-[11px] font-semibold uppercase tracking-wider text-zinc-500">
-                Tipo de avanço
-              </p>
-              <p className="mt-1 text-[11px] text-zinc-600">
-                A 1ª etapa sempre exige a palavra-chave exata do gatilho da campanha.
-              </p>
-            </div>
-          ) : (
-            <div className="rounded-xl border border-zinc-200 bg-zinc-50/60 p-3">
-              <p className="text-[11px] font-semibold uppercase tracking-wider text-zinc-500">
-                Tipo de avanço
-              </p>
-              <div className="mt-2 grid gap-2">
-                <label className="flex cursor-pointer items-center gap-2 text-sm text-zinc-700">
-                  <input
-                    type="radio"
-                    name={`advance-${step.id}`}
-                    checked={advanceType === 'auto'}
-                    onChange={() => setAdvanceType('auto')}
-                  />
-                  <span>
-                    Avanço automático (qualquer resposta)
-                  </span>
-                </label>
-                <label className="flex cursor-pointer items-center gap-2 text-sm text-zinc-700">
-                  <input
-                    type="radio"
-                    name={`advance-${step.id}`}
-                    checked={advanceType === 'exact'}
-                    onChange={() => setAdvanceType('exact')}
-                  />
-                  <span>
-                    Avanço por gatilho exato
-                  </span>
-                </label>
-                <label className="flex cursor-pointer items-center gap-2 text-sm text-zinc-700">
-                  <input
-                    type="radio"
-                    name={`advance-${step.id}`}
-                    checked={advanceType === 'timer'}
-                    onChange={() => setAdvanceType('timer')}
-                  />
-                  <span>
-                    Temporizado (sem aguardar resposta)
-                  </span>
-                </label>
-              </div>
-              {advanceType === 'timer' ? (
-                <div className="mt-3 grid grid-cols-2 gap-2">
-                  <div>
-                    <p className="text-[10px] font-semibold uppercase tracking-wider text-zinc-500">
-                      Delay Mín (s)
-                    </p>
-                    <input
-                      type="number"
-                      min={0}
-                      value={stepMinDelay}
-                      onChange={(e) => {
-                        const v = Math.max(0, Number(e.target.value) || 0)
-                        setStepMinDelay(v)
-                        setStepMaxDelay((prev) => Math.max(prev, v))
-                      }}
-                      className="mt-1 w-full rounded-lg border border-zinc-200 bg-white px-2.5 py-2 text-sm tabular-nums shadow-inner focus:border-brand-300 focus:outline-none focus:ring-2 focus:ring-brand-500/20"
-                    />
-                  </div>
-                  <div>
-                    <p className="text-[10px] font-semibold uppercase tracking-wider text-zinc-500">
-                      Delay Máx (s)
-                    </p>
-                    <input
-                      type="number"
-                      min={0}
-                      value={stepMaxDelay}
-                      onChange={(e) => setStepMaxDelay(Math.max(0, Number(e.target.value) || 0))}
-                      className="mt-1 w-full rounded-lg border border-zinc-200 bg-white px-2.5 py-2 text-sm tabular-nums shadow-inner focus:border-brand-300 focus:outline-none focus:ring-2 focus:ring-brand-500/20"
-                    />
-                  </div>
-                  <p className="col-span-2 mt-1 text-[11px] text-zinc-600">
-                    Essa etapa será enfileirada automaticamente assim que a etapa anterior for enviada.
-                  </p>
-                </div>
-              ) : advanceType === 'exact' ? (
-                <p className="mt-2 text-[11px] text-zinc-600">
-                  Preencha o campo <b>Gatilho esperado</b> abaixo. O lead precisa digitar exatamente essa palavra/frase.
-                </p>
-              ) : (
-                <p className="mt-2 text-[11px] text-zinc-600">
-                  O lead avança assim que responder qualquer coisa (texto/legenda/transcrição).
-                </p>
-              )}
-            </div>
-          )}
-
-          {index !== 1 ? (
-            <div>
-              <label className="mb-1.5 flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wider text-zinc-500">
-                <Sparkles className="h-3 w-3" aria-hidden />
-                Gatilho esperado
-              </label>
-              <input
-                value={trigger}
-                onChange={(e) => setTrigger(e.target.value)}
-                placeholder="Quero, Saber mais"
-                className="w-full rounded-lg border border-zinc-200 bg-white px-2.5 py-2 text-sm shadow-inner focus:border-brand-300 focus:outline-none focus:ring-2 focus:ring-brand-500/20"
-              />
-              <p className="mt-1 text-[10px] text-zinc-500">
-                {advanceType === 'exact'
-                  ? 'Obrigatório quando o Tipo de avanço é “gatilho exato”.'
-                  : advanceType === 'timer'
-                    ? 'Não se aplica no modo temporizado.'
-                    : 'Opcional (não é usado no avanço automático).'}
-              </p>
-            </div>
-          ) : (
-            <p className="text-[10px] text-zinc-500">
-              O gatilho após a isca fica no bloco <b>Gatilho (palavra-chave após a isca)</b> do
-              cabeçalho da campanha — não use este cartão para isso, para não conflitar com o
-              salvamento.
+          <div className="rounded-xl border border-zinc-200 bg-zinc-50/60 p-3">
+            <p className="text-[11px] font-semibold uppercase tracking-wider text-zinc-500">
+              Tipo de avanço
             </p>
-          )}
+            <div className="mt-2 grid gap-2">
+              <label className="flex cursor-pointer items-center gap-2 text-sm text-zinc-700">
+                <input
+                  type="radio"
+                  name={`advance-${step.id}`}
+                  checked={advanceType === 'auto'}
+                  onChange={() => setAdvanceType('auto')}
+                />
+                <span>Avanço automático (qualquer resposta)</span>
+              </label>
+              <label className="flex cursor-pointer items-center gap-2 text-sm text-zinc-700">
+                <input
+                  type="radio"
+                  name={`advance-${step.id}`}
+                  checked={advanceType === 'exact'}
+                  onChange={() => setAdvanceType('exact')}
+                />
+                <span>Avanço por gatilho exato</span>
+              </label>
+              <label className="flex cursor-pointer items-center gap-2 text-sm text-zinc-700">
+                <input
+                  type="radio"
+                  name={`advance-${step.id}`}
+                  checked={advanceType === 'timer'}
+                  onChange={() => setAdvanceType('timer')}
+                />
+                <span>Temporizado (sem aguardar resposta)</span>
+              </label>
+            </div>
+            {advanceType === 'timer' ? (
+              <div className="mt-3 grid grid-cols-2 gap-2">
+                <div>
+                  <p className="text-[10px] font-semibold uppercase tracking-wider text-zinc-500">
+                    Delay Mín (s)
+                  </p>
+                  <input
+                    type="number"
+                    min={0}
+                    value={stepMinDelay}
+                    onChange={(e) => {
+                      const v = Math.max(0, Number(e.target.value) || 0)
+                      setStepMinDelay(v)
+                      setStepMaxDelay((prev) => Math.max(prev, v))
+                    }}
+                    className="mt-1 w-full rounded-lg border border-zinc-200 bg-white px-2.5 py-2 text-sm tabular-nums shadow-inner focus:border-brand-300 focus:outline-none focus:ring-2 focus:ring-brand-500/20"
+                  />
+                </div>
+                <div>
+                  <p className="text-[10px] font-semibold uppercase tracking-wider text-zinc-500">
+                    Delay Máx (s)
+                  </p>
+                  <input
+                    type="number"
+                    min={0}
+                    value={stepMaxDelay}
+                    onChange={(e) => setStepMaxDelay(Math.max(0, Number(e.target.value) || 0))}
+                    className="mt-1 w-full rounded-lg border border-zinc-200 bg-white px-2.5 py-2 text-sm tabular-nums shadow-inner focus:border-brand-300 focus:outline-none focus:ring-2 focus:ring-brand-500/20"
+                  />
+                </div>
+                <p className="col-span-2 mt-1 text-[11px] text-zinc-600">
+                  Essa etapa será enfileirada automaticamente assim que a etapa anterior for enviada.
+                </p>
+              </div>
+            ) : advanceType === 'exact' ? (
+              <p className="mt-2 text-[11px] text-zinc-600">
+                Preencha o campo <b>Gatilho esperado</b> abaixo. O lead precisa digitar exatamente essa palavra/frase.
+              </p>
+            ) : (
+              <p className="mt-2 text-[11px] text-zinc-600">
+                O lead avança assim que responder qualquer coisa (texto/legenda/transcrição).
+              </p>
+            )}
+          </div>
+
+          <div>
+            <label className="mb-1.5 flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wider text-zinc-500">
+              <Sparkles className="h-3 w-3" aria-hidden />
+              Gatilho esperado
+            </label>
+            <input
+              value={trigger}
+              onChange={(e) => setTrigger(e.target.value)}
+              placeholder="Quero, Saber mais"
+              className="w-full rounded-lg border border-zinc-200 bg-white px-2.5 py-2 text-sm shadow-inner focus:border-brand-300 focus:outline-none focus:ring-2 focus:ring-brand-500/20"
+            />
+            <p className="mt-1 text-[10px] text-zinc-500">
+              {advanceType === 'exact'
+                ? 'Obrigatório quando o Tipo de avanço é “gatilho exato”.'
+                : advanceType === 'timer'
+                  ? 'Não se aplica no modo temporizado.'
+                  : 'Opcional (não é usado no avanço automático).'}
+            </p>
+          </div>
 
           <button
             type="button"

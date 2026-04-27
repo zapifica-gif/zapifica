@@ -148,10 +148,6 @@ async function handleActiveCampaignProgress(
       return { enqueued: false, reason: 'fluxo_vazio', campaignId: progress.campaign_id, suppressAi: true }
     }
 
-    if (!triggerConditionSatisfied(cond, messageNorm, camp.trigger_keyword ?? '')) {
-      return { enqueued: false, reason: 'gatilho_nao_bateu', campaignId: progress.campaign_id, suppressAi: true }
-    }
-
     const { data: firstStep, error: s1Err } = await p.supabase
       .from('zv_funnels')
       .select(
@@ -169,6 +165,17 @@ async function handleActiveCampaignProgress(
       return { enqueued: false, reason: 'sem_proximo_passo', campaignId: progress.campaign_id, suppressAi: true }
     }
 
+    // Etapa 1: não revalida o gatilho da campanha (evita exigir a mesma palavra 2x). Só a etapa
+    // configura o avanço: auto, exact ou timer (timer enfileira sem depender de nova digitação).
+    const step = firstStep as FunnelRow
+    const adv = (step.advance_type ?? 'auto') as 'auto' | 'exact' | 'timer'
+    if (adv === 'exact') {
+      const expectedNorm = normText(step.expected_trigger ?? '')
+      if (!expectedNorm || messageNorm !== expectedNorm) {
+        return { enqueued: false, reason: 'gatilho_nao_bateu', campaignId: progress.campaign_id, suppressAi: true }
+      }
+    }
+
     return await enqueueFunnelStepAndAdvance({
       supabase: p.supabase,
       userId: p.userId,
@@ -176,7 +183,7 @@ async function handleActiveCampaignProgress(
       phoneDigits: p.phoneDigits,
       instanceName: p.instanceName,
       progress,
-      step: firstStep as FunnelRow,
+      step,
       campMin: camp.min_delay_seconds,
       campMax: camp.max_delay_seconds,
     })
@@ -373,7 +380,9 @@ export async function processZapVoiceInbound(
 
   const { data: stepsRaw, error: sErr } = await p.supabase
     .from('zv_funnels')
-    .select('id, step_order, message, media_type, media_url, delay_seconds, advance_type, expected_trigger')
+    .select(
+      'id, step_order, message, media_type, media_url, delay_seconds, advance_type, expected_trigger, min_delay_seconds, max_delay_seconds',
+    )
     .eq('flow_id', matched.flow_id)
     .order('step_order', { ascending: true })
 
@@ -477,16 +486,57 @@ export async function processZapVoiceInbound(
 
   const totalSteps = ordered.length
   if (totalSteps > 0) {
-    const progIns = await p.supabase.from('lead_campaign_progress').insert({
-      user_id: p.userId,
-      lead_id: p.leadId,
-      campaign_id: matched.id,
-      next_step_order: 1,
-      total_steps: totalSteps,
-      status: 'active',
-    })
+    const progIns = await p.supabase
+      .from('lead_campaign_progress')
+      .insert({
+        user_id: p.userId,
+        lead_id: p.leadId,
+        campaign_id: matched.id,
+        next_step_order: 1,
+        total_steps: totalSteps,
+        status: 'active',
+      })
+      .select('id, campaign_id, next_step_order, total_steps')
+      .single()
     if (progIns.error) {
       console.error('[ZapVoice inbound] progress insert', progIns.error.message)
+    } else if (progIns.data) {
+      // Mesma resposta do lead já bateu o gatilho da campanha: enfileira a etapa 1 do fluxo agora
+      // (sem exigir que ele digite o gatilho de novo em handleActiveCampaignProgress com next=1).
+      const pr = progIns.data as {
+        id: string
+        campaign_id: string
+        next_step_order: number
+        total_steps: number
+      }
+      const first = ordered[0] as FunnelRow
+      const enq1 = await enqueueFunnelStepAndAdvance({
+        supabase: p.supabase,
+        userId: p.userId,
+        leadId: p.leadId,
+        phoneDigits: p.phoneDigits,
+        instanceName: p.instanceName,
+        progress: {
+          id: pr.id,
+          campaign_id: pr.campaign_id,
+          next_step_order: pr.next_step_order,
+          total_steps: pr.total_steps,
+        },
+        step: first,
+        campMin: matched.min_delay_seconds,
+        campMax: matched.max_delay_seconds,
+      })
+      if (!enq1.enqueued) {
+        console.warn(
+          '[ZapVoice inbound] cold: progress criado, mas etapa 1 não enfileirada',
+          enq1.reason,
+        )
+      } else {
+        console.log(
+          '[ZapVoice inbound] cold: isca + progresso + etapa 1 (gatilho campanha validado 1x)',
+          { campaignId: matched.id, leadId: p.leadId },
+        )
+      }
     }
   }
 
@@ -543,8 +593,14 @@ async function enqueueFunnelStepAndAdvance(p: {
     recipient_phone: p.phoneDigits,
     event_id: null,
     evolution_instance_name: p.instanceName,
-    min_delay_seconds: p.campMin ?? null,
-    max_delay_seconds: p.campMax ?? null,
+    min_delay_seconds:
+      typeof p.step.min_delay_seconds === 'number'
+        ? p.step.min_delay_seconds
+        : p.campMin ?? null,
+    max_delay_seconds:
+      typeof p.step.max_delay_seconds === 'number'
+        ? p.step.max_delay_seconds
+        : p.campMax ?? null,
   })
   if (ins.error) {
     console.error('[ZapVoice inbound] enqueue next', ins.error.message)
