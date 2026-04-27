@@ -19,6 +19,8 @@ type CampaignRow = {
   name: string
   audience_tags: string[] | null
   inbound_triggers: string[] | null
+  /** Palavra-chave mestre após a isca (avanço para o passo 2). */
+  trigger_keyword?: string | null
   scheduled_start_at: string | null
   min_delay_seconds?: number | null
   max_delay_seconds?: number | null
@@ -45,6 +47,15 @@ function anyTriggerMatches(messageNorm: string, triggers: string[] | null): bool
     if (triggerMatchesMessage(messageNorm, tr)) return true
   }
   return false
+}
+
+/** Inscrição no funil via anúncio: frases no array OU palavra-chave mestre (mesmo texto da pós-isca). */
+function campaignInboundKeywordMatches(
+  messageNorm: string,
+  c: Pick<CampaignRow, 'inbound_triggers' | 'trigger_keyword'>,
+): boolean {
+  if (anyTriggerMatches(messageNorm, c.inbound_triggers)) return true
+  return triggerMatchesMessage(messageNorm, c.trigger_keyword ?? '')
 }
 
 function firstNameFromFullName(full: string): string {
@@ -163,28 +174,31 @@ export async function processZapVoiceInbound(
       // Temporizado não avança por mensagem: ele é enfileirado quando a etapa anterior é enviada.
       return { enqueued: false, reason: 'timer_sem_interacao', campaignId: progress.campaign_id, suppressAi: true }
     }
+
+    const { data: camp, error: campErr } = await p.supabase
+      .from('zv_campaigns')
+      .select('id, min_delay_seconds, max_delay_seconds, trigger_keyword')
+      .eq('user_id', p.userId)
+      .eq('id', progress.campaign_id)
+      .maybeSingle()
+    if (campErr) {
+      console.error('[ZapVoice inbound] campaign read', campErr.message)
+    }
+
     // Regra de negócio (sequência Isca -> Gatilho):
-    // A Etapa 2 só avança com GATILHO EXATO, a menos que o tipo seja 'timer'.
+    // Após a isca, o passo 2 (Etapa 2 do funil) só enfileira com o gatilho mestre em `zv_campaigns.trigger_keyword`
+    // (fallback: expected_trigger do passo 2, para compat), salvo 'timer' acima.
     const isStep2 = progress.next_step_order === 2
     const mustBeExact = isStep2 ? true : adv === 'exact'
-    const expectedNorm = normText(step.expected_trigger ?? '')
+    const campKw = normText((camp as { trigger_keyword?: string | null } | null)?.trigger_keyword ?? '')
+    const stepKw = normText(step.expected_trigger ?? '')
+    const expectedNorm = isStep2 ? campKw || stepKw : stepKw
     const allowAdvance = mustBeExact
       ? Boolean(expectedNorm) && messageNorm === expectedNorm
       : true // auto: qualquer texto novo do cliente
 
     if (!allowAdvance) {
       return { enqueued: false, reason: 'gatilho_nao_bateu', campaignId: progress.campaign_id, suppressAi: true }
-    }
-
-    // Carrega campanha (range de delay + barreira de completions)
-    const { data: camp, error: campErr } = await p.supabase
-      .from('zv_campaigns')
-      .select('id, min_delay_seconds, max_delay_seconds')
-      .eq('user_id', p.userId)
-      .eq('id', progress.campaign_id)
-      .maybeSingle()
-    if (campErr) {
-      console.error('[ZapVoice inbound] campaign read', campErr.message)
     }
 
     const nowMs = Date.now()
@@ -242,7 +256,7 @@ export async function processZapVoiceInbound(
   const { data: campaigns, error: cErr } = await p.supabase
     .from('zv_campaigns')
     .select(
-      'id, name, audience_tags, inbound_triggers, scheduled_start_at, min_delay_seconds, max_delay_seconds, created_at',
+      'id, name, audience_tags, inbound_triggers, trigger_keyword, scheduled_start_at, min_delay_seconds, max_delay_seconds, created_at',
     )
     .eq('user_id', p.userId)
     .eq('status', 'active')
@@ -255,7 +269,7 @@ export async function processZapVoiceInbound(
 
   let matched: CampaignRow | null = null
   for (const row of (campaigns ?? []) as CampaignRow[]) {
-    if (anyTriggerMatches(messageNorm, row.inbound_triggers)) {
+    if (campaignInboundKeywordMatches(messageNorm, row)) {
       matched = row
       break
     }

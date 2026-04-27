@@ -54,8 +54,10 @@ type Campaign = {
   audience_tags: string[] | null
   /** Início do funil agendado (futuro); mensagens somam atrasos a partir daqui. */
   scheduled_start_at: string | null
-  /** Frases exatas (Meta Ads / respostas rápidas) — motor de roteamento virá a usar. */
+  /** Frases exatas (Meta Ads) — legado; preferir `trigger_keyword` para a isca. */
   inbound_triggers: string[] | null
+  /** Palavra-chave exata após a isca (avanço para o passo 2). */
+  trigger_keyword: string | null
   status: CampaignStatus
   min_delay_seconds: number
   max_delay_seconds: number
@@ -361,6 +363,7 @@ export function ZapVoiceCampaignsPage() {
   const [newDescription, setNewDescription] = useState('')
   const [newScheduledStartLocal, setNewScheduledStartLocal] = useState('')
   const [newInboundTriggers, setNewInboundTriggers] = useState<string[]>([])
+  const [newTriggerKeyword, setNewTriggerKeyword] = useState('')
   const [creating, setCreating] = useState(false)
   const [historyStats, setHistoryStats] = useState<
     Record<string, { firstAt: string | null; leadCount: number }>
@@ -480,7 +483,7 @@ export function ZapVoiceCampaignsPage() {
     const list = await supabase
       .from('zv_campaigns')
       .select(
-        'id, user_id, name, description, audience_tags, scheduled_start_at, inbound_triggers, status, min_delay_seconds, max_delay_seconds, created_at, updated_at',
+        'id, user_id, name, description, audience_tags, scheduled_start_at, inbound_triggers, trigger_keyword, status, min_delay_seconds, max_delay_seconds, created_at, updated_at',
       )
       .eq('user_id', user.id)
       .order('created_at', { ascending: false })
@@ -495,12 +498,15 @@ export function ZapVoiceCampaignsPage() {
       const c = r as {
         audience_tags?: string[] | null
         inbound_triggers?: string[] | null
+        trigger_keyword?: string | null
         scheduled_start_at?: string | null
       }
+      const kw = (c.trigger_keyword ?? '').trim()
       return {
         ...(r as Campaign),
         audience_tags: normalizeTags(c.audience_tags),
         inbound_triggers: normalizeInboundTriggers(c.inbound_triggers),
+        trigger_keyword: kw || null,
         scheduled_start_at: c.scheduled_start_at ?? null,
       } as Campaign
     })
@@ -630,12 +636,13 @@ export function ZapVoiceCampaignsPage() {
           audience_tags: normalizeTags(newAudienceTags),
           scheduled_start_at: startIso,
           inbound_triggers: normalizeInboundTriggers(newInboundTriggers),
+          trigger_keyword: newTriggerKeyword.trim() || null,
           status: 'draft' as CampaignStatus,
           min_delay_seconds: 2,
           max_delay_seconds: 15,
         })
         .select(
-          'id, user_id, name, description, audience_tags, scheduled_start_at, inbound_triggers, status, min_delay_seconds, max_delay_seconds, created_at, updated_at',
+          'id, user_id, name, description, audience_tags, scheduled_start_at, inbound_triggers, trigger_keyword, status, min_delay_seconds, max_delay_seconds, created_at, updated_at',
         )
         .single()
       if (insert.error || !insert.data) {
@@ -644,12 +651,14 @@ export function ZapVoiceCampaignsPage() {
       const ins = insert.data as {
         audience_tags?: string[] | null
         inbound_triggers?: string[] | null
+        trigger_keyword?: string | null
         scheduled_start_at?: string | null
       }
       const created = {
         ...(insert.data as object),
         audience_tags: normalizeTags(ins.audience_tags),
         inbound_triggers: normalizeInboundTriggers(ins.inbound_triggers),
+        trigger_keyword: ins.trigger_keyword?.trim() ? ins.trigger_keyword.trim() : null,
         scheduled_start_at: ins.scheduled_start_at ?? null,
       } as Campaign
 
@@ -673,6 +682,7 @@ export function ZapVoiceCampaignsPage() {
       setNewDescription('')
       setNewScheduledStartLocal('')
       setNewInboundTriggers([])
+      setNewTriggerKeyword('')
       setSuccess('Campanha criada. Agora monte o roteiro de mensagens.')
       window.setTimeout(() => setSuccess(null), 5000)
     } catch (e) {
@@ -680,7 +690,7 @@ export function ZapVoiceCampaignsPage() {
     } finally {
       setCreating(false)
     }
-  }, [newName, newDescription, newAudienceTags, newScheduledStartLocal, newInboundTriggers, userId])
+  }, [newName, newDescription, newAudienceTags, newScheduledStartLocal, newInboundTriggers, newTriggerKeyword, userId])
 
   const updateCampaign = useCallback(
     async (id: string, patch: Partial<Campaign>) => {
@@ -1094,7 +1104,14 @@ export function ZapVoiceCampaignsPage() {
       patch: Partial<
         Pick<
           FunnelStep,
-          'message' | 'media_type' | 'media_url' | 'delay_seconds' | 'expected_trigger' | 'advance_type'
+          | 'message'
+          | 'media_type'
+          | 'media_url'
+          | 'delay_seconds'
+          | 'expected_trigger'
+          | 'advance_type'
+          | 'min_delay_seconds'
+          | 'max_delay_seconds'
         >
       >,
     ) => {
@@ -1343,13 +1360,29 @@ export function ZapVoiceCampaignsPage() {
               </div>
 
               <div>
+                <label className="mb-1 block text-xs font-medium text-zinc-700">
+                  Gatilho (resposta exata após a isca)
+                </label>
+                <input
+                  value={newTriggerKeyword}
+                  onChange={(e) => setNewTriggerKeyword(e.target.value)}
+                  placeholder="Ex.: QUERO, SIM, CUPOM10"
+                  className="w-full rounded-lg border border-zinc-200 bg-white px-3 py-2 text-sm shadow-inner focus:border-brand-300 focus:outline-none focus:ring-2 focus:ring-brand-500/20"
+                />
+                <p className="mt-1 text-[11px] text-zinc-500">
+                  O lead precisa digitar isso (sem ser outra frase) para o funil avançar do passo 1
+                  (isca) para o passo 2. Você pode editar depois no cabeçalho da campanha.
+                </p>
+              </div>
+
+              <div>
                 <p className="mb-1 text-xs font-medium text-zinc-700">
-                  Gatilhos de entrada (Meta Ads)
+                  Frases extra de entrada (Meta Ads, opcional)
                 </p>
                 <PhraseChipsInput
                   value={newInboundTriggers}
                   onChange={setNewInboundTriggers}
-                  help="Se um lead enviar uma destas mensagens exatas (vindas do seu anúncio), ele entrará automaticamente neste funil. (A automação de roteamento no WhatsApp entra em uma próxima etapa de backend.)"
+                  help="Mensagens exatas adicionais que colocam o lead no funil (anúncio). O gatilho principal após a isca é o campo acima."
                 />
               </div>
 
@@ -1689,8 +1722,38 @@ export function ZapVoiceCampaignsPage() {
                     </p>
                   </div>
                   <div>
+                    <label className="mb-1 block text-xs font-medium text-zinc-700">
+                      Gatilho (palavra-chave após a isca)
+                    </label>
+                    <input
+                      value={selected.trigger_keyword ?? ''}
+                      onChange={(e) => {
+                        const v = e.target.value
+                        setCampaigns((prev) =>
+                          prev.map((c) =>
+                            c.id === selected.id ? { ...c, trigger_keyword: v || null } : c,
+                          ),
+                        )
+                      }}
+                      onBlur={(e) => {
+                        const t = e.target.value.trim() || null
+                        setCampaigns((prev) =>
+                          prev.map((c) => (c.id === selected.id ? { ...c, trigger_keyword: t } : c)),
+                        )
+                        void updateCampaign(selected.id, { trigger_keyword: t })
+                      }}
+                      placeholder="Ex.: QUERO, CUPOM, SIM"
+                      className="w-full max-w-md rounded-lg border border-zinc-200 bg-white px-3 py-2 text-sm shadow-inner focus:border-brand-300 focus:outline-none focus:ring-2 focus:ring-brand-500/20"
+                    />
+                    <p className="mt-1 text-[11px] text-zinc-500">
+                      Depois que a <b>Mensagem inicial</b> (isca) for enviada, o lead precisa
+                      responder com exatamente este texto (normalizado: minúsculas, sem espaços
+                      duplicados) para o sistema enfileirar a próxima etapa do funil.
+                    </p>
+                  </div>
+                  <div>
                     <h4 className="mb-1 text-xs font-semibold text-zinc-800">
-                      Gatilhos de entrada (Meta Ads)
+                      Frases extra de entrada (Meta Ads, opcional)
                     </h4>
                     <PhraseChipsInput
                       value={normalizeInboundTriggers(selected.inbound_triggers)}
@@ -1702,7 +1765,7 @@ export function ZapVoiceCampaignsPage() {
                         )
                         void updateCampaign(selected.id, { inbound_triggers: next })
                       }}
-                      help="Se um lead enviar uma destas mensagens exatas (vindas do seu anúncio), ele entrará automaticamente neste funil."
+                      help="Mensagens exatas adicionais para entrar no funil pelo anúncio. O gatilho pós-isca é o campo acima."
                     />
                   </div>
                 </div>
@@ -1862,7 +1925,14 @@ type StepCardProps = {
     patch: Partial<
       Pick<
         FunnelStep,
-        'message' | 'media_type' | 'media_url' | 'delay_seconds' | 'expected_trigger' | 'advance_type'
+        | 'message'
+        | 'media_type'
+        | 'media_url'
+        | 'delay_seconds'
+        | 'expected_trigger'
+        | 'advance_type'
+        | 'min_delay_seconds'
+        | 'max_delay_seconds'
       >
     >,
   ) => void
@@ -2307,27 +2377,33 @@ function StepCard({
             </div>
           )}
 
-          <div>
-            <label className="mb-1.5 flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wider text-zinc-500">
-              <Sparkles className="h-3 w-3" aria-hidden />
-              Gatilho esperado
-            </label>
-            <input
-              value={trigger}
-              onChange={(e) => setTrigger(e.target.value)}
-              placeholder="Quero, Saber mais"
-              className="w-full rounded-lg border border-zinc-200 bg-white px-2.5 py-2 text-sm shadow-inner focus:border-brand-300 focus:outline-none focus:ring-2 focus:ring-brand-500/20"
-            />
-            <p className="mt-1 text-[10px] text-zinc-500">
-              {index === 1
-                ? 'Não se aplica na 1ª etapa (o gatilho fica na campanha).'
-                : advanceType === 'exact'
+          {index !== 1 ? (
+            <div>
+              <label className="mb-1.5 flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wider text-zinc-500">
+                <Sparkles className="h-3 w-3" aria-hidden />
+                Gatilho esperado
+              </label>
+              <input
+                value={trigger}
+                onChange={(e) => setTrigger(e.target.value)}
+                placeholder="Quero, Saber mais"
+                className="w-full rounded-lg border border-zinc-200 bg-white px-2.5 py-2 text-sm shadow-inner focus:border-brand-300 focus:outline-none focus:ring-2 focus:ring-brand-500/20"
+              />
+              <p className="mt-1 text-[10px] text-zinc-500">
+                {advanceType === 'exact'
                   ? 'Obrigatório quando o Tipo de avanço é “gatilho exato”.'
                   : advanceType === 'timer'
                     ? 'Não se aplica no modo temporizado.'
                     : 'Opcional (não é usado no avanço automático).'}
+              </p>
+            </div>
+          ) : (
+            <p className="text-[10px] text-zinc-500">
+              O gatilho após a isca fica no bloco <b>Gatilho (palavra-chave após a isca)</b> do
+              cabeçalho da campanha — não use este cartão para isso, para não conflitar com o
+              salvamento.
             </p>
-          </div>
+          )}
 
           <button
             type="button"
