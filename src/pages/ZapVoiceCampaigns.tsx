@@ -73,6 +73,8 @@ type FunnelStep = {
   delay_seconds: number
   expected_trigger: string | null
   advance_type?: 'auto' | 'exact' | null
+  min_delay_seconds?: number | null
+  max_delay_seconds?: number | null
   created_at: string
   updated_at: string
 }
@@ -525,7 +527,7 @@ export function ZapVoiceCampaignsPage() {
     const { data, error: e } = await supabase
       .from('zv_funnels')
       .select(
-        'id, campaign_id, step_order, message, media_type, media_url, delay_seconds, expected_trigger, advance_type, created_at, updated_at',
+        'id, campaign_id, step_order, message, media_type, media_url, delay_seconds, expected_trigger, advance_type, min_delay_seconds, max_delay_seconds, created_at, updated_at',
       )
       .eq('campaign_id', campaignId)
       .order('step_order', { ascending: true })
@@ -851,7 +853,6 @@ export function ZapVoiceCampaignsPage() {
         const rows: Record<string, unknown>[] = []
 
         for (const lead of withPhone) {
-          let accMs = 0
           const loc = lead.extraction_id
             ? locByEx.get(lead.extraction_id) ?? null
             : null
@@ -861,36 +862,49 @@ export function ZapVoiceCampaignsPage() {
             cidade: cityFromExtractionLocation(loc),
           }
 
-          for (const step of ordered) {
-            accMs += step.delay_seconds * 1000
-            const scheduledAt = new Date(startMs + accMs).toISOString()
-            const rawMsg = step.message ?? ''
-            const messageBody = applyMessageTemplate(rawMsg, vars)
-            const ct = step.media_type
-            const mUrl = ct === 'text' ? null : step.media_url?.trim() ?? null
+          // ISCA ATIVA: ao adicionar lead na campanha (ativar), agenda APENAS a etapa 1 automaticamente.
+          const step1 = ordered[0]!
+          const scheduledAt = new Date(startMs).toISOString()
+          const rawMsg = step1.message ?? ''
+          const messageBody = applyMessageTemplate(rawMsg, vars)
+          const ct = step1.media_type
+          const mUrl = ct === 'text' ? null : step1.media_url?.trim() ?? null
 
-            rows.push({
-              user_id: userId,
-              lead_id: lead.id,
-              zv_campaign_id: c.id,
-              zv_funnel_step_id: step.id,
-              is_active: true,
-              recipient_type: 'personal',
-              content_type: ct,
-              message_body: messageBody || null,
-              media_url: mUrl,
-              scheduled_at: scheduledAt,
-              status: 'pending',
-              recipient_phone: lead.phone,
-              min_delay_seconds: c.min_delay_seconds,
-              max_delay_seconds: c.max_delay_seconds,
-            })
-          }
+          rows.push({
+            user_id: userId,
+            lead_id: lead.id,
+            zv_campaign_id: c.id,
+            zv_funnel_step_id: step1.id,
+            is_active: true,
+            recipient_type: 'personal',
+            content_type: ct,
+            message_body: messageBody || null,
+            media_url: mUrl,
+            scheduled_at: scheduledAt,
+            status: 'pending',
+            recipient_phone: lead.phone,
+            // Snapshot anti-ban (campanha). Etapas temporizadas podem sobrescrever no backend.
+            min_delay_seconds: c.min_delay_seconds,
+            max_delay_seconds: c.max_delay_seconds,
+          })
 
-          // trava a IA durante o funil (até o último agendamento + max_delay + 60s de folga)
-          const lockUntilIso = new Date(
-            startMs + accMs + Math.max(0, c.max_delay_seconds) * 1000 + 60_000,
-          ).toISOString()
+          // Cria/atualiza progresso (modo conversacional).
+          await supabase
+            .from('lead_campaign_progress')
+            .upsert(
+              {
+                user_id: userId,
+                lead_id: lead.id,
+                campaign_id: c.id,
+                next_step_order: 2,
+                total_steps: ordered.length,
+                status: ordered.length === 1 ? 'awaiting_last_send' : 'active',
+              },
+              { onConflict: 'user_id,lead_id,campaign_id' },
+            )
+
+          // trava IA por uma janela grande; worker libera ao concluir.
+          const lockUntilIso = new Date(startMs + 6 * 60 * 60 * 1000).toISOString()
           await supabase
             .from('leads')
             .update({ funnel_locked_until: lockUntilIso })
@@ -926,9 +940,9 @@ export function ZapVoiceCampaignsPage() {
             ? ` A fila começa em ${formatDateBr(new Date(startMs).toISOString())}.`
             : ''
         setSuccess(
-          `Campanha ativa: ${total} disparos agendados para ${nLeads} lead${
+          `Campanha ativa: ${total} disparo(s) de isca (Etapa 1) agendado(s) para ${nLeads} lead${
             nLeads === 1 ? '' : 's'
-          } (${ordered.length} etapa${ordered.length === 1 ? '' : 's'} cada).${inicioFila}`,
+          }. As próximas etapas dependem do Tipo de avanço (Resposta / Gatilho exato / Temporizado).${inicioFila}`,
         )
         window.setTimeout(() => setSuccess(null), 8000)
       } catch (err) {
@@ -1046,9 +1060,11 @@ export function ZapVoiceCampaignsPage() {
         delay_seconds: 0,
         expected_trigger: null,
         advance_type: 'auto',
+        min_delay_seconds: null,
+        max_delay_seconds: null,
       })
       .select(
-        'id, campaign_id, step_order, message, media_type, media_url, delay_seconds, expected_trigger, advance_type, created_at, updated_at',
+        'id, campaign_id, step_order, message, media_type, media_url, delay_seconds, expected_trigger, advance_type, min_delay_seconds, max_delay_seconds, created_at, updated_at',
       )
       .single()
     if (e || !data) {
@@ -1858,8 +1874,14 @@ function StepCard({
   const [mediaUrl, setMediaUrl] = useState(step.media_url ?? '')
   const [delaySeconds, setDelaySeconds] = useState(step.delay_seconds)
   const [trigger, setTrigger] = useState(step.expected_trigger ?? '')
-  const [advanceType, setAdvanceType] = useState<'auto' | 'exact'>(
-    (step.advance_type ?? 'auto') as 'auto' | 'exact',
+  const [advanceType, setAdvanceType] = useState<'auto' | 'exact' | 'timer'>(
+    (step.advance_type ?? 'auto') as 'auto' | 'exact' | 'timer',
+  )
+  const [stepMinDelay, setStepMinDelay] = useState<number>(
+    typeof step.min_delay_seconds === 'number' ? step.min_delay_seconds : 2,
+  )
+  const [stepMaxDelay, setStepMaxDelay] = useState<number>(
+    typeof step.max_delay_seconds === 'number' ? step.max_delay_seconds : 15,
   )
   const [uploading, setUploading] = useState(false)
   const [localError, setLocalError] = useState<string | null>(null)
@@ -1870,7 +1892,9 @@ function StepCard({
     setMediaUrl(step.media_url ?? '')
     setDelaySeconds(step.delay_seconds)
     setTrigger(step.expected_trigger ?? '')
-    setAdvanceType((step.advance_type ?? 'auto') as 'auto' | 'exact')
+    setAdvanceType((step.advance_type ?? 'auto') as 'auto' | 'exact' | 'timer')
+    setStepMinDelay(typeof step.min_delay_seconds === 'number' ? step.min_delay_seconds : 2)
+    setStepMaxDelay(typeof step.max_delay_seconds === 'number' ? step.max_delay_seconds : 15)
   }, [
     step.id,
     step.message,
@@ -1879,6 +1903,8 @@ function StepCard({
     step.delay_seconds,
     step.expected_trigger,
     step.advance_type,
+    step.min_delay_seconds,
+    step.max_delay_seconds,
   ])
 
   const mediaNeedsUrl = mediaType !== 'text'
@@ -1888,7 +1914,10 @@ function StepCard({
     (mediaUrl || '').trim() !== (step.media_url ?? '').trim() ||
     delaySeconds !== step.delay_seconds ||
     (trigger || '') !== (step.expected_trigger ?? '') ||
-    (advanceType || 'auto') !== ((step.advance_type ?? 'auto') as 'auto' | 'exact')
+    (advanceType || 'auto') !== ((step.advance_type ?? 'auto') as 'auto' | 'exact' | 'timer') ||
+    (advanceType === 'timer' &&
+      (stepMinDelay !== (typeof step.min_delay_seconds === 'number' ? step.min_delay_seconds : 2) ||
+        stepMaxDelay !== (typeof step.max_delay_seconds === 'number' ? step.max_delay_seconds : 15)))
 
   const handlePickMediaType = (next: FunnelMediaType) => {
     setLocalError(null)
@@ -1931,6 +1960,16 @@ function StepCard({
       setLocalError('Para “gatilho exato”, preencha o Gatilho esperado.')
       return
     }
+    if (advanceType === 'timer' && index !== 1) {
+      if (!Number.isFinite(stepMinDelay) || !Number.isFinite(stepMaxDelay)) {
+        setLocalError('Delay mínimo/máximo inválido.')
+        return
+      }
+      if (stepMinDelay < 0 || stepMaxDelay < 0 || stepMaxDelay < stepMinDelay) {
+        setLocalError('Delay mínimo/máximo precisa ser >= 0 e Máx >= Mín.')
+        return
+      }
+    }
     if (index === 1) {
       // Passo 1 sempre depende do gatilho da campanha; não usa advance_type/expected_trigger do step.
       setAdvanceType('auto')
@@ -1943,6 +1982,8 @@ function StepCard({
       delay_seconds: delaySeconds,
       expected_trigger: index === 1 ? null : trigger.trim() || null,
       advance_type: index === 1 ? 'auto' : advanceType,
+      min_delay_seconds: index === 1 ? null : advanceType === 'timer' ? stepMinDelay : null,
+      max_delay_seconds: index === 1 ? null : advanceType === 'timer' ? stepMaxDelay : null,
     })
   }
 
@@ -2194,8 +2235,53 @@ function StepCard({
                     Avanço por gatilho exato
                   </span>
                 </label>
+                <label className="flex cursor-pointer items-center gap-2 text-sm text-zinc-700">
+                  <input
+                    type="radio"
+                    name={`advance-${step.id}`}
+                    checked={advanceType === 'timer'}
+                    onChange={() => setAdvanceType('timer')}
+                  />
+                  <span>
+                    Temporizado (sem aguardar resposta)
+                  </span>
+                </label>
               </div>
-              {advanceType === 'exact' ? (
+              {advanceType === 'timer' ? (
+                <div className="mt-3 grid grid-cols-2 gap-2">
+                  <div>
+                    <p className="text-[10px] font-semibold uppercase tracking-wider text-zinc-500">
+                      Delay Mín (s)
+                    </p>
+                    <input
+                      type="number"
+                      min={0}
+                      value={stepMinDelay}
+                      onChange={(e) => {
+                        const v = Math.max(0, Number(e.target.value) || 0)
+                        setStepMinDelay(v)
+                        setStepMaxDelay((prev) => Math.max(prev, v))
+                      }}
+                      className="mt-1 w-full rounded-lg border border-zinc-200 bg-white px-2.5 py-2 text-sm tabular-nums shadow-inner focus:border-brand-300 focus:outline-none focus:ring-2 focus:ring-brand-500/20"
+                    />
+                  </div>
+                  <div>
+                    <p className="text-[10px] font-semibold uppercase tracking-wider text-zinc-500">
+                      Delay Máx (s)
+                    </p>
+                    <input
+                      type="number"
+                      min={0}
+                      value={stepMaxDelay}
+                      onChange={(e) => setStepMaxDelay(Math.max(0, Number(e.target.value) || 0))}
+                      className="mt-1 w-full rounded-lg border border-zinc-200 bg-white px-2.5 py-2 text-sm tabular-nums shadow-inner focus:border-brand-300 focus:outline-none focus:ring-2 focus:ring-brand-500/20"
+                    />
+                  </div>
+                  <p className="col-span-2 mt-1 text-[11px] text-zinc-600">
+                    Essa etapa será enfileirada automaticamente assim que a etapa anterior for enviada.
+                  </p>
+                </div>
+              ) : advanceType === 'exact' ? (
                 <p className="mt-2 text-[11px] text-zinc-600">
                   Preencha o campo <b>Gatilho esperado</b> abaixo. O lead precisa digitar exatamente essa palavra/frase.
                 </p>
@@ -2223,7 +2309,9 @@ function StepCard({
                 ? 'Não se aplica na 1ª etapa (o gatilho fica na campanha).'
                 : advanceType === 'exact'
                   ? 'Obrigatório quando o Tipo de avanço é “gatilho exato”.'
-                  : 'Opcional (não é usado no avanço automático).'}
+                  : advanceType === 'timer'
+                    ? 'Não se aplica no modo temporizado.'
+                    : 'Opcional (não é usado no avanço automático).'}
             </p>
           </div>
 

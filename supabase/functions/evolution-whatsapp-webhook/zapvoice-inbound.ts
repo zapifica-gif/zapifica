@@ -8,8 +8,10 @@ type FunnelRow = {
   media_type: 'text' | 'image' | 'video' | 'audio' | 'document'
   media_url: string | null
   delay_seconds: number
-  advance_type?: 'auto' | 'exact' | null
+  advance_type?: 'auto' | 'exact' | 'timer' | null
   expected_trigger?: string | null
+  min_delay_seconds?: number | null
+  max_delay_seconds?: number | null
 }
 
 type CampaignRow = {
@@ -156,7 +158,11 @@ export async function processZapVoiceInbound(
     }
 
     const step = stepRow as FunnelRow
-    const adv = (step.advance_type ?? 'auto') as 'auto' | 'exact'
+    const adv = (step.advance_type ?? 'auto') as 'auto' | 'exact' | 'timer'
+    if (adv === 'timer') {
+      // Temporizado não avança por mensagem: ele é enfileirado quando a etapa anterior é enviada.
+      return { enqueued: false, reason: 'timer_sem_interacao', campaignId: progress.campaign_id, suppressAi: true }
+    }
     const allowAdvance =
       adv === 'auto'
         ? true // qualquer texto novo do cliente

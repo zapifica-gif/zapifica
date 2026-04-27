@@ -66,6 +66,108 @@ type ScheduledRow = {
   zv_campaign_id?: string | null
 }
 
+type UserSettingsRow = {
+  agencia_nome: string | null
+  vendedor_primeiro_nome: string | null
+  telefone_contato: string | null
+  instagram_empresa: string | null
+  site_empresa: string | null
+  avalie_google: string | null
+  endereco: string | null
+  telefones: string[] | null
+}
+
+function formatDateBR(d: Date): string {
+  return new Intl.DateTimeFormat('pt-BR', {
+    timeZone: 'America/Sao_Paulo',
+    day: '2-digit',
+    month: '2-digit',
+    year: 'numeric',
+  }).format(d)
+}
+
+function weekdayBR(d: Date): string {
+  return new Intl.DateTimeFormat('pt-BR', {
+    timeZone: 'America/Sao_Paulo',
+    weekday: 'long',
+  }).format(d)
+}
+
+function timeHHMM(d: Date): string {
+  return new Intl.DateTimeFormat('pt-BR', {
+    timeZone: 'America/Sao_Paulo',
+    hour: '2-digit',
+    minute: '2-digit',
+  }).format(d)
+}
+
+function greetingByTime(d: Date): string {
+  const parts = new Intl.DateTimeFormat('pt-BR', {
+    timeZone: 'America/Sao_Paulo',
+    hour: '2-digit',
+    hour12: false,
+  }).formatToParts(d)
+  const h = Number(parts.find((p) => p.type === 'hour')?.value ?? '12')
+  if (h >= 5 && h < 12) return 'Bom dia'
+  if (h >= 12 && h < 18) return 'Boa tarde'
+  return 'Boa noite'
+}
+
+function firstName(full: string | null | undefined): string {
+  const t = (full ?? '').trim()
+  if (!t) return 'Cliente'
+  return t.split(/\s+/)[0] ?? t
+}
+
+async function renderMessageTemplate(params: {
+  supabase: SupabaseClient
+  userId: string
+  leadId: string | null
+  text: string
+}): Promise<string> {
+  const t = params.text
+  if (!t || t.indexOf('{') === -1) return t
+
+  const now = new Date()
+  const leadPromise = params.leadId
+    ? params.supabase.from('leads').select('name').eq('id', params.leadId).maybeSingle()
+    : Promise.resolve({ data: null as any, error: null as any })
+  const settingsPromise = params.supabase
+    .from('user_settings')
+    .select(
+      'agencia_nome, vendedor_primeiro_nome, telefone_contato, instagram_empresa, site_empresa, avalie_google, endereco, telefones',
+    )
+    .eq('user_id', params.userId)
+    .maybeSingle()
+
+  const [leadRes, setRes] = await Promise.all([leadPromise, settingsPromise])
+  const leadName = (leadRes.data as { name?: string | null } | null)?.name ?? null
+  const settings = (setRes.data as UserSettingsRow | null) ?? null
+
+  const rep: Record<string, string> = {
+    '{saudacao_tempo}': greetingByTime(now),
+    '{hoje_data}': formatDateBR(now),
+    '{dia_semana}': weekdayBR(now),
+    '{hora_atual}': timeHHMM(now),
+    '{cliente_primeiro_nome}': firstName(leadName),
+    '{cliente_nome}': (leadName ?? '').trim() || 'Cliente',
+    '{agencia_nome}': (settings?.agencia_nome ?? '').trim(),
+    '{vendedor_primeiro_nome}': (settings?.vendedor_primeiro_nome ?? '').trim(),
+    '{telefone_contato}': (settings?.telefone_contato ?? '').trim(),
+    '{instagram_empresa}': (settings?.instagram_empresa ?? '').trim(),
+    '{site_empresa}': (settings?.site_empresa ?? '').trim(),
+    '{avalie_google}': (settings?.avalie_google ?? '').trim(),
+    '{endereco}': (settings?.endereco ?? '').trim(),
+    '{telefones}': (settings?.telefones ?? []).filter(Boolean).join(' / '),
+  }
+
+  let out = t
+  for (const [k, v] of Object.entries(rep)) {
+    out = out.replaceAll(k, v || '')
+  }
+  return out
+}
+
 type ChatContentType = 'text' | 'audio' | 'image' | 'document'
 
 async function downloadMediaAsBase64(
@@ -271,7 +373,12 @@ async function sendOne(
 ): Promise<{ ok: boolean; error: string | null; messageId: string | null }> {
   const { evolution } = deps
   const uid = row.user_id
-  const body = row.message_body ?? ''
+  const body = await renderMessageTemplate({
+    supabase: deps.supabase,
+    userId: uid,
+    leadId: row.lead_id,
+    text: row.message_body ?? '',
+  })
   const caption = body.trim() ? body : undefined
   const mediaUrl = row.media_url?.trim()
 

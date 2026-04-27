@@ -29,6 +29,7 @@ type ScheduledRow = {
   min_delay_seconds?: number | null
   max_delay_seconds?: number | null
   zv_campaign_id?: string | null
+  zv_funnel_step_id?: string | null
 }
 
 type ChatContentType = 'text' | 'audio' | 'image' | 'document'
@@ -162,6 +163,113 @@ function resolveDispatchDelayMs(row: ScheduledRow): number {
   return seconds * 1000
 }
 
+function formatDateBR(d: Date): string {
+  const fmt = new Intl.DateTimeFormat('pt-BR', {
+    timeZone: 'America/Sao_Paulo',
+    day: '2-digit',
+    month: '2-digit',
+    year: 'numeric',
+  })
+  return fmt.format(d)
+}
+
+function weekdayBR(d: Date): string {
+  const fmt = new Intl.DateTimeFormat('pt-BR', {
+    timeZone: 'America/Sao_Paulo',
+    weekday: 'long',
+  })
+  return fmt.format(d)
+}
+
+function timeHHMM(d: Date): string {
+  const fmt = new Intl.DateTimeFormat('pt-BR', {
+    timeZone: 'America/Sao_Paulo',
+    hour: '2-digit',
+    minute: '2-digit',
+  })
+  return fmt.format(d)
+}
+
+function greetingByTime(d: Date): string {
+  // Baseado na hora de São Paulo
+  const parts = new Intl.DateTimeFormat('pt-BR', {
+    timeZone: 'America/Sao_Paulo',
+    hour: '2-digit',
+    hour12: false,
+  }).formatToParts(d)
+  const h = Number(parts.find((p) => p.type === 'hour')?.value ?? '12')
+  if (h >= 5 && h < 12) return 'Bom dia'
+  if (h >= 12 && h < 18) return 'Boa tarde'
+  return 'Boa noite'
+}
+
+function firstName(full: string | null | undefined): string {
+  const t = (full ?? '').trim()
+  if (!t) return 'Cliente'
+  return t.split(/\s+/)[0] ?? t
+}
+
+type UserSettingsRow = {
+  agencia_nome: string | null
+  vendedor_primeiro_nome: string | null
+  telefone_contato: string | null
+  instagram_empresa: string | null
+  site_empresa: string | null
+  avalie_google: string | null
+  endereco: string | null
+  telefones: string[] | null
+}
+
+async function renderMessageTemplate(params: {
+  supabase: ReturnType<typeof createClient>
+  userId: string
+  leadId: string | null
+  text: string
+}): Promise<string> {
+  const t = params.text
+  if (!t || t.indexOf('{') === -1) return t
+
+  const now = new Date()
+  const leadPromise = params.leadId
+    ? params.supabase.from('leads').select('name').eq('id', params.leadId).maybeSingle()
+    : Promise.resolve({ data: null as any, error: null as any })
+
+  const settingsPromise = params.supabase
+    .from('user_settings')
+    .select(
+      'agencia_nome, vendedor_primeiro_nome, telefone_contato, instagram_empresa, site_empresa, avalie_google, endereco, telefones',
+    )
+    .eq('user_id', params.userId)
+    .maybeSingle()
+
+  const [leadRes, setRes] = await Promise.all([leadPromise, settingsPromise])
+  const leadName = (leadRes.data as { name?: string | null } | null)?.name ?? null
+  const settings = (setRes.data as UserSettingsRow | null) ?? null
+
+  const rep: Record<string, string> = {
+    '{saudacao_tempo}': greetingByTime(now),
+    '{hoje_data}': formatDateBR(now),
+    '{dia_semana}': weekdayBR(now),
+    '{hora_atual}': timeHHMM(now),
+    '{cliente_primeiro_nome}': firstName(leadName),
+    '{cliente_nome}': (leadName ?? '').trim() || 'Cliente',
+    '{agencia_nome}': (settings?.agencia_nome ?? '').trim(),
+    '{vendedor_primeiro_nome}': (settings?.vendedor_primeiro_nome ?? '').trim(),
+    '{telefone_contato}': (settings?.telefone_contato ?? '').trim(),
+    '{instagram_empresa}': (settings?.instagram_empresa ?? '').trim(),
+    '{site_empresa}': (settings?.site_empresa ?? '').trim(),
+    '{avalie_google}': (settings?.avalie_google ?? '').trim(),
+    '{endereco}': (settings?.endereco ?? '').trim(),
+    '{telefones}': (settings?.telefones ?? []).filter(Boolean).join(' / '),
+  }
+
+  let out = t
+  for (const [k, v] of Object.entries(rep)) {
+    out = out.replaceAll(k, v || '')
+  }
+  return out
+}
+
 type EvolutionPresence = 'composing' | 'recording' | 'paused'
 
 type DispatchPlan =
@@ -264,7 +372,7 @@ serve(async () => {
   const { data: candidates, error: fetchError } = await supabase
     .from('scheduled_messages')
     .select(
-      'id, user_id, event_id, lead_id, media_url, is_active, recipient_type, content_type, message_body, scheduled_at, status, segment_lead_ids, recipient_phone, evolution_instance_name, min_delay_seconds, max_delay_seconds, zv_campaign_id',
+      'id, user_id, event_id, lead_id, media_url, is_active, recipient_type, content_type, message_body, scheduled_at, status, segment_lead_ids, recipient_phone, evolution_instance_name, min_delay_seconds, max_delay_seconds, zv_campaign_id, zv_funnel_step_id',
     )
     .eq('status', 'pending')
     .eq('is_active', true)
@@ -383,7 +491,13 @@ serve(async () => {
 
       // --- 2) Monta envio (texto, mídia com URL, ou legado com corpo) ---
       // Endpoints: message/sendText | message/sendMedia | message/sendWhatsAppAudio
-      const caption = (msg.message_body ?? '').trim() || undefined
+      const renderedBody = await renderMessageTemplate({
+        supabase,
+        userId: msg.user_id,
+        leadId: msg.lead_id,
+        text: (msg.message_body ?? '').trim(),
+      })
+      const caption = renderedBody.trim() || undefined
       const mediaUrl = msg.media_url?.trim() ?? null
 
       let plan: DispatchPlan
@@ -466,7 +580,7 @@ serve(async () => {
             }
         }
       } else {
-        const body = msg.message_body ?? ''
+        const body = renderedBody ?? ''
         if (!body.trim() && msg.content_type === 'text') {
           throw new Error('Mensagem de texto vazia.')
         }
@@ -613,6 +727,85 @@ serve(async () => {
       // - se houver progress.awaiting_last_send, grava completion e remove progress
       // - se não houver progress, é o modo “enfileiramento em massa”: grava completion também
       if (msg.lead_id && msg.zv_campaign_id) {
+        // Avanço temporizado: ao ENVIAR uma etapa, se o próximo passo for timer,
+        // enfileira automaticamente (sem esperar resposta do lead).
+        const { data: prog2 } = await supabase
+          .from('lead_campaign_progress')
+          .select('id, next_step_order, total_steps, status')
+          .eq('user_id', msg.user_id)
+          .eq('lead_id', msg.lead_id)
+          .eq('campaign_id', msg.zv_campaign_id)
+          .in('status', ['active', 'awaiting_last_send'])
+          .maybeSingle()
+
+        if (prog2 && (prog2 as any).status === 'active') {
+          const nextOrder = Number((prog2 as any).next_step_order ?? 0)
+          const totalSteps = Number((prog2 as any).total_steps ?? 0)
+          if (nextOrder >= 2 && nextOrder <= totalSteps) {
+            const { data: nextStep } = await supabase
+              .from('zv_funnels')
+              .select(
+                'id, step_order, message, media_type, media_url, advance_type, min_delay_seconds, max_delay_seconds',
+              )
+              .eq('campaign_id', msg.zv_campaign_id)
+              .eq('step_order', nextOrder)
+              .maybeSingle()
+
+            if (nextStep && String((nextStep as any).advance_type ?? 'auto') === 'timer') {
+              const minS =
+                typeof (nextStep as any).min_delay_seconds === 'number'
+                  ? Math.max(0, Number((nextStep as any).min_delay_seconds))
+                  : (typeof msg.min_delay_seconds === 'number' ? Math.max(0, msg.min_delay_seconds) : 2)
+              const maxS =
+                typeof (nextStep as any).max_delay_seconds === 'number'
+                  ? Math.max(minS, Number((nextStep as any).max_delay_seconds))
+                  : (typeof msg.max_delay_seconds === 'number' ? Math.max(minS, msg.max_delay_seconds) : 15)
+              const delayS = pickRandomIntInclusive(minS, maxS)
+              const scheduledAt = new Date(Date.now() + delayS * 1000).toISOString()
+
+              const rendered = await renderMessageTemplate({
+                supabase,
+                userId: msg.user_id,
+                leadId: msg.lead_id,
+                text: String((nextStep as any).message ?? ''),
+              })
+
+              const ct = String((nextStep as any).media_type ?? 'text')
+              const mediaUrl2 = ct === 'text' ? null : (String((nextStep as any).media_url ?? '').trim() || null)
+              const ins2 = await supabase.from('scheduled_messages').insert({
+                user_id: msg.user_id,
+                lead_id: msg.lead_id,
+                zv_campaign_id: msg.zv_campaign_id,
+                zv_funnel_step_id: String((nextStep as any).id),
+                is_active: true,
+                recipient_type: 'personal',
+                content_type: ct,
+                message_body: rendered || null,
+                media_url: mediaUrl2,
+                scheduled_at: scheduledAt,
+                status: 'pending',
+                recipient_phone: msg.recipient_phone,
+                event_id: null,
+                evolution_instance_name: msg.evolution_instance_name,
+                min_delay_seconds: minS,
+                max_delay_seconds: maxS,
+              })
+
+              if (!ins2.error) {
+                const updatedNext = nextOrder + 1
+                const isLastEnqueued = updatedNext > totalSteps
+                await supabase
+                  .from('lead_campaign_progress')
+                  .update({
+                    next_step_order: updatedNext,
+                    status: isLastEnqueued ? 'awaiting_last_send' : 'active',
+                  })
+                  .eq('id', String((prog2 as any).id))
+              }
+            }
+          }
+        }
+
         const { data: prog, error: progErr } = await supabase
           .from('lead_campaign_progress')
           .select('id, status')
