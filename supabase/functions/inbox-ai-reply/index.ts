@@ -48,6 +48,7 @@ type LeadRow = {
   id: string
   user_id: string
   phone: string | null
+  funnel_locked_until?: string | null
 }
 
 function instanceNameFromUserId(userId: string): string {
@@ -230,7 +231,7 @@ async function runPipeline(
 ): Promise<Record<string, unknown>> {
   const { data: lead, error: leErr } = await supabase
     .from('leads')
-    .select('id, user_id, phone')
+    .select('id, user_id, phone, funnel_locked_until')
     .eq('id', triggerRow.lead_id)
     .maybeSingle()
 
@@ -242,6 +243,19 @@ async function runPipeline(
   }
 
   const leadData = lead as LeadRow
+  const lockedUntilIso = (leadData.funnel_locked_until ?? null)?.trim?.() ?? null
+  if (lockedUntilIso) {
+    const t = new Date(lockedUntilIso).getTime()
+    if (!Number.isNaN(t) && Date.now() < t) {
+      return {
+        ok: true,
+        ignored: 'lead_in_funnel',
+        lead_id: leadData.id,
+        funnel_locked_until: lockedUntilIso,
+      }
+    }
+  }
+
   const destination = toEvolutionDigits(leadData.phone)
   if (!destination) {
     return { error: 'Telefone do lead inválido para a Evolution' }

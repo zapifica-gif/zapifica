@@ -49,6 +49,7 @@ type UpsertItem = {
 
 type LeadRow = { id: string; phone: string | null; name: string | null }
 type LeadAiRow = { id: string; ai_enabled: boolean | null }
+type LeadFunnelLockRow = { id: string; funnel_locked_until: string | null }
 
 type CompanyContextRow = { master_prompt: string | null }
 type TrainingTextRow = { content: string | null }
@@ -942,7 +943,7 @@ serve(async (req) => {
     if (hasAiMaterial) {
       const { data: leadAi, error: aiErr } = await supabase
         .from('leads')
-        .select('id, ai_enabled')
+        .select('id, ai_enabled, funnel_locked_until')
         .eq('id', ensured.id)
         .eq('user_id', userId)
         .maybeSingle()
@@ -951,6 +952,18 @@ serve(async (req) => {
         console.error('[IA] Falha ao ler ai_enabled do lead:', aiErr.message)
       } else {
         const enabled = (leadAi as LeadAiRow | null)?.ai_enabled !== false
+        const lockedUntil = (leadAi as LeadFunnelLockRow | null)?.funnel_locked_until ?? null
+        if (lockedUntil) {
+          const t = new Date(lockedUntil).getTime()
+          if (!Number.isNaN(t) && Date.now() < t) {
+            console.log('[IA] Lead em funil — ignorando resposta automática.', {
+              leadId: ensured.id,
+              lockedUntil,
+            })
+            continue
+          }
+        }
+
         if (enabled) {
           if (!deepSeekKey) {
             console.warn('[IA] DEEPSEEK_API_KEY ausente; ignorando resposta automática.')

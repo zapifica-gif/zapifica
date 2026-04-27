@@ -26,6 +26,8 @@ type ScheduledRow = {
   segment_lead_ids: string[] | null
   recipient_phone: string | null
   evolution_instance_name: string | null
+  min_delay_seconds?: number | null
+  max_delay_seconds?: number | null
 }
 
 type ChatContentType = 'text' | 'audio' | 'image' | 'document'
@@ -140,6 +142,25 @@ function humanizedDelayMs(): number {
   return Math.floor(Math.random() * (15000 - 5000 + 1)) + 5000
 }
 
+function pickRandomIntInclusive(min: number, max: number): number {
+  const a = Math.ceil(min)
+  const b = Math.floor(max)
+  if (b < a) return a
+  return Math.floor(Math.random() * (b - a + 1)) + a
+}
+
+function resolveDispatchDelayMs(row: ScheduledRow): number {
+  const minS = typeof row.min_delay_seconds === 'number' ? row.min_delay_seconds : null
+  const maxS = typeof row.max_delay_seconds === 'number' ? row.max_delay_seconds : null
+  if (minS == null || maxS == null) {
+    return humanizedDelayMs()
+  }
+  const safeMin = Number.isFinite(minS) ? Math.max(0, minS) : 0
+  const safeMax = Number.isFinite(maxS) ? Math.max(0, maxS) : safeMin
+  const seconds = pickRandomIntInclusive(safeMin, safeMax)
+  return seconds * 1000
+}
+
 type EvolutionPresence = 'composing' | 'recording' | 'paused'
 
 type DispatchPlan =
@@ -242,7 +263,7 @@ serve(async () => {
   const { data: candidates, error: fetchError } = await supabase
     .from('scheduled_messages')
     .select(
-      'id, user_id, event_id, lead_id, media_url, is_active, recipient_type, content_type, message_body, scheduled_at, status, segment_lead_ids, recipient_phone, evolution_instance_name',
+      'id, user_id, event_id, lead_id, media_url, is_active, recipient_type, content_type, message_body, scheduled_at, status, segment_lead_ids, recipient_phone, evolution_instance_name, min_delay_seconds, max_delay_seconds',
     )
     .eq('status', 'pending')
     .eq('is_active', true)
@@ -287,6 +308,11 @@ serve(async () => {
     console.log('[Agenda Suprema] Disparando mensagem ID:', msg.id)
 
     try {
+      // Anti-ban (configurável): delay aleatório antes de cada disparo.
+      const dispatchDelayMs = resolveDispatchDelayMs(msg)
+      console.log(`[Agenda Suprema] Delay antes do envio: ${dispatchDelayMs}ms`)
+      await sleep(dispatchDelayMs)
+
       // --- 1) Destinatários ---
       let phones: string[] = []
 
@@ -602,14 +628,7 @@ serve(async () => {
       failed += 1
     }
 
-    // Anti-ban: cooldown aleatório entre 5s e 15s antes do próximo disparo.
-    // Só vale entre mensagens — depois da última do lote, não atrasa o retorno.
-    const isLast = msg === (candidates[candidates.length - 1] as ScheduledRow)
-    if (!isLast) {
-      const cooldown = humanizedDelayMs()
-      console.log(`[Agenda Suprema] Cooldown anti-ban: ${cooldown}ms`)
-      await sleep(cooldown)
-    }
+    // Sem cooldown global aqui: o delay configurável já é aplicado por mensagem.
   }
 
   return new Response(
