@@ -378,25 +378,21 @@ serve(async () => {
     '| pendentes com scheduled_at <= agora (UTC).',
   )
 
-  const { data: candidates, error: fetchError } = await supabase
-    .from('scheduled_messages')
-    .select(
-      'id, user_id, event_id, lead_id, media_url, is_active, recipient_type, content_type, message_body, scheduled_at, status, segment_lead_ids, recipient_phone, evolution_instance_name, min_delay_seconds, max_delay_seconds, zv_campaign_id, zv_funnel_step_id',
-    )
-    .eq('status', 'pending')
-    .eq('is_active', true)
-    .not('scheduled_at', 'is', null)
-    .lte('scheduled_at', nowIso)
-    .order('scheduled_at', { ascending: true })
-    .limit(30)
+  // Reserva atômica (FOR UPDATE SKIP LOCKED via RPC): evita dois workers processarem a mesma linha.
+  const { data: claimedRows, error: fetchError } = await supabase.rpc(
+    'claim_scheduled_messages',
+    { p_limit: 30 },
+  )
 
   if (fetchError) {
-    console.error('[process-scheduled-messages] query:', fetchError)
+    console.error('[process-scheduled-messages] claim_scheduled_messages:', fetchError)
     return new Response(
       JSON.stringify({ error: fetchError.message }),
       { status: 500, headers: { 'Content-Type': 'application/json' } },
     )
   }
+
+  const candidates = (claimedRows ?? []) as ScheduledRow[]
 
   if (!candidates || candidates.length === 0) {
     return new Response(
@@ -410,18 +406,6 @@ serve(async () => {
 
   for (const rawMsg of candidates) {
     const msg = rawMsg as ScheduledRow
-
-    const { data: claimed, error: claimErr } = await supabase
-      .from('scheduled_messages')
-      .update({ status: 'processing', updated_at: new Date().toISOString() })
-      .eq('id', msg.id)
-      .eq('status', 'pending')
-      .select('id')
-      .maybeSingle()
-
-    if (claimErr || !claimed) {
-      continue
-    }
 
     console.log('[Agenda Suprema] Disparando mensagem ID:', msg.id)
 

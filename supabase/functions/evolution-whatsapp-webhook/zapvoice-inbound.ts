@@ -285,7 +285,7 @@ export async function processZapVoiceInbound(
 
   if (cErr) {
     console.error('[ZapVoice inbound] list campaigns', cErr.message)
-    return { enqueued: false, reason: 'erro_listagem' }
+    return { enqueued: false, reason: 'erro_listagem', suppressAi: true }
   }
 
   let matched: CampaignRow | null = null
@@ -333,7 +333,7 @@ export async function processZapVoiceInbound(
 
   if (sErr) {
     console.error('[ZapVoice inbound] funil', sErr.message)
-    return { enqueued: false, reason: 'erro_funil' }
+    return { enqueued: false, reason: 'erro_funil', campaignId: matched.id, suppressAi: true }
   }
 
   const ordered = [...(stepsRaw ?? [])] as FunnelRow[]
@@ -341,14 +341,24 @@ export async function processZapVoiceInbound(
   for (const s of ordered) {
     if (s.media_type !== 'text' && !s.media_url?.trim()) {
       console.warn('[ZapVoice inbound] etapa com mídia sem URL, ignoro funil', matched.id, s.step_order)
-      return { enqueued: false, reason: 'etapa_midia_incompleta' }
+      return {
+        enqueued: false,
+        reason: 'etapa_midia_incompleta',
+        campaignId: matched.id,
+        suppressAi: true,
+      }
     }
   }
 
   if (ordered.length > 0) {
     const t = ordered[0]!
     if (t.media_type === 'text' && !t.message.trim()) {
-      return { enqueued: false, reason: 'etapa1_texto_vazia' }
+      return {
+        enqueued: false,
+        reason: 'etapa1_texto_vazia',
+        campaignId: matched.id,
+        suppressAi: true,
+      }
     }
   }
 
@@ -360,7 +370,7 @@ export async function processZapVoiceInbound(
     .eq('user_id', p.userId)
   if (upErr) {
     console.error('[ZapVoice inbound] update lead', upErr.message)
-    return { enqueued: false, reason: 'erro_lead' }
+    return { enqueued: false, reason: 'erro_lead', campaignId: matched.id, suppressAi: true }
   }
 
   const startMs = Date.now()
@@ -394,7 +404,12 @@ export async function processZapVoiceInbound(
           return await handleActiveCampaignProgress(p, messageNorm, p2[0] as ProgressRow)
         }
       }
-      return { enqueued: false, reason: 'erro_progresso' }
+      return {
+        enqueued: false,
+        reason: 'erro_progresso',
+        campaignId: matched.id,
+        suppressAi: true,
+      }
     }
     if (progIns.data) {
       const pr = progIns.data as {

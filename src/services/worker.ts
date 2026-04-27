@@ -478,33 +478,25 @@ export async function checkAndSendScheduledMessages(
   const { supabase } = deps
   const nowUtcIso = new Date().toISOString()
   console.log(
-    '[worker] Buscando mensagens pending com scheduled_at <=',
+    '[worker] Reivindicando lote via claim_scheduled_messages (UTC ref:',
     nowUtcIso,
-    '| filtros: .eq("status","pending"), .eq("is_active", true boolean)',
+    ')',
   )
 
-  const { data, error } = await supabase
-    .from('scheduled_messages')
-    .select(
-      'id, user_id, lead_id, media_url, recipient_type, content_type, message_body, segment_lead_ids, recipient_phone, min_delay_seconds, max_delay_seconds, zv_campaign_id',
-    )
-    .eq('status', 'pending')
-    .eq('is_active', true)
-    .not('scheduled_at', 'is', null)
-    .lte('scheduled_at', nowUtcIso)
-    .order('scheduled_at', { ascending: true })
-    .limit(BATCH_LIMIT)
+  const { data, error } = await supabase.rpc('claim_scheduled_messages', {
+    p_limit: BATCH_LIMIT,
+  })
 
   const candidates = data
   console.log(
     '[worker] Resultado da busca:',
     candidates?.length ?? 0,
-    'linhas encontradas. Erro do banco:',
+    'linhas reivindicadas. Erro do banco:',
     error,
   )
 
   if (error) {
-    console.error('[worker] Falha ao listar agendamentos:', error.message)
+    console.error('[worker] Falha ao reivindicar agendamentos:', error.message)
     return { processed: 0, skipped: 1 }
   }
 
@@ -513,22 +505,6 @@ export async function checkAndSendScheduledMessages(
 
   for (const raw of candidates ?? []) {
     const row = raw as ScheduledRow
-
-    const { data: claimed, error: claimErr } = await supabase
-      .from('scheduled_messages')
-      .update({
-        status: 'processing',
-        updated_at: new Date().toISOString(),
-      })
-      .eq('id', row.id)
-      .eq('status', 'pending')
-      .select('id')
-      .maybeSingle()
-
-    if (claimErr || !claimed) {
-      skipped += 1
-      continue
-    }
 
     try {
       const delayMs = resolveDispatchDelayMs(row)

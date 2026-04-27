@@ -52,6 +52,39 @@ type LeadRow = {
   funnel_locked_until?: string | null
 }
 
+type TriggerCondition = 'equals' | 'contains' | 'starts_with' | 'not_contains'
+
+function normText(s: string): string {
+  return s
+    .toLowerCase()
+    .replace(/\s+/g, ' ')
+    .trim()
+}
+
+/** Igual ao motor do ZapVoice: evita IA quando o texto é gatilho de campanha. */
+function triggerConditionSatisfied(
+  condition: TriggerCondition,
+  messageNorm: string,
+  keywordRaw: string,
+): boolean {
+  const kw = normText(keywordRaw)
+  if (condition === 'not_contains') {
+    if (!kw) return false
+    return !messageNorm.includes(kw)
+  }
+  if (!kw) return false
+  switch (condition) {
+    case 'equals':
+      return messageNorm === kw
+    case 'contains':
+      return messageNorm.includes(kw)
+    case 'starts_with':
+      return messageNorm.startsWith(kw)
+    default:
+      return false
+  }
+}
+
 function instanceNameFromUserId(userId: string): string {
   const safe = userId.replace(/[^a-zA-Z0-9-]/g, '_')
   return `zapifica_${safe}`.slice(0, 80)
@@ -236,35 +269,6 @@ async function runPipeline(
   evolutionUrl: string,
   evolutionKey: string,
 ): Promise<Record<string, unknown>> {
-  // HARD LOCK absoluto: se há progresso ativo, a IA NÃO roda, ponto.
-  // Isso elimina corrida com o ZapVoice/inbound.
-  const { count: progCount, error: progErr } = await supabase
-    .from('lead_campaign_progress')
-    .select('id', { count: 'exact', head: true })
-    .eq('lead_id', triggerRow.lead_id)
-    .eq('status', 'active')
-  if (progErr) {
-    return { error: `progress: ${progErr.message}` }
-  }
-  if ((progCount ?? 0) > 0) {
-    return { ok: true, ignored: 'hard_lock_progress_active', lead_id: triggerRow.lead_id }
-  }
-
-  // HARD LOCK: se a última mensagem do lead estiver com ai_suppressed=true, aborta.
-  const { data: lastMsg, error: lastErr } = await supabase
-    .from('chat_messages')
-    .select('ai_suppressed, created_at')
-    .eq('lead_id', triggerRow.lead_id)
-    .order('created_at', { ascending: false })
-    .limit(1)
-    .maybeSingle()
-  if (lastErr) {
-    return { error: `last_msg: ${lastErr.message}` }
-  }
-  if ((lastMsg as { ai_suppressed?: boolean | null } | null)?.ai_suppressed === true) {
-    return { ok: true, ignored: 'hard_lock_last_message_suppressed', lead_id: triggerRow.lead_id }
-  }
-
   const { data: lead, error: leErr } = await supabase
     .from('leads')
     .select('id, user_id, phone, funnel_locked_until')
@@ -279,6 +283,66 @@ async function runPipeline(
   }
 
   const leadData = lead as LeadRow
+
+  // HARD BLOCK (antes do LLM): gatilho de campanha ativa → mensagem é do funil, não da IA.
+  if (triggerRow.content_type === 'text') {
+    const raw = (triggerRow.message_body ?? '').trim()
+    if (
+      raw &&
+      !/^\[(imagem|áudio|vídeo|documento|mensagem)\]$/i.test(raw)
+    ) {
+      const messageNorm = normText(raw)
+      const { data: campRows, error: campErr } = await supabase
+        .from('zv_campaigns')
+        .select('id, trigger_keyword, trigger_condition')
+        .eq('user_id', leadData.user_id)
+        .eq('status', 'active')
+      if (campErr) {
+        return { error: `zv_campaigns: ${campErr.message}` }
+      }
+      for (const row of campRows ?? []) {
+        const cond = ((row as { trigger_condition?: string }).trigger_condition ??
+          'equals') as TriggerCondition
+        const kw = (row as { trigger_keyword?: string | null }).trigger_keyword ?? ''
+        if (triggerConditionSatisfied(cond, messageNorm, kw)) {
+          return {
+            ok: true,
+            ignored: 'campaign_trigger_reserved',
+            lead_id: triggerRow.lead_id,
+          }
+        }
+      }
+    }
+  }
+
+  // HARD LOCK: progresso ZapVoice (active ou aguardando último envio), sempre no mesmo user_id.
+  const { count: progCount, error: progErr } = await supabase
+    .from('lead_campaign_progress')
+    .select('id', { count: 'exact', head: true })
+    .eq('lead_id', triggerRow.lead_id)
+    .eq('user_id', leadData.user_id)
+    .in('status', ['active', 'awaiting_last_send'])
+  if (progErr) {
+    return { error: `progress: ${progErr.message}` }
+  }
+  if ((progCount ?? 0) > 0) {
+    return { ok: true, ignored: 'hard_lock_progress_active', lead_id: triggerRow.lead_id }
+  }
+
+  // HARD LOCK: última mensagem com supressão (corrida com insert do webhook).
+  const { data: lastMsg, error: lastErr } = await supabase
+    .from('chat_messages')
+    .select('ai_suppressed, created_at')
+    .eq('lead_id', triggerRow.lead_id)
+    .order('created_at', { ascending: false })
+    .limit(1)
+    .maybeSingle()
+  if (lastErr) {
+    return { error: `last_msg: ${lastErr.message}` }
+  }
+  if ((lastMsg as { ai_suppressed?: boolean | null } | null)?.ai_suppressed === true) {
+    return { ok: true, ignored: 'hard_lock_last_message_suppressed', lead_id: triggerRow.lead_id }
+  }
   const lockedUntilIso = (leadData.funnel_locked_until ?? null)?.trim?.() ?? null
   if (lockedUntilIso) {
     const t = new Date(lockedUntilIso).getTime()

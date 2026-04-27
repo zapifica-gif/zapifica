@@ -2,6 +2,7 @@ import {
   useCallback,
   useEffect,
   useMemo,
+  useRef,
   useState,
   type ChangeEventHandler,
 } from 'react'
@@ -358,8 +359,6 @@ function MessageVariableChips(props: {
   )
 }
 
-const INSERT_CHUNK = 120
-
 function firstNameFromFullName(full: string): string {
   const t = full.trim()
   if (!t) return 'Cliente'
@@ -421,6 +420,8 @@ export function ZapVoiceCampaignsPage() {
   const [stepsLoading, setStepsLoading] = useState(false)
   const [savingStepId, setSavingStepId] = useState<string | null>(null)
   const [activating, setActivating] = useState(false)
+  /** Evita duplo clique / StrictMode duplicar isca antes do React atualizar `activating`. */
+  const activateInFlightRef = useRef(false)
 
   // form de "Nova Campanha"
   const [newOpen, setNewOpen] = useState(false)
@@ -1036,6 +1037,10 @@ export function ZapVoiceCampaignsPage() {
         setError('Sessão inválida.')
         return
       }
+      if (activateInFlightRef.current) {
+        return
+      }
+      activateInFlightRef.current = true
       setError(null)
       setSuccess(null)
       setActivating(true)
@@ -1150,7 +1155,6 @@ export function ZapVoiceCampaignsPage() {
         } else {
           startMs = now
         }
-        const rows: Record<string, unknown>[] = []
 
         // Anti-ban (isca): espaça os leads com delay cumulativo aleatório.
         // Ex.: lead1 now+5s, lead2 now+15s, lead3 now+28s...
@@ -1164,7 +1168,7 @@ export function ZapVoiceCampaignsPage() {
           .eq('user_id', userId)
           .eq('zv_campaign_id', c.id)
           .is('zv_funnel_step_id', null)
-          .eq('status', 'pending')
+          .in('status', ['pending', 'processing'])
         if (pendErr) {
           console.warn('[ZapVoiceCampaigns] check isca duplicada:', pendErr.message)
         }
@@ -1173,6 +1177,8 @@ export function ZapVoiceCampaignsPage() {
             .map((r) => (r as { lead_id: string | null }).lead_id)
             .filter((x): x is string => Boolean(x)),
         )
+
+        let insertedCount = 0
 
         for (const lead of withPhone) {
           if (leadIdsComIscaPendente.has(lead.id)) {
@@ -1192,7 +1198,7 @@ export function ZapVoiceCampaignsPage() {
           const scheduledAt = new Date(startMs + cumulativeMs).toISOString()
           const messageBody = applyMessageTemplate(isca, vars)
 
-          rows.push({
+          const row: Record<string, unknown> = {
             user_id: userId,
             lead_id: lead.id,
             zv_campaign_id: c.id,
@@ -1207,9 +1213,18 @@ export function ZapVoiceCampaignsPage() {
             recipient_phone: lead.phone,
             min_delay_seconds: c.min_delay_seconds,
             max_delay_seconds: c.max_delay_seconds,
-          })
+          }
 
-          await supabase
+          const { error: insErr } = await supabase.from('scheduled_messages').insert([row])
+          if (insErr) {
+            if (insErr.code === '23505') {
+              continue
+            }
+            throw new Error(`Fila: ${insErr.message}`)
+          }
+          insertedCount += 1
+
+          const { error: progErr } = await supabase
             .from('lead_campaign_progress')
             .upsert(
               {
@@ -1218,12 +1233,14 @@ export function ZapVoiceCampaignsPage() {
                 campaign_id: c.id,
                 next_step_order: 1,
                 total_steps: ordered.length,
-                status: ordered.length === 1 ? 'active' : 'active',
+                status: 'active',
               },
               { onConflict: 'user_id,lead_id,campaign_id' },
             )
+          if (progErr) {
+            throw new Error(`Progresso da campanha: ${progErr.message}`)
+          }
 
-          // trava IA por uma janela grande; worker libera ao concluir.
           const lockUntilIso = new Date(startMs + 6 * 60 * 60 * 1000).toISOString()
           await supabase
             .from('leads')
@@ -1232,20 +1249,10 @@ export function ZapVoiceCampaignsPage() {
             .eq('user_id', userId)
         }
 
-        if (rows.length === 0) {
+        if (insertedCount === 0) {
           throw new Error(
-            'Nenhuma isca nova: todos os leads do público já têm isca pendente (ou tente de novo se houve conflito). A fila de isca vem só desta tela, não do webhook.',
+            'Nenhuma isca nova: todos os leads do público já têm isca ativa/pendente ou houve conflito de duplicata. A fila de isca vem só desta tela, não do webhook.',
           )
-        }
-
-        for (let i = 0; i < rows.length; i += INSERT_CHUNK) {
-          const batch = rows.slice(i, i + INSERT_CHUNK)
-          const { error: insErr } = await supabase
-            .from('scheduled_messages')
-            .insert(batch)
-          if (insErr) {
-            throw new Error(`Fila: ${insErr.message}`)
-          }
         }
 
         const { error: upErr } = await supabase
@@ -1259,7 +1266,7 @@ export function ZapVoiceCampaignsPage() {
         setCampaigns((prev) =>
           prev.map((x) => (x.id === c.id ? { ...x, status: 'active' as const } : x)),
         )
-        const total = rows.length
+        const total = insertedCount
         const nLeads = withPhone.length
         const inicioFila =
           startMs > now
@@ -1274,6 +1281,7 @@ export function ZapVoiceCampaignsPage() {
       } catch (err) {
         setError(err instanceof Error ? err.message : String(err))
       } finally {
+        activateInFlightRef.current = false
         setActivating(false)
       }
     },
