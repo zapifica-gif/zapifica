@@ -194,9 +194,20 @@ export async function transcribeAudioGemini(
     return { text: null, error: 'GEMINI_API_KEY ausente' }
   }
 
-  // Gemini espera base64 puro (sem prefixo data:...;base64,)
-  const cleanB64 = stripBase64(base64)
-  const mt = (mimeType.split(';')[0]?.trim() || 'audio/ogg').toLowerCase()
+  // Gemini exige base64 cru. A Evolution às vezes manda Data URI:
+  // "data:audio/ogg;base64,AAAA..."
+  const cleanBase64 = (base64 ?? '')
+    .trim()
+    .replace(/^data:.*?;base64,/i, '')
+    .replace(/\s/g, '')
+
+  if (!cleanBase64) {
+    return { text: null, error: 'base64 vazio após limpeza' }
+  }
+
+  const mt = (
+    (mimeType || 'audio/ogg').split(';')[0]?.trim() || 'audio/ogg'
+  ).toLowerCase()
 
   const url =
     `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=` +
@@ -206,44 +217,54 @@ export async function transcribeAudioGemini(
     'Transcreva este áudio de WhatsApp com precisão absoluta. ' +
     'Retorne APENAS o texto exato do que foi falado, sem explicações adicionais.'
 
-  const res = await fetch(url, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      contents: [
-        {
-          parts: [
-            { text: prompt },
-            { inline_data: { mime_type: mt, data: cleanB64 } },
-          ],
-        },
-      ],
-    }),
-  })
-
-  const raw = await res.text()
-  if (!res.ok) {
-    console.error('[Gemini STT] falha', res.status, raw.slice(0, 300))
-    return { text: null, error: raw.slice(0, 200) }
-  }
-
-  let out: string | null = null
   try {
-    const j = JSON.parse(raw) as {
-      candidates?: Array<{
-        content?: { parts?: Array<{ text?: string }> }
-      }>
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        contents: [
+          {
+            parts: [
+              { text: prompt },
+              { inline_data: { mime_type: mt, data: cleanBase64 } },
+            ],
+          },
+        ],
+      }),
+    })
+
+    const raw = await res.text()
+    if (!res.ok) {
+      console.error('Erro na API do Gemini:', res.status, raw)
+      return { text: null, error: `Gemini ${res.status}: ${raw.slice(0, 600)}` }
     }
-    out = j.candidates?.[0]?.content?.parts?.[0]?.text?.trim() ?? null
-  } catch {
-    out = raw.trim() || null
-  }
 
-  if (!out) {
-    return { text: null, error: 'resposta vazia' }
-  }
+    let out: string | null = null
+    try {
+      const j = JSON.parse(raw) as {
+        candidates?: Array<{
+          content?: { parts?: Array<{ text?: string }> }
+        }>
+      }
+      out = j.candidates?.[0]?.content?.parts?.[0]?.text?.trim() ?? null
+    } catch {
+      out = raw.trim() || null
+    }
 
-  return { text: out, error: null }
+    if (!out) {
+      console.error('Erro na API do Gemini: resposta sem texto', {
+        mimeType: mt,
+        base64Len: cleanBase64.length,
+        raw: raw.slice(0, 600),
+      })
+      return { text: null, error: 'resposta vazia' }
+    }
+
+    return { text: out, error: null }
+  } catch (error) {
+    console.error('Erro no try/catch do Gemini:', error)
+    return { text: null, error: error instanceof Error ? error.message : String(error) }
+  }
 }
 
 function pickExtension(mime: string): string {
