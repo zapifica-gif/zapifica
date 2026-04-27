@@ -5,6 +5,7 @@ import {
   type DashboardNavId,
 } from '../components/Sidebar'
 import { supabase } from '../lib/supabase'
+import { useImpersonation } from '../contexts/ImpersonationContext'
 
 type DashboardLayoutProps = {
   activeNav: DashboardNavId
@@ -20,6 +21,8 @@ export function DashboardLayout({
   children,
 }: DashboardLayoutProps) {
   const [isSuperadmin, setIsSuperadmin] = useState(false)
+  const [leadCredits, setLeadCredits] = useState<number | null>(null)
+  const { state: imp } = useImpersonation()
 
   useEffect(() => {
     let cancelled = false
@@ -28,19 +31,28 @@ export function DashboardLayout({
         data: { user },
       } = await supabase.auth.getUser()
       if (!user) return
-      const { data: prof } = await supabase
-        .from('user_profiles')
-        .select('role')
-        .eq('user_id', user.id)
-        .maybeSingle()
+      const effectiveUserId = imp.targetUserId ?? user.id
+      const [{ data: myProf }, { data: effProf }] = await Promise.all([
+        supabase
+          .from('user_profiles')
+          .select('role')
+          .eq('user_id', user.id)
+          .maybeSingle(),
+        supabase
+          .from('user_profiles')
+          .select('lead_credits')
+          .eq('user_id', effectiveUserId)
+          .maybeSingle(),
+      ])
       if (cancelled) return
-      const role = (prof as { role?: string } | null)?.role ?? 'client'
+      const role = (myProf as { role?: string } | null)?.role ?? 'client'
       setIsSuperadmin(role === 'superadmin')
+      setLeadCredits((effProf as { lead_credits?: number } | null)?.lead_credits ?? null)
     })()
     return () => {
       cancelled = true
     }
-  }, [])
+  }, [imp.targetUserId])
 
   return (
     <div className="flex min-h-dvh bg-zinc-50">
@@ -56,6 +68,15 @@ export function DashboardLayout({
             </p>
           </div>
           <div className="flex items-center gap-3">
+            {leadCredits != null ? (
+              <span className="hidden items-center rounded-full bg-zinc-100 px-3 py-2 text-xs font-semibold text-zinc-700 ring-1 ring-zinc-200 sm:inline-flex">
+                Créditos de Busca:{' '}
+                <span className="ml-1 tabular-nums text-zinc-900">
+                  {leadCredits}
+                </span>
+                <span className="text-zinc-400">/50</span>
+              </span>
+            ) : null}
             <div className="relative hidden sm:block">
               <Search
                 className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-zinc-400"

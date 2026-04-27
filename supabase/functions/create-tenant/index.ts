@@ -119,12 +119,13 @@ serve(async (req) => {
 
   const { error: upErr } = await admin
     .from('user_profiles')
-    .update({
+    .upsert({
+      user_id: newUid,
       company_name: companyName || null,
       company_logo_url: companyLogoUrl || null,
       role: 'client',
-    })
-    .eq('user_id', newUid)
+      lead_credits: 50,
+    }, { onConflict: 'user_id' })
 
   if (upErr) {
     return jsonResponse(

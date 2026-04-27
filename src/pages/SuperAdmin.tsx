@@ -94,8 +94,9 @@ export function SuperAdminPage() {
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
   const [companyName, setCompanyName] = useState('')
-  const [companyLogoUrl, setCompanyLogoUrl] = useState('')
+  const [logoFile, setLogoFile] = useState<File | null>(null)
   const [creating, setCreating] = useState(false)
+  const [uploadingLogo, setUploadingLogo] = useState(false)
 
   useEffect(() => {
     let cancelled = false
@@ -191,11 +192,40 @@ export function SuperAdminPage() {
       return
     }
     setCreating(true)
+
+    let logoUrl = ''
+    if (logoFile) {
+      setUploadingLogo(true)
+      const {
+        data: { user },
+      } = await supabase.auth.getUser()
+      if (!user) {
+        setUploadingLogo(false)
+        setCreating(false)
+        setError('Sessão inválida. Faça login novamente.')
+        return
+      }
+      const safeName = logoFile.name.replace(/[^a-zA-Z0-9._-]+/g, '_').slice(0, 80) || 'logo'
+      const path = `${user.id}/${Date.now()}_${safeName}`
+      const up = await supabase.storage
+        .from('company_logos')
+        .upload(path, logoFile, { upsert: true, cacheControl: '3600' })
+      if (up.error) {
+        setUploadingLogo(false)
+        setCreating(false)
+        setError(`Falha ao enviar logo: ${up.error.message}`)
+        return
+      }
+      const { data: pub } = supabase.storage.from('company_logos').getPublicUrl(path)
+      logoUrl = pub.publicUrl
+      setUploadingLogo(false)
+    }
+
     const r = await callCreateTenant({
       email: e,
       password: p,
       company_name: companyName.trim(),
-      company_logo_url: companyLogoUrl.trim(),
+      company_logo_url: logoUrl,
     })
     setCreating(false)
     if (!r.ok) {
@@ -206,7 +236,7 @@ export function SuperAdminPage() {
     setEmail('')
     setPassword('')
     setCompanyName('')
-    setCompanyLogoUrl('')
+    setLogoFile(null)
     // refresh list
     const { data: all } = await supabase
       .from('user_profiles')
@@ -360,27 +390,30 @@ export function SuperAdminPage() {
               </div>
               <div>
                 <label className="mb-1 block text-xs font-medium text-zinc-700">
-                  Link da logo (opcional)
+                  Logo da empresa (arquivo)
                 </label>
                 <input
-                  value={companyLogoUrl}
-                  onChange={(e) => setCompanyLogoUrl(e.target.value)}
-                  placeholder="https://…"
-                  className="w-full rounded-xl border border-zinc-200 bg-white px-3 py-2 text-sm shadow-inner focus:border-brand-300 focus:outline-none focus:ring-2 focus:ring-brand-500/20"
+                  type="file"
+                  accept="image/*"
+                  onChange={(e) => setLogoFile(e.target.files?.[0] ?? null)}
+                  className="w-full rounded-xl border border-zinc-200 bg-white px-3 py-2 text-sm shadow-inner file:mr-3 file:rounded-lg file:border-0 file:bg-zinc-100 file:px-3 file:py-1.5 file:text-xs file:font-semibold file:text-zinc-700 hover:file:bg-zinc-200/70 focus:border-brand-300 focus:outline-none focus:ring-2 focus:ring-brand-500/20"
                 />
+                <p className="mt-1 text-[11px] text-zinc-500">
+                  Enviamos para o bucket `company_logos` e salvamos a URL pública no perfil.
+                </p>
               </div>
               <button
                 type="button"
                 onClick={() => void handleCreate()}
-                disabled={creating}
+                disabled={creating || uploadingLogo}
                 className="inline-flex w-full items-center justify-center gap-2 rounded-xl bg-brand-600 px-4 py-3 text-sm font-bold text-white shadow-[0_10px_32px_rgba(106,0,184,0.30)] transition hover:bg-brand-700 disabled:opacity-60"
               >
-                {creating ? (
+                {creating || uploadingLogo ? (
                   <Loader2 className="h-4 w-4 animate-spin" aria-hidden />
                 ) : (
                   <Plus className="h-4 w-4" aria-hidden />
                 )}
-                Criar cliente
+                {uploadingLogo ? 'Enviando logo…' : 'Criar cliente'}
               </button>
               <p className="text-[11px] leading-relaxed text-zinc-500">
                 A conta é criada com e-mail confirmado. Depois você pode acessar
@@ -479,45 +512,72 @@ export function SuperAdminPage() {
               {leads.length}
             </span>
           </div>
-          <div className="mt-5 overflow-x-auto">
-            <table className="w-full min-w-[920px] border-collapse text-left text-sm">
-              <thead>
-                <tr className="border-b border-zinc-200 bg-zinc-50/70 text-[11px] font-semibold uppercase tracking-wider text-zinc-500">
-                  <th className="px-4 py-3">Empresa</th>
-                  <th className="px-4 py-3">Nome</th>
-                  <th className="px-4 py-3">Telefone</th>
-                  <th className="px-4 py-3">Origem</th>
-                  <th className="px-4 py-3">Tag</th>
-                  <th className="px-4 py-3">Criado em</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-zinc-100">
-                {leadsWithCompany.map((l) => (
-                  <tr key={l.id} className="hover:bg-zinc-50/40">
-                    <td className="px-4 py-3 font-medium text-zinc-900">
-                      {l.company}
-                    </td>
-                    <td className="px-4 py-3 text-zinc-800">{l.name}</td>
-                    <td className="px-4 py-3 text-zinc-700 tabular-nums">
-                      {prettyPhone(l.phone)}
-                    </td>
-                    <td className="px-4 py-3">
-                      <span className="inline-flex items-center rounded-full bg-zinc-100 px-2.5 py-1 text-xs font-semibold text-zinc-700 ring-1 ring-zinc-200">
-                        {l.source ?? '—'}
-                      </span>
-                    </td>
-                    <td className="px-4 py-3 text-zinc-700">{l.tag ?? '—'}</td>
-                    <td className="px-4 py-3 text-zinc-500 tabular-nums">
-                      {formatDateBr(l.created_at)}
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
+          <div className="mt-5 space-y-3">
+            {(() => {
+              const groups = new Map<string, Array<(typeof leadsWithCompany)[number]>>()
+              for (const l of leadsWithCompany) {
+                const key = l.company
+                const arr = groups.get(key) ?? []
+                arr.push(l)
+                groups.set(key, arr)
+              }
+              const ordered = [...groups.entries()].sort((a, b) => b[1].length - a[1].length)
+              return ordered.map(([company, rows]) => (
+                <details
+                  key={company}
+                  className="group overflow-hidden rounded-2xl border border-zinc-200 bg-white shadow-sm"
+                >
+                  <summary className="flex cursor-pointer list-none items-center justify-between gap-3 bg-gradient-to-r from-zinc-50 to-white px-4 py-3">
+                    <div className="min-w-0">
+                      <p className="truncate text-sm font-semibold text-zinc-900">
+                        {company}
+                      </p>
+                      <p className="mt-0.5 text-xs text-zinc-500">
+                        Total de leads capturados: <span className="font-semibold tabular-nums text-zinc-700">{rows.length}</span>
+                      </p>
+                    </div>
+                    <span className="rounded-full bg-zinc-100 px-2.5 py-1 text-xs font-semibold text-zinc-700 ring-1 ring-zinc-200">
+                      {rows.length}
+                    </span>
+                  </summary>
+                  <div className="overflow-x-auto border-t border-zinc-100">
+                    <table className="w-full min-w-[920px] border-collapse text-left text-sm">
+                      <thead>
+                        <tr className="border-b border-zinc-200 bg-zinc-50/70 text-[11px] font-semibold uppercase tracking-wider text-zinc-500">
+                          <th className="px-4 py-3">Nome</th>
+                          <th className="px-4 py-3">Telefone</th>
+                          <th className="px-4 py-3">Origem</th>
+                          <th className="px-4 py-3">Tag</th>
+                          <th className="px-4 py-3">Criado em</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-zinc-100">
+                        {rows.map((l) => (
+                          <tr key={l.id} className="hover:bg-zinc-50/40">
+                            <td className="px-4 py-3 text-zinc-800">{l.name}</td>
+                            <td className="px-4 py-3 text-zinc-700 tabular-nums">
+                              {prettyPhone(l.phone)}
+                            </td>
+                            <td className="px-4 py-3">
+                              <span className="inline-flex items-center rounded-full bg-zinc-100 px-2.5 py-1 text-xs font-semibold text-zinc-700 ring-1 ring-zinc-200">
+                                {l.source ?? '—'}
+                              </span>
+                            </td>
+                            <td className="px-4 py-3 text-zinc-700">{l.tag ?? '—'}</td>
+                            <td className="px-4 py-3 text-zinc-500 tabular-nums">
+                              {formatDateBr(l.created_at)}
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </details>
+              ))
+            })()}
           </div>
           <p className="mt-3 text-[11px] text-zinc-500">
-            Observação: para tabela “infinita” com filtros, a gente evolui para
-            paginação e busca por termo.
+            Dica: isso já é a “gaveta por cliente”. Próximo passo é paginação e filtros por origem/tag.
           </p>
         </section>
       ) : null}
