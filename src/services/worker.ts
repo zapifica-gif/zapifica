@@ -61,6 +61,9 @@ type ScheduledRow = {
   message_body: string | null
   segment_lead_ids: string[] | null
   recipient_phone?: string | null
+  min_delay_seconds?: number | null
+  max_delay_seconds?: number | null
+  zv_campaign_id?: string | null
 }
 
 type ChatContentType = 'text' | 'audio' | 'image' | 'document'
@@ -119,6 +122,31 @@ function messageBodyParaChat(row: ScheduledRow): string {
 }
 
 const BATCH_LIMIT = 30
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms))
+}
+
+function pickRandomIntInclusive(min: number, max: number): number {
+  const a = Math.ceil(min)
+  const b = Math.floor(max)
+  if (b < a) return a
+  return Math.floor(Math.random() * (b - a + 1)) + a
+}
+
+function defaultHumanDelayMs(): number {
+  // fallback do comportamento antigo: 5–15s
+  return pickRandomIntInclusive(5, 15) * 1000
+}
+
+function resolveDispatchDelayMs(row: ScheduledRow): number {
+  const minS = typeof row.min_delay_seconds === 'number' ? row.min_delay_seconds : null
+  const maxS = typeof row.max_delay_seconds === 'number' ? row.max_delay_seconds : null
+  if (minS == null || maxS == null) return defaultHumanDelayMs()
+  const safeMin = Number.isFinite(minS) ? Math.max(0, minS) : 0
+  const safeMax = Number.isFinite(maxS) ? Math.max(0, maxS) : safeMin
+  return pickRandomIntInclusive(safeMin, safeMax) * 1000
+}
 
 function pickPersonalRawFromUser(user: {
   phone?: string
@@ -342,7 +370,7 @@ export async function checkAndSendScheduledMessages(
   const { data, error } = await supabase
     .from('scheduled_messages')
     .select(
-      'id, user_id, lead_id, media_url, recipient_type, content_type, message_body, segment_lead_ids, recipient_phone',
+      'id, user_id, lead_id, media_url, recipient_type, content_type, message_body, segment_lead_ids, recipient_phone, min_delay_seconds, max_delay_seconds, zv_campaign_id',
     )
     .eq('status', 'pending')
     .eq('is_active', true)
@@ -387,6 +415,10 @@ export async function checkAndSendScheduledMessages(
     }
 
     try {
+      const delayMs = resolveDispatchDelayMs(row)
+      console.log(`[worker] Delay antes do envio: ${delayMs}ms | msg=${row.id}`)
+      await sleep(delayMs)
+
       const { targets, error: resolveErr } = await resolveRecipientPhones(
         supabase,
         row,
@@ -458,6 +490,26 @@ export async function checkAndSendScheduledMessages(
                 updated_at: new Date().toISOString(),
               })
               .eq('id', row.id)
+          }
+        }
+
+        // Libera IA quando terminar o funil para este lead (sem pendentes/processing).
+        if (row.lead_id && row.zv_campaign_id) {
+          const { count, error: cntErr } = await supabase
+            .from('scheduled_messages')
+            .select('id', { count: 'exact', head: true })
+            .eq('user_id', row.user_id)
+            .eq('lead_id', row.lead_id)
+            .eq('zv_campaign_id', row.zv_campaign_id)
+            .in('status', ['pending', 'processing'])
+            .eq('is_active', true)
+
+          if (!cntErr && (count ?? 0) === 0) {
+            await supabase
+              .from('leads')
+              .update({ funnel_locked_until: null })
+              .eq('id', row.lead_id)
+              .eq('user_id', row.user_id)
           }
         }
       } else if (oks.length > 0) {

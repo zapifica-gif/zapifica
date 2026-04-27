@@ -57,7 +57,8 @@ type Campaign = {
   /** Frases exatas (Meta Ads / respostas rápidas) — motor de roteamento virá a usar. */
   inbound_triggers: string[] | null
   status: CampaignStatus
-  default_delay_seconds: number
+  min_delay_seconds: number
+  max_delay_seconds: number
   created_at: string
   updated_at: string
 }
@@ -476,7 +477,7 @@ export function ZapVoiceCampaignsPage() {
     const list = await supabase
       .from('zv_campaigns')
       .select(
-        'id, user_id, name, description, audience_tags, scheduled_start_at, inbound_triggers, status, default_delay_seconds, created_at, updated_at',
+        'id, user_id, name, description, audience_tags, scheduled_start_at, inbound_triggers, status, min_delay_seconds, max_delay_seconds, created_at, updated_at',
       )
       .eq('user_id', user.id)
       .order('created_at', { ascending: false })
@@ -627,10 +628,11 @@ export function ZapVoiceCampaignsPage() {
           scheduled_start_at: startIso,
           inbound_triggers: normalizeInboundTriggers(newInboundTriggers),
           status: 'draft' as CampaignStatus,
-          default_delay_seconds: 60,
+          min_delay_seconds: 2,
+          max_delay_seconds: 15,
         })
         .select(
-          'id, user_id, name, description, audience_tags, scheduled_start_at, inbound_triggers, status, default_delay_seconds, created_at, updated_at',
+          'id, user_id, name, description, audience_tags, scheduled_start_at, inbound_triggers, status, min_delay_seconds, max_delay_seconds, created_at, updated_at',
         )
         .single()
       if (insert.error || !insert.data) {
@@ -706,6 +708,38 @@ export function ZapVoiceCampaignsPage() {
         throw new Error(
           `Não foi possível limpar a fila pendente: ${e.message}`,
         )
+      }
+    },
+    [],
+  )
+
+  const unlockLeadsForCampaign = useCallback(
+    async (campaignId: string, uid: string) => {
+      const { data, error: e } = await supabase
+        .from('scheduled_messages')
+        .select('lead_id')
+        .eq('user_id', uid)
+        .eq('zv_campaign_id', campaignId)
+        .not('lead_id', 'is', null)
+      if (e) {
+        console.warn('[ZapVoiceCampaigns] unlock leads list:', e.message)
+        return
+      }
+      const ids = Array.from(
+        new Set(
+          (data ?? [])
+            .map((r) => (r as { lead_id: string | null }).lead_id)
+            .filter((x): x is string => Boolean(x)),
+        ),
+      )
+      if (ids.length === 0) return
+      const { error: e2 } = await supabase
+        .from('leads')
+        .update({ funnel_locked_until: null })
+        .eq('user_id', uid)
+        .in('id', ids)
+      if (e2) {
+        console.warn('[ZapVoiceCampaigns] unlock leads update:', e2.message)
       }
     },
     [],
@@ -846,8 +880,20 @@ export function ZapVoiceCampaignsPage() {
               scheduled_at: scheduledAt,
               status: 'pending',
               recipient_phone: lead.phone,
+              min_delay_seconds: c.min_delay_seconds,
+              max_delay_seconds: c.max_delay_seconds,
             })
           }
+
+          // trava a IA durante o funil (até o último agendamento + max_delay + 60s de folga)
+          const lockUntilIso = new Date(
+            startMs + accMs + Math.max(0, c.max_delay_seconds) * 1000 + 60_000,
+          ).toISOString()
+          await supabase
+            .from('leads')
+            .update({ funnel_locked_until: lockUntilIso })
+            .eq('id', lead.id)
+            .eq('user_id', userId)
         }
 
         for (let i = 0; i < rows.length; i += INSERT_CHUNK) {
@@ -898,6 +944,7 @@ export function ZapVoiceCampaignsPage() {
       setActivating(true)
       setError(null)
       try {
+        await unlockLeadsForCampaign(c.id, userId)
         await clearPendingForCampaign(c.id, userId)
         const { error: e } = await supabase
           .from('zv_campaigns')
@@ -920,7 +967,7 @@ export function ZapVoiceCampaignsPage() {
         setActivating(false)
       }
     },
-    [userId, clearPendingForCampaign],
+    [userId, clearPendingForCampaign, unlockLeadsForCampaign],
   )
 
   const completeCampaign = useCallback(
@@ -929,6 +976,7 @@ export function ZapVoiceCampaignsPage() {
       setActivating(true)
       setError(null)
       try {
+        await unlockLeadsForCampaign(c.id, userId)
         await clearPendingForCampaign(c.id, userId)
         const { error: e } = await supabase
           .from('zv_campaigns')
@@ -953,7 +1001,7 @@ export function ZapVoiceCampaignsPage() {
         setActivating(false)
       }
     },
-    [userId, clearPendingForCampaign],
+    [userId, clearPendingForCampaign, unlockLeadsForCampaign],
   )
 
   const deleteCampaign = useCallback(
@@ -993,7 +1041,7 @@ export function ZapVoiceCampaignsPage() {
         message: '',
         media_type: 'text',
         media_url: null,
-        delay_seconds: selected.default_delay_seconds,
+        delay_seconds: 0,
         expected_trigger: null,
       })
       .select(
@@ -1498,32 +1546,68 @@ export function ZapVoiceCampaignsPage() {
                   <div className="rounded-xl border border-zinc-200 bg-zinc-50/60 p-3">
                     <p className="flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-wider text-zinc-500">
                       <Clock className="h-3 w-3" aria-hidden />
-                      Delay padrão entre mensagens
+                      Delay aleatório (anti-ban)
                     </p>
-                    <div className="mt-1.5 flex items-center gap-2">
-                      <input
-                        type="number"
-                        min={0}
-                        value={selected.default_delay_seconds}
-                        onChange={(e) => {
-                          const v = Math.max(0, Number(e.target.value) || 0)
-                          setCampaigns((prev) =>
-                            prev.map((c) =>
-                              c.id === selected.id
-                                ? { ...c, default_delay_seconds: v }
-                                : c,
-                            ),
-                          )
-                        }}
-                        onBlur={(e) =>
-                          void updateCampaign(selected.id, {
-                            default_delay_seconds: Math.max(0, Number(e.target.value) || 0),
-                          })
-                        }
-                        className="w-24 rounded-lg border border-zinc-200 bg-white px-2.5 py-2 text-xs tabular-nums shadow-inner focus:border-brand-300 focus:outline-none focus:ring-2 focus:ring-brand-500/20"
-                      />
-                      <span className="text-xs text-zinc-500">segundos</span>
+                    <div className="mt-1.5 grid grid-cols-[1fr_1fr] gap-2">
+                      <div className="flex items-center gap-2">
+                        <span className="text-[11px] font-medium text-zinc-600">Mín</span>
+                        <input
+                          type="number"
+                          min={0}
+                          value={selected.min_delay_seconds}
+                          onChange={(e) => {
+                            const v = Math.max(0, Number(e.target.value) || 0)
+                            setCampaigns((prev) =>
+                              prev.map((c) =>
+                                c.id === selected.id
+                                  ? {
+                                      ...c,
+                                      min_delay_seconds: v,
+                                      max_delay_seconds: Math.max(v, c.max_delay_seconds),
+                                    }
+                                  : c,
+                              ),
+                            )
+                          }}
+                          onBlur={(e) => {
+                            const v = Math.max(0, Number(e.target.value) || 0)
+                            void updateCampaign(selected.id, {
+                              min_delay_seconds: v,
+                              max_delay_seconds: Math.max(v, selected.max_delay_seconds),
+                            })
+                          }}
+                          className="w-full rounded-lg border border-zinc-200 bg-white px-2.5 py-2 text-xs tabular-nums shadow-inner focus:border-brand-300 focus:outline-none focus:ring-2 focus:ring-brand-500/20"
+                        />
+                      </div>
+                      <div className="flex items-center gap-2">
+                        <span className="text-[11px] font-medium text-zinc-600">Máx</span>
+                        <input
+                          type="number"
+                          min={0}
+                          value={selected.max_delay_seconds}
+                          onChange={(e) => {
+                            const v = Math.max(0, Number(e.target.value) || 0)
+                            setCampaigns((prev) =>
+                              prev.map((c) =>
+                                c.id === selected.id
+                                  ? { ...c, max_delay_seconds: Math.max(v, c.min_delay_seconds) }
+                                  : c,
+                              ),
+                            )
+                          }}
+                          onBlur={(e) => {
+                            const v = Math.max(0, Number(e.target.value) || 0)
+                            void updateCampaign(selected.id, {
+                              max_delay_seconds: Math.max(v, selected.min_delay_seconds),
+                            })
+                          }}
+                          className="w-full rounded-lg border border-zinc-200 bg-white px-2.5 py-2 text-xs tabular-nums shadow-inner focus:border-brand-300 focus:outline-none focus:ring-2 focus:ring-brand-500/20"
+                        />
+                      </div>
                     </div>
+                    <p className="mt-1 text-[11px] text-zinc-500">
+                      Antes de cada mensagem, o sistema sorteia um valor entre Mín e Máx (segundos).
+                    </p>
                   </div>
 
                   <div className="rounded-xl border border-zinc-200 bg-zinc-50/60 p-3">

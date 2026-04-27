@@ -16,6 +16,8 @@ type CampaignRow = {
   audience_tags: string[] | null
   inbound_triggers: string[] | null
   scheduled_start_at: string | null
+  min_delay_seconds?: number | null
+  max_delay_seconds?: number | null
   created_at: string
 }
 
@@ -106,7 +108,7 @@ export async function processZapVoiceInbound(
   const { data: campaigns, error: cErr } = await p.supabase
     .from('zv_campaigns')
     .select(
-      'id, name, audience_tags, inbound_triggers, scheduled_start_at, created_at',
+      'id, name, audience_tags, inbound_triggers, scheduled_start_at, min_delay_seconds, max_delay_seconds, created_at',
     )
     .eq('user_id', p.userId)
     .eq('status', 'active')
@@ -254,7 +256,30 @@ export async function processZapVoiceInbound(
       recipient_phone: L.phone ?? p.phoneDigits,
       event_id: null,
       evolution_instance_name: p.instanceName,
+      min_delay_seconds:
+        typeof matched.min_delay_seconds === 'number' ? matched.min_delay_seconds : null,
+      max_delay_seconds:
+        typeof matched.max_delay_seconds === 'number' ? matched.max_delay_seconds : null,
     })
+  }
+
+  // Lock do funil: trava IA até passar do último scheduled_at + max_delay (anti-ban).
+  // Se a campanha não tiver max_delay, usa 15s (padrão antigo do worker).
+  const lastScheduledMs = startMs + accMs
+  const maxDelayS =
+    typeof matched.max_delay_seconds === 'number' && Number.isFinite(matched.max_delay_seconds)
+      ? Math.max(0, matched.max_delay_seconds)
+      : 15
+  const lockUntilIso = new Date(lastScheduledMs + maxDelayS * 1000 + 60_000).toISOString()
+
+  const { error: lockErr } = await p.supabase
+    .from('leads')
+    .update({ funnel_locked_until: lockUntilIso })
+    .eq('id', p.leadId)
+    .eq('user_id', p.userId)
+  if (lockErr) {
+    console.error('[ZapVoice inbound] lock lead', lockErr.message)
+    return { enqueued: false, reason: 'erro_lock_lead' }
   }
 
   for (let i = 0; i < rows.length; i += INSERT_CHUNK) {

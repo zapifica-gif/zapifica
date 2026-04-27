@@ -28,6 +28,7 @@ type ScheduledRow = {
   evolution_instance_name: string | null
   min_delay_seconds?: number | null
   max_delay_seconds?: number | null
+  zv_campaign_id?: string | null
 }
 
 type ChatContentType = 'text' | 'audio' | 'image' | 'document'
@@ -263,7 +264,7 @@ serve(async () => {
   const { data: candidates, error: fetchError } = await supabase
     .from('scheduled_messages')
     .select(
-      'id, user_id, event_id, lead_id, media_url, is_active, recipient_type, content_type, message_body, scheduled_at, status, segment_lead_ids, recipient_phone, evolution_instance_name, min_delay_seconds, max_delay_seconds',
+      'id, user_id, event_id, lead_id, media_url, is_active, recipient_type, content_type, message_body, scheduled_at, status, segment_lead_ids, recipient_phone, evolution_instance_name, min_delay_seconds, max_delay_seconds, zv_campaign_id',
     )
     .eq('status', 'pending')
     .eq('is_active', true)
@@ -604,6 +605,37 @@ serve(async () => {
               updated_at: new Date().toISOString(),
             })
             .eq('id', msg.id)
+        }
+      }
+
+      // Se este agendamento pertence a um funil (Zap Voice), e não existem mais
+      // mensagens pendentes/processing para este lead+campanha, libera a IA.
+      if (msg.lead_id && msg.zv_campaign_id) {
+        const { count, error: cntErr } = await supabase
+          .from('scheduled_messages')
+          .select('id', { count: 'exact', head: true })
+          .eq('user_id', msg.user_id)
+          .eq('lead_id', msg.lead_id)
+          .eq('zv_campaign_id', msg.zv_campaign_id)
+          .in('status', ['pending', 'processing'])
+          .eq('is_active', true)
+
+        if (cntErr) {
+          console.warn('[Agenda Suprema] Falha ao checar fim do funil:', cntErr.message)
+        } else if ((count ?? 0) === 0) {
+          const { error: unlockErr } = await supabase
+            .from('leads')
+            .update({ funnel_locked_until: null })
+            .eq('id', msg.lead_id)
+            .eq('user_id', msg.user_id)
+          if (unlockErr) {
+            console.warn('[Agenda Suprema] Falha ao liberar funil no lead:', unlockErr.message)
+          } else {
+            console.log('[Agenda Suprema] Funil finalizado — IA liberada', {
+              lead_id: msg.lead_id,
+              zv_campaign_id: msg.zv_campaign_id,
+            })
+          }
         }
       }
 
