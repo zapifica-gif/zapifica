@@ -220,6 +220,8 @@ export function ChatWindow({ open, onClose, lead }: ChatWindowProps) {
   const [aiEnabled, setAiEnabled] = useState<boolean>(true)
   const [loadingAi, setLoadingAi] = useState(false)
   const [aiError, setAiError] = useState<string | null>(null)
+  const [campaignLabel, setCampaignLabel] = useState<string | null>(null)
+  const [campaignLoading, setCampaignLoading] = useState(false)
   const [pendingMedia, setPendingMedia] = useState<
     Record<string, 'sending' | 'failed'>
   >({})
@@ -312,6 +314,72 @@ export function ChatWindow({ open, onClose, lead }: ChatWindowProps) {
       setAiEnabled(enabled !== false)
       setLoadingAi(false)
     })()
+  }, [open, lead?.id])
+
+  // Identificação da campanha de origem (mais recente):
+  // 1) se existe progresso ativo para este lead, usa essa campanha
+  // 2) senão, pega a última conclusão (lead_campaign_completions)
+  useEffect(() => {
+    if (!open || !lead) return
+    let cancelled = false
+    setCampaignLoading(true)
+    setCampaignLabel(null)
+    void (async () => {
+      try {
+        const { data: prog, error: pErr } = await supabase
+          .from('lead_campaign_progress')
+          .select('campaign_id, updated_at')
+          .eq('lead_id', lead.id)
+          .in('status', ['active', 'awaiting_last_send'])
+          .order('updated_at', { ascending: false })
+          .limit(1)
+        if (cancelled) return
+        if (!pErr && prog && prog[0]?.campaign_id) {
+          const cid = (prog[0] as any).campaign_id as string
+          const { data: camp } = await supabase
+            .from('zv_campaigns')
+            .select('name')
+            .eq('id', cid)
+            .maybeSingle()
+          if (cancelled) return
+          const nm = (camp as any)?.name ? String((camp as any).name) : null
+          setCampaignLabel(nm ? `Campanha: ${nm}` : 'Campanha: (não encontrada)')
+          setCampaignLoading(false)
+          return
+        }
+
+        const { data: comps, error: cErr } = await supabase
+          .from('lead_campaign_completions')
+          .select('campaign_id, completed_at')
+          .eq('lead_id', lead.id)
+          .order('completed_at', { ascending: false })
+          .limit(1)
+        if (cancelled) return
+        if (cErr || !comps || !comps[0]?.campaign_id) {
+          setCampaignLabel(null)
+          setCampaignLoading(false)
+          return
+        }
+        const cid = (comps[0] as any).campaign_id as string
+        const { data: camp } = await supabase
+          .from('zv_campaigns')
+          .select('name')
+          .eq('id', cid)
+          .maybeSingle()
+        if (cancelled) return
+        const nm = (camp as any)?.name ? String((camp as any).name) : null
+        setCampaignLabel(nm ? `Campanha: ${nm} (concluída)` : 'Campanha: (fluxo excluído)')
+        setCampaignLoading(false)
+      } catch {
+        if (!cancelled) {
+          setCampaignLabel(null)
+          setCampaignLoading(false)
+        }
+      }
+    })()
+    return () => {
+      cancelled = true
+    }
   }, [open, lead?.id])
 
   async function toggleAiEnabled() {
@@ -889,6 +957,21 @@ export function ChatWindow({ open, onClose, lead }: ChatWindowProps) {
             <p className="mt-0.5 truncate text-xs text-zinc-500 tabular-nums">
               {lead?.phone ?? '—'}
             </p>
+            {campaignLoading ? (
+              <p className="mt-1 text-[11px] text-zinc-400">Carregando campanha…</p>
+            ) : campaignLabel ? (
+              <button
+                type="button"
+                onClick={() => {
+                  window.alert(campaignLabel)
+                }}
+                className="mt-1 inline-flex items-center gap-1.5 rounded-full border border-zinc-200 bg-white px-2.5 py-1 text-[11px] font-semibold text-zinc-700 transition hover:bg-zinc-50"
+                title="Ver campanha de origem"
+              >
+                <span className="h-1.5 w-1.5 rounded-full bg-brand-500" />
+                {campaignLabel}
+              </button>
+            ) : null}
             <button
               type="button"
               onClick={abrirConversasFuturas}

@@ -77,12 +77,14 @@ type Campaign = {
   scheduled_start_at: string | null
   /** Texto da isca (primeiro disparo ativo). */
   isca_message: string
+  /** Variações de isca (ex.: 5 opções) para revezar por lead */
+  isca_messages?: string[] | null
   /** Regra de comparação com a palavra-chave. */
   trigger_condition: ZvTriggerCondition
   /** Palavra-chave (gatilho). */
   trigger_keyword: string | null
   /** Fluxo de automação (etapas em zv_funnels). */
-  flow_id: string
+  flow_id: string | null
   status: CampaignStatus
   min_delay_seconds: number
   max_delay_seconds: number
@@ -449,6 +451,13 @@ export function ZapVoiceCampaignsPage() {
   const [newIscaMessage, setNewIscaMessage] = useState(
     'Olá {nome}, tudo bem? Aqui é da equipe Zapifica…',
   )
+  const [newIscas, setNewIscas] = useState<string[]>([
+    'Olá {nome}, tudo bem? Aqui é da equipe Zapifica…',
+    'Oi {nome}! Tudo certo? Só confirmando uma coisa rapidinho…',
+    'Olá! Esse WhatsApp é o contato certo pra falar com você?',
+    'Oi! Posso te fazer uma pergunta rápida? 🙂',
+    'Olá {nome}! Vi seu contato e queria confirmar uma informação.',
+  ])
   const [newTriggerCondition, setNewTriggerCondition] = useState<ZvTriggerCondition>('equals')
   const [newTriggerKeyword, setNewTriggerKeyword] = useState('')
   /** Fluxo existente (`zv_flows`) vinculado à nova campanha — nunca criar fluxo ao criar campanha. */
@@ -626,7 +635,7 @@ export function ZapVoiceCampaignsPage() {
     const list = await supabase
       .from('zv_campaigns')
       .select(
-        'id, user_id, name, description, audience_tags, audience_type, audience_id, audience_lead_ids, scheduled_start_at, isca_message, trigger_condition, trigger_keyword, flow_id, status, min_delay_seconds, max_delay_seconds, created_at, updated_at',
+        'id, user_id, name, description, audience_tags, audience_type, audience_id, audience_lead_ids, scheduled_start_at, isca_message, isca_messages, trigger_condition, trigger_keyword, flow_id, status, min_delay_seconds, max_delay_seconds, created_at, updated_at',
       )
       .eq('user_id', user.id)
       .order('created_at', { ascending: false })
@@ -646,6 +655,7 @@ export function ZapVoiceCampaignsPage() {
         trigger_keyword?: string | null
         scheduled_start_at?: string | null
         isca_message?: string | null
+        isca_messages?: string[] | null
         trigger_condition?: ZvTriggerCondition | null
         flow_id?: string | null
       }
@@ -658,8 +668,9 @@ export function ZapVoiceCampaignsPage() {
         audience_lead_ids: (c.audience_lead_ids ?? []) as string[],
         trigger_keyword: kw || null,
         isca_message: (c.isca_message ?? '').trim() || '',
+        isca_messages: (c.isca_messages ?? null) as string[] | null,
         trigger_condition: (c.trigger_condition ?? 'equals') as ZvTriggerCondition,
-        flow_id: (c.flow_id ?? '') as string,
+        flow_id: (c.flow_id ?? null) as string | null,
         scheduled_start_at: c.scheduled_start_at ?? null,
       } as Campaign
     })
@@ -811,6 +822,7 @@ export function ZapVoiceCampaignsPage() {
           scheduled_start_at: startIso,
           flow_id: newCampaignFlowId,
           isca_message: newIscaMessage.trim() || 'Olá {nome}, tudo bem?',
+          isca_messages: newIscas.map((x) => x.trim()).filter(Boolean).slice(0, 5),
           trigger_condition: newTriggerCondition,
           trigger_keyword: newTriggerKeyword.trim() || null,
           status: 'draft' as CampaignStatus,
@@ -818,7 +830,7 @@ export function ZapVoiceCampaignsPage() {
           max_delay_seconds: 15,
         })
         .select(
-          'id, user_id, name, description, audience_tags, scheduled_start_at, isca_message, trigger_condition, trigger_keyword, flow_id, status, min_delay_seconds, max_delay_seconds, created_at, updated_at',
+          'id, user_id, name, description, audience_tags, scheduled_start_at, isca_message, isca_messages, trigger_condition, trigger_keyword, flow_id, status, min_delay_seconds, max_delay_seconds, created_at, updated_at',
         )
         .single()
       if (insert.error || !insert.data) {
@@ -829,6 +841,7 @@ export function ZapVoiceCampaignsPage() {
         trigger_keyword?: string | null
         scheduled_start_at?: string | null
         isca_message?: string | null
+        isca_messages?: string[] | null
         trigger_condition?: string | null
         flow_id?: string | null
       }
@@ -837,6 +850,7 @@ export function ZapVoiceCampaignsPage() {
         audience_tags: normalizeTags(ins.audience_tags),
         trigger_keyword: ins.trigger_keyword?.trim() ? ins.trigger_keyword.trim() : null,
         isca_message: (ins.isca_message ?? '').trim() || '',
+        isca_messages: (ins.isca_messages ?? null) as string[] | null,
         trigger_condition: (ins.trigger_condition ?? 'equals') as ZvTriggerCondition,
         flow_id: (ins.flow_id ?? newCampaignFlowId) as string,
         scheduled_start_at: ins.scheduled_start_at ?? null,
@@ -850,6 +864,13 @@ export function ZapVoiceCampaignsPage() {
       setNewDescription('')
       setNewScheduledStartLocal('')
       setNewIscaMessage('Olá {nome}, tudo bem? Aqui é da equipe Zapifica…')
+      setNewIscas([
+        'Olá {nome}, tudo bem? Aqui é da equipe Zapifica…',
+        'Oi {nome}! Tudo certo? Só confirmando uma coisa rapidinho…',
+        'Olá! Esse WhatsApp é o contato certo pra falar com você?',
+        'Oi! Posso te fazer uma pergunta rápida? 🙂',
+        'Olá {nome}! Vi seu contato e queria confirmar uma informação.',
+      ])
       setNewTriggerCondition('equals')
       setNewTriggerKeyword('')
       setNewCampaignFlowId('')
@@ -868,6 +889,7 @@ export function ZapVoiceCampaignsPage() {
     newAudienceTags,
     newScheduledStartLocal,
     newIscaMessage,
+    newIscas,
     newTriggerCondition,
     newTriggerKeyword,
     newCampaignFlowId,
@@ -1012,10 +1034,12 @@ export function ZapVoiceCampaignsPage() {
   const deleteFlow = useCallback(
     async (f: ZvFlow) => {
       setError(null)
-      const n = (campaigns as Campaign[]).filter((c) => c.flow_id === f.id).length
-      if (n > 0) {
+      const blockers = (campaigns as Campaign[]).filter(
+        (c) => c.flow_id === f.id && (c.status === 'draft' || c.status === 'active' || c.status === 'paused'),
+      )
+      if (blockers.length > 0) {
         setError(
-          `Não é possível excluir: ${n} campanha(s) usam este fluxo. Na guia Campanhas, vincule outro fluxo a cada campanha (ou exclua a campanha) e tente de novo.`,
+          `Não é possível excluir: ${blockers.length} campanha(s) ainda estão em rascunho/ativas/pausadas usando este fluxo. Na guia Campanhas, troque o fluxo dessas campanhas (ou conclua/exclua) e tente de novo.`,
         )
         return
       }
@@ -1114,11 +1138,18 @@ export function ZapVoiceCampaignsPage() {
 
         const audienceType = (c.audience_type ?? 'tags') as 'tags' | 'audience' | 'individual'
 
-        const isca = (c.isca_message ?? '').trim()
-        if (!isca) {
-          throw new Error('Preencha a mensagem da isca na guia Campanhas antes de ativar.')
+        const iscas = (c.isca_messages ?? [])
+          .map((x) => (x ?? '').trim())
+          .filter(Boolean)
+          .slice(0, 5)
+        const fallbackIsca = (c.isca_message ?? '').trim()
+        if (iscas.length === 0 && !fallbackIsca) {
+          throw new Error('Preencha ao menos 1 mensagem de isca na guia Campanhas antes de ativar.')
         }
 
+        if (!c.flow_id) {
+          throw new Error('Esta campanha está sem fluxo (provavelmente o fluxo foi excluído). Selecione outro fluxo antes de ativar.')
+        }
         const { data: stepsData, error: stepsErr } = await supabase
           .from('zv_funnels')
           .select(
@@ -1293,7 +1324,10 @@ export function ZapVoiceCampaignsPage() {
           // ISCA: somente o painel enfileira (zv_funnel_step_id nulo). Webhook nunca manda isca.
           cumulativeMs += pickRandomIntInclusive(minS, maxS) * 1000
           const scheduledAt = new Date(startMs + cumulativeMs).toISOString()
-          const messageBody = applyMessageTemplate(isca, vars)
+          // Rotação de iscas: distribui as 5 opções entre os leads (A,B,C,D,E, A,B…).
+          const pick = (iscas.length > 0 ? iscas : [fallbackIsca]).filter(Boolean)
+          const chosen = pick.length ? pick[insertedCount % pick.length]! : (fallbackIsca || 'Olá {nome}, tudo bem?')
+          const messageBody = applyMessageTemplate(chosen, vars)
 
           // Se o usuário está ativando/enviando uma NOVA isca para este lead,
           // precisamos permitir uma nova execução do fluxo após o gatilho.
@@ -1952,17 +1986,36 @@ export function ZapVoiceCampaignsPage() {
 
               <div>
                 <label className="mb-1 block text-xs font-medium text-zinc-700">
-                  Mensagem da isca
+                  Mensagens de isca (5 opções, revezamento automático)
                 </label>
-                <textarea
-                  rows={3}
-                  value={newIscaMessage}
-                  onChange={(e) => setNewIscaMessage(e.target.value)}
-                  className="w-full rounded-lg border border-zinc-200 bg-white px-3 py-2 text-sm shadow-inner focus:border-brand-300 focus:outline-none focus:ring-2 focus:ring-brand-500/20"
-                />
+                <div className="space-y-2">
+                  {newIscas.map((v, idx) => (
+                    <div key={idx} className="rounded-lg border border-zinc-200 bg-white p-2">
+                      <p className="mb-1 text-[11px] font-semibold text-zinc-600">
+                        Isca {idx + 1}
+                      </p>
+                      <textarea
+                        rows={2}
+                        value={v}
+                        onChange={(e) => {
+                          const next = newIscas.slice()
+                          next[idx] = e.target.value
+                          setNewIscas(next)
+                          if (idx === 0) setNewIscaMessage(e.target.value)
+                        }}
+                        className="w-full rounded-lg border border-zinc-200 bg-zinc-50 px-3 py-2 text-sm shadow-inner focus:border-brand-300 focus:outline-none focus:ring-2 focus:ring-brand-500/20"
+                      />
+                    </div>
+                  ))}
+                </div>
                 <MessageVariableChips
                   variables={MESSAGE_VARIABLES}
-                  onInsert={(key) => setNewIscaMessage((prev) => prev + key)}
+                  onInsert={(key) => {
+                    const next = newIscas.slice()
+                    next[0] = (next[0] ?? '') + key
+                    setNewIscas(next)
+                    setNewIscaMessage((prev) => prev + key)
+                  }}
                   className="mt-2"
                 />
               </div>
