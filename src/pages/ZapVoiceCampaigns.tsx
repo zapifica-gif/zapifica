@@ -1241,8 +1241,11 @@ export function ZapVoiceCampaignsPage() {
                 user_id: userId,
                 lead_id: lead.id,
                 campaign_id: c.id,
-                next_step_order: 1,
-                total_steps: ordered.length,
+                next_step_order: (ordered[0]?.step_order ?? 1),
+                total_steps: ordered.reduce(
+                  (acc, s) => Math.max(acc, Number(s.step_order) || 0),
+                  0,
+                ) || ordered.length,
                 status: 'active',
               },
               { onConflict: 'user_id,lead_id,campaign_id' },
@@ -1458,7 +1461,25 @@ export function ZapVoiceCampaignsPage() {
       setError(`Falha ao excluir etapa: ${e.message}`)
       return
     }
-    setSteps((prev) => prev.filter((s) => s.id !== stepId))
+    // Evita gaps em step_order: após excluir, renumera 1..N no fluxo selecionado.
+    const nextLocal = steps.filter((s) => s.id !== stepId).sort((a, b) => a.step_order - b.step_order)
+    setSteps(nextLocal)
+    if (selectedFlowId) {
+      // Estratégia segura contra unique(flow_id, step_order):
+      // 1) joga tudo para step_order temporário (negativos únicos)
+      // 2) escreve a ordem final 1..N
+      for (let i = 0; i < nextLocal.length; i += 1) {
+        const s = nextLocal[i]!
+        const tempOrder = -1000 - i
+        await supabase.from('zv_funnels').update({ step_order: tempOrder }).eq('id', s.id)
+      }
+      for (let i = 0; i < nextLocal.length; i += 1) {
+        const s = nextLocal[i]!
+        const newOrder = i + 1
+        await supabase.from('zv_funnels').update({ step_order: newOrder }).eq('id', s.id)
+      }
+      setSteps((prev) => prev.slice().sort((a, b) => a.step_order - b.step_order))
+    }
   }, [])
 
   const moveStep = useCallback(

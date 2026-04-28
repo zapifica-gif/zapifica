@@ -749,7 +749,8 @@ serve(async () => {
                 'id, step_order, message, media_type, media_url, advance_type, min_delay_seconds, max_delay_seconds',
               )
               .eq('flow_id', zvFlowId)
-              .eq('step_order', nextOrder)
+              .gte('step_order', nextOrder)
+              .order('step_order', { ascending: true })
               .maybeSingle()
 
             if (nextStep && String((nextStep as any).advance_type ?? 'auto') === 'timer') {

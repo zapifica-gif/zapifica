@@ -129,13 +129,16 @@ async function handleActiveCampaignProgress(
       return { enqueued: false, reason: 'fluxo_vazio', campaignId: progress.campaign_id, suppressAi: true }
     }
 
+    // Primeira etapa do fluxo pós-gatilho. Pode haver gaps no step_order (ex.: usuário deletou etapa no painel).
+    // Então buscamos a PRIMEIRA etapa existente (step_order >= 1, ordenado).
     const { data: firstStep, error: s1Err } = await p.supabase
       .from('zv_funnels')
       .select(
         'id, step_order, message, media_type, media_url, delay_seconds, advance_type, expected_trigger, min_delay_seconds, max_delay_seconds',
       )
       .eq('flow_id', flowId)
-      .eq('step_order', 1)
+      .gte('step_order', 1)
+      .order('step_order', { ascending: true })
       .maybeSingle()
 
     if (s1Err) {
@@ -173,13 +176,15 @@ async function handleActiveCampaignProgress(
     })
   }
 
+  // Próxima etapa: tolera gaps no step_order buscando o próximo >= next_step_order.
   const { data: stepRow, error: stepErr } = await p.supabase
     .from('zv_funnels')
     .select(
       'id, step_order, message, media_type, media_url, delay_seconds, advance_type, expected_trigger, min_delay_seconds, max_delay_seconds',
     )
     .eq('flow_id', flowId)
-    .eq('step_order', progress.next_step_order)
+    .gte('step_order', progress.next_step_order)
+    .order('step_order', { ascending: true })
     .maybeSingle()
 
   if (stepErr) {
@@ -378,16 +383,17 @@ export async function processZapVoiceInbound(
     }
 
     const startMs = Date.now()
-    const totalSteps = ordered.length
-    if (totalSteps > 0) {
+  const totalSteps = ordered.length
+  const maxStepOrder = ordered.reduce((acc, s) => Math.max(acc, Number(s.step_order) || 0), 0)
+  if (totalSteps > 0 && maxStepOrder > 0) {
       const progIns = await p.supabase
         .from('lead_campaign_progress')
         .insert({
           user_id: p.userId,
           lead_id: p.leadId,
           campaign_id: matched.id,
-          next_step_order: 1,
-          total_steps: totalSteps,
+        next_step_order: ordered[0]!.step_order,
+        total_steps: maxStepOrder,
           status: 'active',
         })
         .select('id, campaign_id, next_step_order, total_steps')
@@ -422,7 +428,7 @@ export async function processZapVoiceInbound(
           next_step_order: number
           total_steps: number
         }
-        const first = ordered[0] as FunnelRow
+      const first = ordered[0] as FunnelRow
         const enq1 = await enqueueFunnelStepAndAdvance({
           supabase: p.supabase,
           userId: p.userId,
@@ -536,7 +542,7 @@ async function enqueueFunnelStepAndAdvance(p: {
     return { enqueued: false, reason: 'erro_fila', campaignId: p.progress.campaign_id, suppressAi: true }
   }
 
-  const nextOrder = p.progress.next_step_order + 1
+  const nextOrder = (Number(p.step.step_order) || p.progress.next_step_order) + 1
   const isLastEnqueued = nextOrder > p.progress.total_steps
   const up = await p.supabase
     .from('lead_campaign_progress')
