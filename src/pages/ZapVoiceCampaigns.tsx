@@ -1208,6 +1208,23 @@ export function ZapVoiceCampaignsPage() {
           const scheduledAt = new Date(startMs + cumulativeMs).toISOString()
           const messageBody = applyMessageTemplate(isca, vars)
 
+          // Se o usuário está ativando/enviando uma NOVA isca para este lead,
+          // precisamos permitir uma nova execução do fluxo após o gatilho.
+          // Caso contrário, a barreira anti-loop (`lead_campaign_completions`) pode bloquear em `ja_concluida`.
+          await supabase
+            .from('lead_campaign_completions')
+            .delete()
+            .eq('user_id', userId)
+            .eq('lead_id', lead.id)
+            .eq('campaign_id', c.id)
+
+          await supabase
+            .from('lead_campaign_progress')
+            .delete()
+            .eq('user_id', userId)
+            .eq('lead_id', lead.id)
+            .eq('campaign_id', c.id)
+
           const row: Record<string, unknown> = {
             user_id: userId,
             lead_id: lead.id,
