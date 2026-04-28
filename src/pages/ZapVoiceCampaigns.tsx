@@ -67,6 +67,12 @@ type Campaign = {
   description: string | null
   /** Tags de público (OR): o disparo considera qualquer lead com uma delas. */
   audience_tags: string[] | null
+  /** Tipo de público: tags | audience | individual */
+  audience_type?: 'tags' | 'audience' | 'individual'
+  /** Público salvo (zv_audiences.id) quando audience_type=audience */
+  audience_id?: string | null
+  /** Leads individuais (uuid[]) quando audience_type=individual */
+  audience_lead_ids?: string[] | null
   /** Início do funil agendado (futuro); a isca e o fluxo somam atrasos a partir daqui. */
   scheduled_start_at: string | null
   /** Texto da isca (primeiro disparo ativo). */
@@ -101,6 +107,12 @@ type FunnelStep = {
 }
 
 type AudienceTagOption = { tag: string; count: number }
+
+type ZvAudience = {
+  id: string
+  name: string
+  lead_ids: string[]
+}
 
 type TagMultiPickerProps = {
   options: AudienceTagOption[]
@@ -415,6 +427,11 @@ export function ZapVoiceCampaignsPage() {
   )
   const [selectedFlowId, setSelectedFlowId] = useState<string | null>(null)
   const [audienceOptions, setAudienceOptions] = useState<AudienceTagOption[]>([])
+  const [savedAudiences, setSavedAudiences] = useState<ZvAudience[]>([])
+  const [leadPickerOpen, setLeadPickerOpen] = useState(false)
+  const [leadPickerBusy, setLeadPickerBusy] = useState(false)
+  const [leadPickerQuery, setLeadPickerQuery] = useState('')
+  const [leadPickerRows, setLeadPickerRows] = useState<Array<{ id: string; name: string; phone: string | null; tag: string | null }>>([])
 
   const [steps, setSteps] = useState<FunnelStep[]>([])
   const [stepsLoading, setStepsLoading] = useState(false)
@@ -497,6 +514,42 @@ export function ZapVoiceCampaignsPage() {
     setAudienceOptions(options)
   }, [])
 
+  const loadSavedAudiences = useCallback(async (uid: string) => {
+    const { data, error } = await supabase
+      .from('zv_audiences')
+      .select('id, name, lead_ids')
+      .eq('user_id', uid)
+      .order('created_at', { ascending: false })
+      .limit(200)
+    if (error) {
+      console.error('[ZapVoiceCampaigns] zv_audiences:', error.message)
+      setSavedAudiences([])
+      return
+    }
+    setSavedAudiences((data ?? []) as ZvAudience[])
+  }, [])
+
+  const ensureLeadPickerRows = useCallback(async (uid: string) => {
+    if (leadPickerRows.length > 0) return
+    setLeadPickerBusy(true)
+    try {
+      const { data, error } = await supabase
+        .from('leads')
+        .select('id, name, phone, tag')
+        .eq('user_id', uid)
+        .order('created_at', { ascending: false })
+        .limit(1200)
+      if (error) {
+        console.warn('[ZapVoiceCampaigns] lead picker leads:', error.message)
+        setLeadPickerRows([])
+        return
+      }
+      setLeadPickerRows((data ?? []) as any)
+    } finally {
+      setLeadPickerBusy(false)
+    }
+  }, [leadPickerRows.length])
+
   const loadHistoryStats = useCallback(
     async (campaignIds: string[], uid: string) => {
       if (campaignIds.length === 0) {
@@ -573,7 +626,7 @@ export function ZapVoiceCampaignsPage() {
     const list = await supabase
       .from('zv_campaigns')
       .select(
-        'id, user_id, name, description, audience_tags, scheduled_start_at, isca_message, trigger_condition, trigger_keyword, flow_id, status, min_delay_seconds, max_delay_seconds, created_at, updated_at',
+        'id, user_id, name, description, audience_tags, audience_type, audience_id, audience_lead_ids, scheduled_start_at, isca_message, trigger_condition, trigger_keyword, flow_id, status, min_delay_seconds, max_delay_seconds, created_at, updated_at',
       )
       .eq('user_id', user.id)
       .order('created_at', { ascending: false })
@@ -587,6 +640,9 @@ export function ZapVoiceCampaignsPage() {
     const rows = (list.data ?? []).map((r) => {
       const c = r as {
         audience_tags?: string[] | null
+        audience_type?: string | null
+        audience_id?: string | null
+        audience_lead_ids?: string[] | null
         trigger_keyword?: string | null
         scheduled_start_at?: string | null
         isca_message?: string | null
@@ -597,6 +653,9 @@ export function ZapVoiceCampaignsPage() {
       return {
         ...(r as Campaign),
         audience_tags: normalizeTags(c.audience_tags),
+        audience_type: (c.audience_type ?? 'tags') as any,
+        audience_id: c.audience_id ?? null,
+        audience_lead_ids: (c.audience_lead_ids ?? []) as string[],
         trigger_keyword: kw || null,
         isca_message: (c.isca_message ?? '').trim() || '',
         trigger_condition: (c.trigger_condition ?? 'equals') as ZvTriggerCondition,
@@ -619,9 +678,10 @@ export function ZapVoiceCampaignsPage() {
     })
 
     await loadAudienceOptions(user.id)
+    await loadSavedAudiences(user.id)
     await loadFlows(user.id)
     setLoading(false)
-  }, [loadAudienceOptions, loadFlows])
+  }, [loadAudienceOptions, loadSavedAudiences, loadFlows])
 
   const loadSteps = useCallback(async (flowId: string) => {
     setStepsLoading(true)
@@ -1052,12 +1112,7 @@ export function ZapVoiceCampaignsPage() {
           return Math.floor(Math.random() * (b - a + 1)) + a
         }
 
-        const tags = normalizeTags(c.audience_tags)
-        if (tags.length === 0) {
-          throw new Error(
-            'Selecione ao menos um público (tags) nesta campanha antes de ativar.',
-          )
-        }
+        const audienceType = (c.audience_type ?? 'tags') as 'tags' | 'audience' | 'individual'
 
         const isca = (c.isca_message ?? '').trim()
         if (!isca) {
@@ -1093,11 +1148,43 @@ export function ZapVoiceCampaignsPage() {
 
         await clearPendingForCampaign(c.id, userId)
 
-        const { data: leadRows, error: leadErr } = await supabase
+        let leadQuery = supabase
           .from('leads')
           .select('id, name, phone, tag, extraction_id')
           .eq('user_id', userId)
-          .in('tag', tags)
+
+        if (audienceType === 'tags') {
+          const tags = normalizeTags(c.audience_tags)
+          if (tags.length === 0) {
+            throw new Error('Selecione ao menos um público (tags) nesta campanha antes de ativar.')
+          }
+          leadQuery = leadQuery.in('tag', tags)
+        } else if (audienceType === 'audience') {
+          const audId = (c.audience_id ?? '').trim()
+          if (!audId) {
+            throw new Error('Selecione um público salvo antes de ativar.')
+          }
+          const { data: audRow, error: audErr } = await supabase
+            .from('zv_audiences')
+            .select('id, lead_ids')
+            .eq('user_id', userId)
+            .eq('id', audId)
+            .maybeSingle()
+          if (audErr) throw new Error(`Público: ${audErr.message}`)
+          const ids = ((audRow as any)?.lead_ids ?? []) as string[]
+          if (!ids.length) {
+            throw new Error('Este público está vazio. Adicione contatos nele antes de ativar.')
+          }
+          leadQuery = leadQuery.in('id', ids)
+        } else {
+          const ids = (c.audience_lead_ids ?? []).filter(Boolean)
+          if (!ids.length) {
+            throw new Error('Selecione ao menos 1 cliente individual antes de ativar.')
+          }
+          leadQuery = leadQuery.in('id', ids)
+        }
+
+        const { data: leadRows, error: leadErr } = await leadQuery
 
         if (leadErr) {
           throw new Error(leadErr.message)
@@ -2002,6 +2089,112 @@ export function ZapVoiceCampaignsPage() {
             </div>
           ) : voiceSubTab === 'campanhas' && selected ? (
             <>
+              {leadPickerOpen ? (
+                <div
+                  className="fixed inset-0 z-[90] flex items-center justify-center bg-zinc-950/50 p-4"
+                  role="dialog"
+                  aria-modal="true"
+                >
+                  <div className="w-full max-w-2xl rounded-2xl border border-zinc-200 bg-white p-6 shadow-2xl">
+                    <div className="flex items-start justify-between gap-3">
+                      <div>
+                        <h4 className="text-base font-semibold text-zinc-900">Selecionar clientes</h4>
+                        <p className="mt-1 text-sm text-zinc-600">
+                          Escolha os contatos que vão receber a isca desta campanha.
+                        </p>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => setLeadPickerOpen(false)}
+                        className="rounded-lg p-2 text-zinc-500 hover:bg-zinc-100"
+                        aria-label="Fechar"
+                      >
+                        ✕
+                      </button>
+                    </div>
+
+                    <div className="mt-4 flex flex-wrap items-center gap-2">
+                      <input
+                        value={leadPickerQuery}
+                        onChange={(e) => setLeadPickerQuery(e.target.value)}
+                        placeholder="Buscar por nome, telefone ou tag…"
+                        className="min-w-0 flex-1 rounded-xl border border-zinc-200 px-3 py-2 text-sm"
+                      />
+                      <button
+                        type="button"
+                        disabled={leadPickerBusy}
+                        onClick={() => {
+                          if (userId) void ensureLeadPickerRows(userId)
+                        }}
+                        className="rounded-xl border border-zinc-200 bg-white px-3 py-2 text-sm font-semibold text-zinc-800 hover:bg-zinc-50 disabled:opacity-60"
+                      >
+                        {leadPickerBusy ? 'Carregando…' : 'Atualizar'}
+                      </button>
+                    </div>
+
+                    <div className="mt-4 max-h-[55vh] overflow-auto rounded-xl border border-zinc-200">
+                      <table className="w-full min-w-[700px] border-collapse text-left text-sm">
+                        <thead className="sticky top-0 z-[1] bg-zinc-50">
+                          <tr className="border-b border-zinc-200">
+                            <th className="w-[44px] px-3 py-2">
+                              <span className="sr-only">Selecionar</span>
+                            </th>
+                            <th className="px-3 py-2 font-semibold text-zinc-700">Nome</th>
+                            <th className="px-3 py-2 font-semibold text-zinc-700">Telefone</th>
+                            <th className="px-3 py-2 font-semibold text-zinc-700">Tag</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {(() => {
+                            const q = leadPickerQuery.trim().toLowerCase()
+                            const rows = leadPickerRows.filter((r) => {
+                              if (!q) return true
+                              const name = (r.name ?? '').toLowerCase()
+                              const phone = (r.phone ?? '').replace(/\D/g, '')
+                              const tag = (r.tag ?? '').toLowerCase()
+                              const qq = q.replace(/\D/g, '')
+                              return name.includes(q) || (qq && phone.includes(qq)) || tag.includes(q)
+                            })
+                            return rows.map((r) => {
+                              const cur = new Set((selected.audience_lead_ids ?? []) as string[])
+                              const checked = cur.has(r.id)
+                              return (
+                                <tr key={r.id} className="border-b border-zinc-100 hover:bg-zinc-50/70">
+                                  <td className="px-3 py-2">
+                                    <input
+                                      type="checkbox"
+                                      className="rounded border-zinc-300"
+                                      checked={checked}
+                                      onChange={() => {
+                                        const next = new Set(cur)
+                                        if (next.has(r.id)) next.delete(r.id)
+                                        else next.add(r.id)
+                                        const arr = Array.from(next)
+                                        setCampaigns((prev) =>
+                                          prev.map((c) =>
+                                            c.id === selected.id ? { ...c, audience_lead_ids: arr } : c,
+                                          ),
+                                        )
+                                        void updateCampaign(selected.id, { audience_lead_ids: arr })
+                                      }}
+                                    />
+                                  </td>
+                                  <td className="px-3 py-2 font-medium text-zinc-900">{r.name}</td>
+                                  <td className="px-3 py-2 font-mono text-xs tabular-nums text-zinc-700">
+                                    {r.phone ?? '—'}
+                                  </td>
+                                  <td className="px-3 py-2 text-zinc-600">{r.tag ?? '—'}</td>
+                                </tr>
+                              )
+                            })
+                          })()}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+                </div>
+              ) : null}
+
               {/* Header da campanha */}
               <div className="rounded-2xl border border-zinc-200/90 bg-white p-5 shadow-sm ring-1 ring-zinc-100/80">
                 <div className="flex flex-wrap items-start justify-between gap-3">
@@ -2111,28 +2304,108 @@ export function ZapVoiceCampaignsPage() {
                   <div className="rounded-xl border border-zinc-200 bg-zinc-50/60 p-3 sm:col-span-2">
                     <p className="flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-wider text-zinc-500">
                       <Users className="h-3 w-3" aria-hidden />
-                      Público (tags em OR)
+                      Público
                     </p>
+                    <div className="mt-2 grid gap-2 sm:grid-cols-[200px_1fr]">
+                      <label className="block text-[11px] font-semibold text-zinc-700">
+                        Tipo
+                        <select
+                          value={(selected.audience_type ?? 'tags') as any}
+                          onChange={(e) => {
+                            const v = e.target.value as 'tags' | 'audience' | 'individual'
+                            setCampaigns((prev) =>
+                              prev.map((c) =>
+                                c.id === selected.id
+                                  ? {
+                                      ...c,
+                                      audience_type: v,
+                                      audience_id: v === 'audience' ? (c.audience_id ?? null) : null,
+                                      audience_lead_ids: v === 'individual' ? (c.audience_lead_ids ?? []) : [],
+                                    }
+                                  : c,
+                              ),
+                            )
+                            void updateCampaign(selected.id, {
+                              audience_type: v,
+                              audience_id: v === 'audience' ? (selected.audience_id ?? null) : null,
+                              audience_lead_ids: v === 'individual' ? (selected.audience_lead_ids ?? []) : [],
+                            })
+                          }}
+                          className="mt-1 w-full rounded-lg border border-zinc-200 bg-white px-2.5 py-2 text-xs shadow-inner"
+                        >
+                          <option value="tags">Tags</option>
+                          <option value="audience">Público salvo</option>
+                          <option value="individual">Clientes individuais</option>
+                        </select>
+                      </label>
+
+                      {(selected.audience_type ?? 'tags') === 'audience' ? (
+                        <label className="block text-[11px] font-semibold text-zinc-700">
+                          Público salvo
+                          <select
+                            value={selected.audience_id ?? ''}
+                            onChange={(e) => {
+                              const v = e.target.value || null
+                              setCampaigns((prev) =>
+                                prev.map((c) =>
+                                  c.id === selected.id ? { ...c, audience_id: v } : c,
+                                ),
+                              )
+                              void updateCampaign(selected.id, { audience_id: v })
+                            }}
+                            className="mt-1 w-full rounded-lg border border-zinc-200 bg-white px-2.5 py-2 text-xs shadow-inner"
+                          >
+                            <option value="">Selecione…</option>
+                            {savedAudiences.map((a) => (
+                              <option key={a.id} value={a.id}>
+                                {a.name} ({a.lead_ids?.length ?? 0})
+                              </option>
+                            ))}
+                          </select>
+                          <p className="mt-1 text-[10px] font-medium text-zinc-500">
+                            Crie públicos na aba <b>Base de contatos</b> selecionando contatos e clicando em “Criar público”.
+                          </p>
+                        </label>
+                      ) : null}
+                    </div>
                     <div className="mt-1.5">
-                      <TagMultiPicker
-                        options={audienceOptions}
-                        value={tagsForSelected}
-                        onChange={(next) => {
-                          setCampaigns((prev) =>
-                            prev.map((c) =>
-                              c.id === selected.id ? { ...c, audience_tags: next } : c,
-                            ),
-                          )
-                          void updateCampaign(selected.id, { audience_tags: next })
-                        }}
-                        customHint="Leads com qualquer uma das tags entram no disparo (duplicados por telefone são unificados)."
-                      />
+                      {(selected.audience_type ?? 'tags') === 'tags' ? (
+                        <TagMultiPicker
+                          options={audienceOptions}
+                          value={tagsForSelected}
+                          onChange={(next) => {
+                            setCampaigns((prev) =>
+                              prev.map((c) =>
+                                c.id === selected.id ? { ...c, audience_tags: next } : c,
+                              ),
+                            )
+                            void updateCampaign(selected.id, { audience_tags: next })
+                          }}
+                          customHint="Leads com qualquer uma das tags entram no disparo (duplicados por telefone são unificados)."
+                        />
+                      ) : (selected.audience_type ?? 'tags') === 'individual' ? (
+                        <div className="rounded-lg border border-zinc-200 bg-white p-3">
+                          <p className="text-xs font-medium text-zinc-700">
+                            {((selected.audience_lead_ids ?? []) as string[]).length} cliente(s) selecionado(s).
+                          </p>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              if (userId) void ensureLeadPickerRows(userId)
+                              setLeadPickerOpen(true)
+                            }}
+                            className="mt-2 rounded-lg border border-zinc-200 bg-white px-3 py-2 text-xs font-semibold text-zinc-800 hover:bg-zinc-50"
+                          >
+                            Selecionar clientes…
+                          </button>
+                        </div>
+                      ) : null}
                     </div>
                     <p className="mt-2 text-[11px] font-medium text-zinc-700">
                       <span className="tabular-nums text-brand-700">
                         {audienceReachCount ?? '—'}
                       </span>{' '}
-                      lead{(audienceReachCount ?? 0) === 1 ? '' : 's'} com essas tags
+                      lead{(audienceReachCount ?? 0) === 1 ? '' : 's'} (estimativa por tags)
                     </p>
                   </div>
 

@@ -62,6 +62,13 @@ type LeadRow = {
   created_at: string
 }
 
+type AudienceRow = {
+  id: string
+  name: string
+  lead_ids: string[]
+  created_at: string
+}
+
 type TagPresetRow = {
   id: string
   name: string
@@ -78,6 +85,7 @@ type Props = {
 export function ContactsBasePanel({ userId, onContactsChanged, onError, onSuccess }: Props) {
   const [leads, setLeads] = useState<LeadRow[]>([])
   const [presets, setPresets] = useState<TagPresetRow[]>([])
+  const [audiences, setAudiences] = useState<AudienceRow[]>([])
   const [loading, setLoading] = useState(true)
   const [search, setSearch] = useState('')
   const [includeSources, setIncludeSources] = useState<Set<string>>(() => {
@@ -108,6 +116,19 @@ export function ContactsBasePanel({ userId, onContactsChanged, onError, onSucces
   const [deleteTarget, setDeleteTarget] = useState<LeadRow | null>(null)
   const [deleteBusy, setDeleteBusy] = useState(false)
 
+  // seleção para criar público
+  const [selectedLeadIds, setSelectedLeadIds] = useState<Set<string>>(() => new Set())
+  const [audienceOpen, setAudienceOpen] = useState(false)
+  const [audienceName, setAudienceName] = useState('')
+  const [audienceBusy, setAudienceBusy] = useState(false)
+
+  // adicionar contato manualmente
+  const [addOpen, setAddOpen] = useState(false)
+  const [addName, setAddName] = useState('')
+  const [addPhone, setAddPhone] = useState('')
+  const [addTag, setAddTag] = useState('')
+  const [addBusy, setAddBusy] = useState(false)
+
   const loadPresets = useCallback(async () => {
     const { data, error: e } = await supabase
       .from('zv_contact_tag_presets')
@@ -120,6 +141,21 @@ export function ContactsBasePanel({ userId, onContactsChanged, onError, onSucces
       return
     }
     setPresets((data ?? []) as TagPresetRow[])
+  }, [userId])
+
+  const loadAudiences = useCallback(async () => {
+    const { data, error: e } = await supabase
+      .from('zv_audiences')
+      .select('id, name, lead_ids, created_at')
+      .eq('user_id', userId)
+      .order('created_at', { ascending: false })
+      .limit(200)
+    if (e) {
+      console.warn('[ContactsBasePanel] públicos:', e.message)
+      setAudiences([])
+      return
+    }
+    setAudiences((data ?? []) as AudienceRow[])
   }, [userId])
 
   const load = useCallback(async () => {
@@ -140,12 +176,94 @@ export function ContactsBasePanel({ userId, onContactsChanged, onError, onSucces
     }
     setLeads((data ?? []) as LeadRow[])
     await loadPresets()
+    await loadAudiences()
     setLoading(false)
-  }, [userId, onError, loadPresets])
+  }, [userId, onError, loadPresets, loadAudiences])
 
   useEffect(() => {
     void load()
   }, [load])
+
+  function toggleLeadSelected(id: string) {
+    setSelectedLeadIds((prev) => {
+      const next = new Set(prev)
+      if (next.has(id)) next.delete(id)
+      else next.add(id)
+      return next
+    })
+  }
+
+  async function createAudienceFromSelection() {
+    const name = audienceName.trim().slice(0, 120)
+    if (!name) {
+      onError('Dê um nome para o público.')
+      return
+    }
+    const ids = Array.from(selectedLeadIds)
+    if (ids.length === 0) {
+      onError('Selecione ao menos 1 contato para criar o público.')
+      return
+    }
+    setAudienceBusy(true)
+    try {
+      const { error } = await supabase.from('zv_audiences').insert({
+        user_id: userId,
+        name,
+        lead_ids: ids,
+      })
+      if (error) {
+        onError(`Público: ${error.message}`)
+        return
+      }
+      onSuccess(`Público criado: “${name}” (${ids.length} contato(s)).`)
+      setAudienceOpen(false)
+      setAudienceName('')
+      setSelectedLeadIds(new Set())
+      onContactsChanged()
+      await loadAudiences()
+    } finally {
+      setAudienceBusy(false)
+    }
+  }
+
+  async function addManualContact() {
+    const name = addName.trim().slice(0, 200)
+    if (!name) {
+      onError('O nome é obrigatório.')
+      return
+    }
+    const phoneDigits = phoneDigitsForLead(addPhone)
+    if (!phoneDigits) {
+      onError('Informe um telefone válido com DDI (ex.: 5511999990000).')
+      return
+    }
+    const tag = addTag.trim() || null
+    setAddBusy(true)
+    try {
+      const { error } = await supabase.from('leads').insert({
+        user_id: userId,
+        name,
+        phone: phoneDigits,
+        status: 'novo',
+        ai_enabled: true,
+        source: 'manual_csv',
+        tag,
+      })
+      if (error) {
+        onError(`Contato: ${error.message}`)
+        return
+      }
+      onSuccess('Contato criado.')
+      setAddOpen(false)
+      setAddName('')
+      setAddPhone('')
+      setAddTag('')
+      onContactsChanged()
+      void load()
+    } finally {
+      setAddBusy(false)
+    }
+  }
 
   const tagAutocompleteList = useMemo(() => {
     const fromLeads = new Set<string>()
@@ -588,6 +706,24 @@ export function ContactsBasePanel({ userId, onContactsChanged, onError, onSucces
         <div className="flex flex-wrap items-center gap-2">
           <button
             type="button"
+            onClick={() => setAddOpen(true)}
+            className="inline-flex items-center gap-2 rounded-xl border border-zinc-200 bg-white px-4 py-2.5 text-sm font-semibold text-zinc-800 shadow-sm transition hover:border-brand-300 hover:bg-brand-50/50"
+          >
+            <UserPlus className="h-4 w-4" aria-hidden />
+            Adicionar contato
+          </button>
+          <button
+            type="button"
+            disabled={selectedLeadIds.size === 0}
+            onClick={() => setAudienceOpen(true)}
+            className="inline-flex items-center gap-2 rounded-xl border border-zinc-200 bg-white px-4 py-2.5 text-sm font-semibold text-zinc-800 shadow-sm transition hover:border-zinc-300 hover:bg-zinc-50 disabled:opacity-50"
+            title="Crie um público com os contatos selecionados"
+          >
+            <Users2 className="h-4 w-4" aria-hidden />
+            Criar público ({selectedLeadIds.size})
+          </button>
+          <button
+            type="button"
             onClick={() => setTagManagerOpen(true)}
             className="inline-flex items-center gap-2 rounded-xl border border-brand-200 bg-brand-50/80 px-4 py-2.5 text-sm font-semibold text-brand-900 shadow-sm transition hover:bg-brand-100/90"
           >
@@ -631,6 +767,106 @@ export function ContactsBasePanel({ userId, onContactsChanged, onError, onSucces
         <p className="text-sm font-medium text-brand-800" role="status">
           {importProgress}
         </p>
+      ) : null}
+
+      {addOpen ? (
+        <div
+          className="fixed inset-0 z-[86] flex items-center justify-center bg-zinc-950/50 p-4"
+          role="dialog"
+          aria-modal="true"
+        >
+          <div className="w-full max-w-md rounded-2xl border border-zinc-200 bg-white p-6 shadow-2xl">
+            <h4 className="text-base font-semibold text-zinc-900">Adicionar contato</h4>
+            <div className="mt-4 space-y-3">
+              <label className="block text-xs font-medium text-zinc-600">
+                Nome
+                <input
+                  value={addName}
+                  onChange={(e) => setAddName(e.target.value)}
+                  className="mt-1 w-full rounded-xl border border-zinc-200 px-3 py-2 text-sm"
+                />
+              </label>
+              <label className="block text-xs font-medium text-zinc-600">
+                Telefone (com DDI 55)
+                <input
+                  value={addPhone}
+                  onChange={(e) => setAddPhone(e.target.value)}
+                  className="mt-1 w-full rounded-xl border border-zinc-200 px-3 py-2 font-mono text-sm tabular-nums"
+                  placeholder="5511999990000"
+                />
+              </label>
+              <label className="block text-xs font-medium text-zinc-600">
+                Etiqueta (tag) (opcional)
+                <input
+                  value={addTag}
+                  onChange={(e) => setAddTag(e.target.value)}
+                  list="tag-ac-list"
+                  placeholder="Ex.: Cliente VIP"
+                  className="mt-1 w-full rounded-xl border border-zinc-200 px-3 py-2 text-sm"
+                />
+              </label>
+            </div>
+            <div className="mt-6 flex justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => setAddOpen(false)}
+                className="rounded-xl px-4 py-2 text-sm text-zinc-600 hover:bg-zinc-100"
+              >
+                Cancelar
+              </button>
+              <button
+                type="button"
+                disabled={addBusy}
+                onClick={() => void addManualContact()}
+                className="rounded-xl bg-brand-600 px-4 py-2 text-sm font-semibold text-white hover:bg-brand-700 disabled:opacity-60"
+              >
+                {addBusy ? 'Salvando…' : 'Salvar'}
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
+
+      {audienceOpen ? (
+        <div
+          className="fixed inset-0 z-[86] flex items-center justify-center bg-zinc-950/50 p-4"
+          role="dialog"
+          aria-modal="true"
+        >
+          <div className="w-full max-w-md rounded-2xl border border-zinc-200 bg-white p-6 shadow-2xl">
+            <h4 className="text-base font-semibold text-zinc-900">Criar público</h4>
+            <p className="mt-1 text-sm text-zinc-600">
+              Você selecionou <strong>{selectedLeadIds.size}</strong> contato(s).
+            </p>
+            <label className="mt-4 block text-xs font-medium text-zinc-600">
+              Nome do público
+              <input
+                value={audienceName}
+                onChange={(e) => setAudienceName(e.target.value)}
+                className="mt-1 w-full rounded-xl border border-zinc-200 px-3 py-2 text-sm"
+                placeholder="Ex.: VIP Curitiba"
+              />
+            </label>
+            <div className="mt-6 flex justify-end gap-2">
+              <button
+                type="button"
+                disabled={audienceBusy}
+                onClick={() => setAudienceOpen(false)}
+                className="rounded-xl px-4 py-2 text-sm text-zinc-600 hover:bg-zinc-100"
+              >
+                Cancelar
+              </button>
+              <button
+                type="button"
+                disabled={audienceBusy}
+                onClick={() => void createAudienceFromSelection()}
+                className="rounded-xl bg-zinc-900 px-4 py-2 text-sm font-semibold text-white hover:bg-zinc-800 disabled:opacity-60"
+              >
+                {audienceBusy ? 'Criando…' : 'Criar público'}
+              </button>
+            </div>
+          </div>
+        </div>
       ) : null}
       {googleBusy && !importProgress ? (
         <p className="text-xs text-zinc-500">Preparando…</p>
@@ -978,9 +1214,12 @@ export function ContactsBasePanel({ userId, onContactsChanged, onError, onSucces
       ) : (
         <div className="overflow-hidden rounded-2xl border border-zinc-200/90 bg-white shadow-sm ring-1 ring-zinc-100/80">
           <div className="max-h-[min(70vh,560px)] overflow-auto">
-            <table className="w-full min-w-[760px] border-collapse text-left text-sm">
+            <table className="w-full min-w-[820px] border-collapse text-left text-sm">
               <thead className="sticky top-0 z-[1] border-b border-zinc-200 bg-zinc-50/95 backdrop-blur">
                 <tr>
+                  <th className="w-[44px] px-4 py-3 font-semibold text-zinc-700">
+                    <span className="sr-only">Selecionar</span>
+                  </th>
                   <th className="px-4 py-3 font-semibold text-zinc-700">Nome</th>
                   <th className="px-4 py-3 font-semibold text-zinc-700">Telefone</th>
                   <th className="px-4 py-3 font-semibold text-zinc-700">Origem</th>
@@ -993,18 +1232,28 @@ export function ContactsBasePanel({ userId, onContactsChanged, onError, onSucces
               <tbody>
                 {filtered.length === 0 ? (
                   <tr>
-                    <td colSpan={5} className="px-4 py-10 text-center text-zinc-500">
+                    <td colSpan={6} className="px-4 py-10 text-center text-zinc-500">
                       Nenhum contato nesse filtro. Importe um CSV ou ajuste a busca.
                     </td>
                   </tr>
                 ) : (
                   filtered.map((l) => {
                     const b = badgeForSource(l.source)
+                    const checked = selectedLeadIds.has(l.id)
                     return (
                       <tr
                         key={l.id}
                         className="border-b border-zinc-100/90 transition hover:bg-zinc-50/80"
                       >
+                        <td className="px-4 py-3">
+                          <input
+                            type="checkbox"
+                            className="rounded border-zinc-300"
+                            checked={checked}
+                            onChange={() => toggleLeadSelected(l.id)}
+                            aria-label={`Selecionar ${l.name}`}
+                          />
+                        </td>
                         <td className="px-4 py-3 font-medium text-zinc-900">{l.name}</td>
                         <td className="px-4 py-3 font-mono text-xs tabular-nums text-zinc-700">
                           {l.phone ?? '—'}
