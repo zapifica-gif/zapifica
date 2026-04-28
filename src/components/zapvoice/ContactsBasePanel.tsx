@@ -1,5 +1,16 @@
 import { useCallback, useEffect, useMemo, useState, type ChangeEventHandler } from 'react'
-import { Download, Loader2, Search, UserPlus, Users2 } from 'lucide-react'
+import {
+  Copy,
+  Download,
+  Loader2,
+  Pencil,
+  Search,
+  Settings2,
+  Tag,
+  Trash2,
+  UserPlus,
+  Users2,
+} from 'lucide-react'
 import { supabase } from '../../lib/supabase'
 import {
   CSV_TEMPLATE,
@@ -20,7 +31,7 @@ const SOURCE_DEFS: { id: string; label: string; className: string }[] = [
   { id: 'google_contacts', label: 'Google Contacts', className: 'bg-emerald-50 text-emerald-900 ring-emerald-200' },
 ]
 
-const NULL_KEY = 'null' // leads sem coluna `source`
+const NULL_KEY = 'null'
 
 function badgeForSource(source: string | null | undefined) {
   const s = source ?? ''
@@ -51,6 +62,12 @@ type LeadRow = {
   created_at: string
 }
 
+type TagPresetRow = {
+  id: string
+  name: string
+  created_at: string
+}
+
 type Props = {
   userId: string
   onContactsChanged: () => void
@@ -60,6 +77,7 @@ type Props = {
 
 export function ContactsBasePanel({ userId, onContactsChanged, onError, onSuccess }: Props) {
   const [leads, setLeads] = useState<LeadRow[]>([])
+  const [presets, setPresets] = useState<TagPresetRow[]>([])
   const [loading, setLoading] = useState(true)
   const [search, setSearch] = useState('')
   const [includeSources, setIncludeSources] = useState<Set<string>>(() => {
@@ -71,6 +89,38 @@ export function ContactsBasePanel({ userId, onContactsChanged, onError, onSucces
   const [csvBusy, setCsvBusy] = useState(false)
   const [googleBusy, setGoogleBusy] = useState(false)
   const [importProgress, setImportProgress] = useState<string | null>(null)
+
+  const [tagManagerOpen, setTagManagerOpen] = useState(false)
+  const [newPresetName, setNewPresetName] = useState('')
+  const [renameMassFrom, setRenameMassFrom] = useState('')
+  const [renameMassTo, setRenameMassTo] = useState('')
+  const [presetBusyId, setPresetBusyId] = useState<string | null>(null)
+  const [massBusy, setMassBusy] = useState(false)
+  const [syncPresetsBusy, setSyncPresetsBusy] = useState(false)
+
+  const [editOpen, setEditOpen] = useState(false)
+  const [editingLead, setEditingLead] = useState<LeadRow | null>(null)
+  const [editName, setEditName] = useState('')
+  const [editPhone, setEditPhone] = useState('')
+  const [editTag, setEditTag] = useState('')
+  const [saveContactBusy, setSaveContactBusy] = useState(false)
+
+  const [deleteTarget, setDeleteTarget] = useState<LeadRow | null>(null)
+  const [deleteBusy, setDeleteBusy] = useState(false)
+
+  const loadPresets = useCallback(async () => {
+    const { data, error: e } = await supabase
+      .from('zv_contact_tag_presets')
+      .select('id, name, created_at')
+      .eq('user_id', userId)
+      .order('name', { ascending: true })
+    if (e) {
+      console.warn('[ContactsBasePanel] etiquetas biblioteca:', e.message)
+      setPresets([])
+      return
+    }
+    setPresets((data ?? []) as TagPresetRow[])
+  }, [userId])
 
   const load = useCallback(async () => {
     setLoading(true)
@@ -89,12 +139,27 @@ export function ContactsBasePanel({ userId, onContactsChanged, onError, onSucces
       return
     }
     setLeads((data ?? []) as LeadRow[])
+    await loadPresets()
     setLoading(false)
-  }, [userId, onError])
+  }, [userId, onError, loadPresets])
 
   useEffect(() => {
     void load()
   }, [load])
+
+  const tagAutocompleteList = useMemo(() => {
+    const fromLeads = new Set<string>()
+    for (const l of leads) {
+      const t = (l.tag ?? '').trim()
+      if (t) fromLeads.add(t)
+    }
+    const fromPresets = new Set<string>()
+    for (const p of presets) {
+      const t = p.name.trim()
+      if (t) fromPresets.add(t)
+    }
+    return [...new Set([...fromLeads, ...fromPresets])].sort((a, b) => a.localeCompare(b, 'pt-BR'))
+  }, [leads, presets])
 
   const allSourceKeys = useMemo(() => {
     const s = new Set(SOURCE_DEFS.map((d) => d.id))
@@ -125,6 +190,219 @@ export function ContactsBasePanel({ userId, onContactsChanged, onError, onSucces
     })
   }, [leads, search, includeSources, isShowingAllOrigins])
 
+  function openEdit(l: LeadRow) {
+    setEditingLead(l)
+    setEditName(l.name ?? '')
+    setEditPhone(l.phone ?? '')
+    setEditTag(l.tag ?? '')
+    setEditOpen(true)
+  }
+
+  async function saveEdit() {
+    if (!editingLead) return
+    const name = editName.trim().slice(0, 200)
+    if (!name) {
+      onError('O nome é obrigatório.')
+      return
+    }
+    const phoneDigits = phoneDigitsForLead(editPhone)
+    if (!phoneDigits) {
+      onError('Informe um telefone válido com DDI (ex.: 5511999990000).')
+      return
+    }
+    const tag = editTag.trim() || null
+    setSaveContactBusy(true)
+    try {
+      const { error: e } = await supabase
+        .from('leads')
+        .update({
+          name,
+          phone: phoneDigits,
+          tag,
+          updated_at: new Date().toISOString(),
+        })
+        .eq('id', editingLead.id)
+        .eq('user_id', userId)
+      if (e) {
+        onError(`Não foi possível salvar: ${e.message}`)
+        return
+      }
+      onSuccess('Contato atualizado.')
+      setEditOpen(false)
+      setEditingLead(null)
+      onContactsChanged()
+      void load()
+    } finally {
+      setSaveContactBusy(false)
+    }
+  }
+
+  async function duplicateLead(l: LeadRow) {
+    const nm = `${l.name.trim()} (cópia)`.slice(0, 200)
+    const digits = phoneDigitsForLead(l.phone)
+    if (!digits) {
+      onError(
+        'Este contato precisa de um telefone válido (DDI 55) para duplicar. Clique em editar e ajuste o número.',
+      )
+      return
+    }
+    try {
+      const { error: insE } = await supabase.from('leads').insert({
+        user_id: userId,
+        name: nm,
+        phone: digits,
+        status: 'novo',
+        ai_enabled: true,
+        source: l.source ?? 'manual_csv',
+        tag: l.tag?.trim() || null,
+      })
+      if (insE) {
+        onError(`Não foi possível duplicar: ${insE.message}`)
+        return
+      }
+      onSuccess(`Contato duplicado: “${nm}”.`)
+      onContactsChanged()
+      void load()
+    } catch (err) {
+      onError(err instanceof Error ? err.message : String(err))
+    }
+  }
+
+  async function confirmDelete() {
+    if (!deleteTarget) return
+    setDeleteBusy(true)
+    try {
+      const { error: e } = await supabase
+        .from('leads')
+        .delete()
+        .eq('id', deleteTarget.id)
+        .eq('user_id', userId)
+      if (e) {
+        onError(`Exclusão: ${e.message}`)
+        return
+      }
+      onSuccess('Contato excluído.')
+      setDeleteTarget(null)
+      onContactsChanged()
+      void load()
+    } finally {
+      setDeleteBusy(false)
+    }
+  }
+
+  async function addPreset() {
+    const n = newPresetName.trim()
+    if (!n) return
+    setPresetBusyId('new')
+    try {
+      const { error } = await supabase.from('zv_contact_tag_presets').insert({
+        user_id: userId,
+        name: n.slice(0, 240),
+      })
+      if (error?.code === '23505') {
+        onError('Já existe uma etiqueta igual na biblioteca.')
+        return
+      }
+      if (error) {
+        onError(`Etiqueta: ${error.message}`)
+        return
+      }
+      setNewPresetName('')
+      onSuccess('Etiqueta criada.')
+      await loadPresets()
+    } finally {
+      setPresetBusyId(null)
+    }
+  }
+
+  async function deletePreset(id: string) {
+    setPresetBusyId(id)
+    try {
+      const { error } = await supabase.from('zv_contact_tag_presets').delete().eq('id', id).eq('user_id', userId)
+      if (error) {
+        onError(error.message)
+        return
+      }
+      onSuccess('Etiqueta removida da biblioteca (contatos continuam com a mesma marcação).')
+      await loadPresets()
+    } finally {
+      setPresetBusyId(null)
+    }
+  }
+
+  async function renameTagEverywhere() {
+    const from = renameMassFrom.trim()
+    const to = renameMassTo.trim()
+    if (!from || !to) {
+      onError('Preencha a etiqueta antiga e a nova.')
+      return
+    }
+    setMassBusy(true)
+    try {
+      const { data: rows, error: qe } = await supabase
+        .from('leads')
+        .select('id')
+        .eq('user_id', userId)
+        .eq('tag', from)
+      if (qe) {
+        onError(qe.message)
+        return
+      }
+      const n = rows?.length ?? 0
+      if (n === 0) {
+        onError('Nenhum contato usa exatamente essa etiqueta (texto idêntico).')
+        return
+      }
+      const { error: ue } = await supabase
+        .from('leads')
+        .update({ tag: to.slice(0, 480), updated_at: new Date().toISOString() })
+        .eq('user_id', userId)
+        .eq('tag', from)
+      if (ue) {
+        onError(ue.message)
+        return
+      }
+
+      await supabase
+        .from('zv_contact_tag_presets')
+        .update({ name: to.slice(0, 240) })
+        .eq('user_id', userId)
+        .eq('name', from)
+
+      onSuccess(`${n} contato(s) atualizados e biblioteca sincronizada.`)
+      setRenameMassFrom('')
+      setRenameMassTo('')
+      void load()
+    } finally {
+      setMassBusy(false)
+    }
+  }
+
+  async function syncDistinctTagsIntoPresets() {
+    setSyncPresetsBusy(true)
+    try {
+      const distinct = [...new Set(leads.map((l) => (l.tag ?? '').trim()).filter(Boolean))]
+      let added = 0
+      for (const name of distinct) {
+        const { error } = await supabase.from('zv_contact_tag_presets').insert({
+          user_id: userId,
+          name: name.slice(0, 240),
+        })
+        if (!error || error.code === '23505') {
+          if (!error) added += 1
+        }
+      }
+      onSuccess(
+        added > 0
+          ? `${added} etiqueta(s) nova(s) na biblioteca a partir dos contatos.`
+          : 'Nada novo para importar ou já existia.',
+      )
+      await loadPresets()
+    } finally {
+      setSyncPresetsBusy(false)
+    }
+  }
+
   function downloadTemplate() {
     const blob = new Blob([CSV_TEMPLATE], { type: 'text/csv;charset=utf-8' })
     const u = URL.createObjectURL(blob)
@@ -151,7 +429,15 @@ export function ContactsBasePanel({ userId, onContactsChanged, onError, onSucces
         return
       }
       const tag = importTagLabel('manual')
-      const toInsert: { user_id: string; name: string; phone: string; status: string; ai_enabled: boolean; source: string; tag: string }[] = []
+      const toInsert: {
+        user_id: string
+        name: string
+        phone: string
+        status: string
+        ai_enabled: boolean
+        source: string
+        tag: string
+      }[] = []
       for (const row of rows) {
         const nameRaw = nCol ? row[nCol] ?? '' : 'Contato'
         const name = (nameRaw || 'Contato').trim().slice(0, 200)
@@ -198,7 +484,9 @@ export function ContactsBasePanel({ userId, onContactsChanged, onError, onSucces
     setGoogleBusy(true)
     setImportProgress(null)
     try {
-      const { data: { session } } = await supabase.auth.getSession()
+      const {
+        data: { session },
+      } = await supabase.auth.getSession()
       const token = getGoogleProviderToken(session)
       if (!token) {
         onError(
@@ -225,9 +513,7 @@ export function ContactsBasePanel({ userId, onContactsChanged, onError, onSucces
       setImportProgress(`Salvando ${toInsert.length} contato(s)…`)
       const ch = 150
       for (let i = 0; i < toInsert.length; i += ch) {
-        const { error: insE } = await supabase
-          .from('leads')
-          .insert(toInsert.slice(i, i + ch))
+        const { error: insE } = await supabase.from('leads').insert(toInsert.slice(i, i + ch))
         if (insE) {
           onError(`Erro ao salvar: ${insE.message}`)
           return
@@ -302,6 +588,14 @@ export function ContactsBasePanel({ userId, onContactsChanged, onError, onSucces
         <div className="flex flex-wrap items-center gap-2">
           <button
             type="button"
+            onClick={() => setTagManagerOpen(true)}
+            className="inline-flex items-center gap-2 rounded-xl border border-brand-200 bg-brand-50/80 px-4 py-2.5 text-sm font-semibold text-brand-900 shadow-sm transition hover:bg-brand-100/90"
+          >
+            <Settings2 className="h-4 w-4" aria-hidden />
+            Etiquetas
+          </button>
+          <button
+            type="button"
             onClick={() => setCsvOpen(true)}
             className="inline-flex items-center gap-2 rounded-xl border border-zinc-200 bg-white px-4 py-2.5 text-sm font-semibold text-zinc-800 shadow-sm transition hover:border-amber-300 hover:bg-amber-50"
           >
@@ -312,7 +606,9 @@ export function ContactsBasePanel({ userId, onContactsChanged, onError, onSucces
             type="button"
             onClick={() => {
               void (async () => {
-                const { data: { session } } = await supabase.auth.getSession()
+                const {
+                  data: { session },
+                } = await supabase.auth.getSession()
                 if (getGoogleProviderToken(session)) {
                   void importFromGoogle()
                 } else {
@@ -390,6 +686,239 @@ export function ContactsBasePanel({ userId, onContactsChanged, onError, onSucces
         </div>
       ) : null}
 
+      {editOpen && editingLead ? (
+        <div
+          className="fixed inset-0 z-[85] flex items-center justify-center bg-zinc-950/50 p-4"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="edit-contact-title"
+        >
+          <div className="w-full max-w-md rounded-2xl border border-zinc-200 bg-white p-6 shadow-2xl">
+            <h4 id="edit-contact-title" className="text-base font-semibold text-zinc-900">
+              Editar contato
+            </h4>
+            <div className="mt-4 space-y-3">
+              <label className="block text-xs font-medium text-zinc-600">
+                Nome
+                <input
+                  value={editName}
+                  onChange={(e) => setEditName(e.target.value)}
+                  className="mt-1 w-full rounded-xl border border-zinc-200 px-3 py-2 text-sm"
+                />
+              </label>
+              <label className="block text-xs font-medium text-zinc-600">
+                Telefone (com DDI 55)
+                <input
+                  value={editPhone}
+                  onChange={(e) => setEditPhone(e.target.value)}
+                  className="mt-1 w-full rounded-xl border border-zinc-200 px-3 py-2 font-mono text-sm tabular-nums"
+                />
+              </label>
+              <label className="block text-xs font-medium text-zinc-600">
+                Etiqueta (tag)
+                <input
+                  value={editTag}
+                  onChange={(e) => setEditTag(e.target.value)}
+                  list="tag-ac-list"
+                  placeholder="Ex.: Cliente VIP"
+                  className="mt-1 w-full rounded-xl border border-zinc-200 px-3 py-2 text-sm"
+                />
+                <datalist id="tag-ac-list">
+                  {tagAutocompleteList.map((t) => (
+                    <option key={t} value={t} />
+                  ))}
+                </datalist>
+              </label>
+            </div>
+            <div className="mt-6 flex justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => {
+                  setEditOpen(false)
+                  setEditingLead(null)
+                }}
+                className="rounded-xl px-4 py-2 text-sm text-zinc-600 hover:bg-zinc-100"
+              >
+                Cancelar
+              </button>
+              <button
+                type="button"
+                disabled={saveContactBusy}
+                onClick={() => void saveEdit()}
+                className="rounded-xl bg-brand-600 px-4 py-2 text-sm font-semibold text-white hover:bg-brand-700 disabled:opacity-60"
+              >
+                {saveContactBusy ? 'Salvando…' : 'Salvar'}
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
+
+      {deleteTarget ? (
+        <div
+          className="fixed inset-0 z-[85] flex items-center justify-center bg-zinc-950/60 p-4"
+          role="dialog"
+          aria-modal="true"
+        >
+          <div className="w-full max-w-sm rounded-2xl border border-zinc-200 bg-white p-6 shadow-2xl">
+            <p className="text-sm font-semibold text-zinc-900">Excluir contato?</p>
+            <p className="mt-2 text-sm text-zinc-600">
+              Remove <strong>{deleteTarget.name}</strong> da base e o histórico de mensagens ligado a
+              ele. Esta ação não dá para desfazer.
+            </p>
+            <div className="mt-6 flex justify-end gap-2">
+              <button
+                type="button"
+                disabled={deleteBusy}
+                onClick={() => setDeleteTarget(null)}
+                className="rounded-xl px-4 py-2 text-sm text-zinc-600 hover:bg-zinc-100"
+              >
+                Cancelar
+              </button>
+              <button
+                type="button"
+                disabled={deleteBusy}
+                onClick={() => void confirmDelete()}
+                className="rounded-xl bg-red-600 px-4 py-2 text-sm font-semibold text-white hover:bg-red-700 disabled:opacity-60"
+              >
+                {deleteBusy ? 'Excluindo…' : 'Excluir'}
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
+
+      {tagManagerOpen ? (
+        <div
+          className="fixed inset-0 z-[82] flex items-center justify-center overflow-y-auto bg-zinc-950/50 p-4 py-12"
+          role="dialog"
+          aria-modal="true"
+        >
+          <div className="max-h-[min(90vh,720px)] w-full max-w-lg overflow-y-auto rounded-2xl border border-zinc-200 bg-white p-6 shadow-2xl">
+            <div className="flex items-start justify-between gap-4">
+              <div>
+                <h4 className="text-base font-semibold text-zinc-900">Gestão de etiquetas</h4>
+                <p className="mt-1 text-sm text-zinc-600">
+                  Crie sugestões de etiqueta para usar nos contatos. Renomeie em todos os leads de uma
+                  vez quando precisar padronizar.
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setTagManagerOpen(false)}
+                className="rounded-lg p-2 text-zinc-500 hover:bg-zinc-100"
+                aria-label="Fechar"
+              >
+                <span className="sr-only">Fechar</span>✕
+              </button>
+            </div>
+
+            <div className="mt-5 space-y-3">
+              <p className="text-xs font-semibold uppercase tracking-wide text-zinc-500">
+                Nova etiqueta na biblioteca
+              </p>
+              <div className="flex gap-2">
+                <input
+                  value={newPresetName}
+                  onChange={(e) => setNewPresetName(e.target.value)}
+                  placeholder="Nome da etiqueta"
+                  className="min-w-0 flex-1 rounded-xl border border-zinc-200 px-3 py-2 text-sm"
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') void addPreset()
+                  }}
+                />
+                <button
+                  type="button"
+                  disabled={presetBusyId === 'new' || !newPresetName.trim()}
+                  onClick={() => void addPreset()}
+                  className="shrink-0 rounded-xl bg-zinc-900 px-4 py-2 text-sm font-semibold text-white hover:bg-zinc-800 disabled:opacity-50"
+                >
+                  {presetBusyId === 'new' ? <Loader2 className="h-4 w-4 animate-spin" /> : 'Adicionar'}
+                </button>
+              </div>
+            </div>
+
+            <div className="mt-6">
+              <p className="text-xs font-semibold uppercase tracking-wide text-zinc-500">
+                Biblioteca ({presets.length})
+              </p>
+              <ul className="mt-2 max-h-40 space-y-1 overflow-y-auto rounded-xl border border-zinc-100 bg-zinc-50/50 p-2">
+                {presets.length === 0 ? (
+                  <li className="px-2 py-2 text-xs text-zinc-500">
+                    Nenhuma etiqueta salva — adicione acima ou importe das tags dos contatos.
+                  </li>
+                ) : (
+                  presets.map((p) => (
+                    <li
+                      key={p.id}
+                      className="flex items-center justify-between gap-2 rounded-lg bg-white px-2 py-1.5 text-sm text-zinc-800 ring-1 ring-zinc-100"
+                    >
+                      <span className="flex items-center gap-2 truncate font-medium">
+                        <Tag className="h-3.5 w-3.5 shrink-0 text-brand-600" aria-hidden />
+                        <span className="truncate">{p.name}</span>
+                      </span>
+                      <button
+                        type="button"
+                        disabled={presetBusyId === p.id}
+                        onClick={() => void deletePreset(p.id)}
+                        className="shrink-0 rounded p-1 text-red-600 hover:bg-red-50"
+                        title="Remover da biblioteca"
+                      >
+                        {presetBusyId === p.id ? (
+                          <Loader2 className="h-4 w-4 animate-spin" />
+                        ) : (
+                          <Trash2 className="h-4 w-4" />
+                        )}
+                      </button>
+                    </li>
+                  ))
+                )}
+              </ul>
+              <button
+                type="button"
+                disabled={syncPresetsBusy}
+                onClick={() => void syncDistinctTagsIntoPresets()}
+                className="mt-2 text-xs font-medium text-brand-700 hover:underline disabled:opacity-50"
+              >
+                {syncPresetsBusy ? 'Importando…' : '+ Importar etiquetas usadas nos contatos para a biblioteca'}
+              </button>
+            </div>
+
+            <div className="mt-8 border-t border-zinc-100 pt-6">
+              <p className="text-xs font-semibold uppercase tracking-wide text-zinc-500">
+                Renomear em todos os contatos
+              </p>
+              <p className="mt-1 text-xs text-zinc-500">
+                O texto antigo deve ser <strong>idêntico</strong> à etiqueta atual (maiúsculas e minúsculas
+                contam).
+              </p>
+              <div className="mt-3 grid gap-2 sm:grid-cols-2">
+                <input
+                  value={renameMassFrom}
+                  onChange={(e) => setRenameMassFrom(e.target.value)}
+                  placeholder="Etiqueta antiga"
+                  className="rounded-xl border border-zinc-200 px-3 py-2 text-sm"
+                />
+                <input
+                  value={renameMassTo}
+                  onChange={(e) => setRenameMassTo(e.target.value)}
+                  placeholder="Etiqueta nova"
+                  className="rounded-xl border border-zinc-200 px-3 py-2 text-sm"
+                />
+              </div>
+              <button
+                type="button"
+                disabled={massBusy || !renameMassFrom.trim() || !renameMassTo.trim()}
+                onClick={() => void renameTagEverywhere()}
+                className="mt-3 rounded-xl border border-brand-200 bg-brand-50 px-4 py-2 text-sm font-semibold text-brand-900 hover:bg-brand-100 disabled:opacity-50"
+              >
+                {massBusy ? 'Aplicando…' : 'Aplicar rename em todos'}
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
+
       <div className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
         <div className="relative min-w-0 max-w-md flex-1">
           <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-zinc-400" />
@@ -449,19 +978,22 @@ export function ContactsBasePanel({ userId, onContactsChanged, onError, onSucces
       ) : (
         <div className="overflow-hidden rounded-2xl border border-zinc-200/90 bg-white shadow-sm ring-1 ring-zinc-100/80">
           <div className="max-h-[min(70vh,560px)] overflow-auto">
-            <table className="w-full min-w-[720px] border-collapse text-left text-sm">
+            <table className="w-full min-w-[760px] border-collapse text-left text-sm">
               <thead className="sticky top-0 z-[1] border-b border-zinc-200 bg-zinc-50/95 backdrop-blur">
                 <tr>
                   <th className="px-4 py-3 font-semibold text-zinc-700">Nome</th>
                   <th className="px-4 py-3 font-semibold text-zinc-700">Telefone</th>
                   <th className="px-4 py-3 font-semibold text-zinc-700">Origem</th>
                   <th className="px-4 py-3 font-semibold text-zinc-700">Tag</th>
+                  <th className="w-[140px] px-4 py-3 text-right font-semibold text-zinc-700">
+                    Ações
+                  </th>
                 </tr>
               </thead>
               <tbody>
                 {filtered.length === 0 ? (
                   <tr>
-                    <td colSpan={4} className="px-4 py-10 text-center text-zinc-500">
+                    <td colSpan={5} className="px-4 py-10 text-center text-zinc-500">
                       Nenhum contato nesse filtro. Importe um CSV ou ajuste a busca.
                     </td>
                   </tr>
@@ -484,8 +1016,36 @@ export function ContactsBasePanel({ userId, onContactsChanged, onError, onSucces
                             {b.label}
                           </span>
                         </td>
-                        <td className="px-4 py-3 max-w-xs truncate text-zinc-600" title={l.tag ?? ''}>
+                        <td className="max-w-[200px] px-4 py-3 truncate text-zinc-600" title={l.tag ?? ''}>
                           {l.tag ?? '—'}
+                        </td>
+                        <td className="px-4 py-2 text-right">
+                          <div className="flex flex-wrap justify-end gap-1">
+                            <button
+                              type="button"
+                              onClick={() => openEdit(l)}
+                              title="Editar"
+                              className="inline-flex rounded-lg p-2 text-zinc-600 hover:bg-brand-50 hover:text-brand-800"
+                            >
+                              <Pencil className="h-4 w-4" />
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => void duplicateLead(l)}
+                              title="Duplicar"
+                              className="inline-flex rounded-lg p-2 text-zinc-600 hover:bg-zinc-100"
+                            >
+                              <Copy className="h-4 w-4" />
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => setDeleteTarget(l)}
+                              title="Excluir"
+                              className="inline-flex rounded-lg p-2 text-red-600 hover:bg-red-50"
+                            >
+                              <Trash2 className="h-4 w-4" />
+                            </button>
+                          </div>
                         </td>
                       </tr>
                     )
@@ -495,7 +1055,8 @@ export function ContactsBasePanel({ userId, onContactsChanged, onError, onSucces
             </table>
           </div>
           <p className="border-t border-zinc-100 px-4 py-2 text-xs text-zinc-500">
-            Mostrando {filtered.length} de {leads.length} contato(s) carregado(s) recentemente
+            Mostrando {filtered.length} de {leads.length} contato(s). Use &quot;Etiquetas&quot; para
+            gerenciar o catálogo.
           </p>
         </div>
       )}
