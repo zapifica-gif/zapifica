@@ -1117,7 +1117,17 @@ export function ZapVoiceCampaignsPage() {
         }
         const withPhone = [...byId.values()].filter((l) => phoneDigitsForQueue(l.phone))
 
-        if (withPhone.length === 0) {
+        // Mesmo celular não pode gerar várias iscas: se o CRM tiver 2+ contatos com o mesmo número,
+        // só disparamos uma isca por telefone (evita “Rodolfo + Floripa” duplicados no WhatsApp).
+        const byPhone = new Map<string, (typeof rawLeads)[0]>()
+        for (const l of withPhone) {
+          const k = phoneDigitsForQueue(l.phone)
+          if (!k) continue
+          if (!byPhone.has(k)) byPhone.set(k, l)
+        }
+        const audienceForIsca = Array.from(byPhone.values())
+
+        if (audienceForIsca.length === 0) {
           throw new Error(
             'Não há leads com telefone válido para o público selecionado. Confira o CRM ou a extração.',
           )
@@ -1125,7 +1135,7 @@ export function ZapVoiceCampaignsPage() {
 
         const exIds = [
           ...new Set(
-            withPhone.map((l) => l.extraction_id).filter(Boolean),
+            audienceForIsca.map((l) => l.extraction_id).filter(Boolean),
           ),
         ] as string[]
         const locByEx = new Map<string, string>()
@@ -1180,7 +1190,7 @@ export function ZapVoiceCampaignsPage() {
 
         let insertedCount = 0
 
-        for (const lead of withPhone) {
+        for (const lead of audienceForIsca) {
           if (leadIdsComIscaPendente.has(lead.id)) {
             continue
           }
@@ -1267,7 +1277,7 @@ export function ZapVoiceCampaignsPage() {
           prev.map((x) => (x.id === c.id ? { ...x, status: 'active' as const } : x)),
         )
         const total = insertedCount
-        const nLeads = withPhone.length
+        const nLeads = audienceForIsca.length
         const inicioFila =
           startMs > now
             ? ` A fila começa em ${formatDateBr(new Date(startMs).toISOString())}.`

@@ -574,6 +574,45 @@ function findLeadId(idx: LeadIndex, fullDigits: string): string | null {
   return null
 }
 
+function phonesMatch(inboundDigits: string, leadPhone: string | null | undefined): boolean {
+  if (!leadPhone) return false
+  const d = toEvolutionDigits(leadPhone)
+  if (d && d === inboundDigits) return true
+  const t1 = nationalTail(inboundDigits)
+  const t2 = nationalTail(leadPhone)
+  if (t1 && t2 && t1 === t2) return true
+  return false
+}
+
+/** Se existirem vários cadastros com o mesmo número, usa o que tem progresso ZapVoice ativo (mesmo número que recebia as iscas duplicadas vs “sim”). */
+async function resolveCanonicalLeadIdForPhone(
+  supabase: SupabaseClient,
+  userId: string,
+  candidateId: string,
+  inboundDigits: string,
+  allRows: LeadRow[],
+): Promise<string> {
+  const dupes = allRows.filter((r) => phonesMatch(inboundDigits, r.phone))
+  if (dupes.length <= 1) return candidateId
+
+  const ids = dupes.map((r) => r.id)
+  const { data: prog, error } = await supabase
+    .from('lead_campaign_progress')
+    .select('lead_id, updated_at')
+    .eq('user_id', userId)
+    .in('lead_id', ids)
+    .in('status', ['active', 'awaiting_last_send'])
+    .order('updated_at', { ascending: false })
+    .limit(1)
+  if (error) {
+    console.warn('[evolution-whatsapp-webhook] resolve duplicata de lead', error.message)
+    return candidateId
+  }
+  const row = prog?.[0] as { lead_id: string } | undefined
+  if (row?.lead_id) return row.lead_id
+  return candidateId
+}
+
 async function ensureLeadId(
   supabase: SupabaseClient,
   userId: string,
@@ -784,6 +823,23 @@ serve(async (req) => {
     }
     if (ensured.created) createdLeads += 1
 
+    const crmLeadId = await resolveCanonicalLeadIdForPhone(
+      supabase,
+      userId,
+      ensured.id,
+      phoneDigits,
+      (allLeads ?? []) as LeadRow[],
+    )
+    if (crmLeadId !== ensured.id) {
+      index.byFull.set(phoneDigits, crmLeadId)
+      const tailK = nationalTail(phoneDigits)
+      if (tailK) index.byTail.set(tailK, crmLeadId)
+      console.log(
+        '[evolution-whatsapp-webhook] mesmo telefone em vários contatos — roteando para o lead com funil ativo',
+        { anterior: ensured.id, canonico: crmLeadId },
+      )
+    }
+
     const rawExtract = extractTextAndType(item.message)
     let replyText = rawExtract.body
     let contentType = rawExtract.content
@@ -857,7 +913,7 @@ serve(async (req) => {
 
     const upload = await uploadMedia(supabase, {
       userId,
-      leadId: ensured.id,
+      leadId: crmLeadId,
       msgId: item.msgId,
       media,
     })
@@ -887,14 +943,14 @@ serve(async (req) => {
       !/^\[(imagem|áudio|vídeo|documento|mensagem)\]$/i.test(zvText)
     if (canTryZapVoice) {
       const leadDisplayName =
-        index.rows.find((r) => r.id === ensured.id)?.name ??
+        index.rows.find((r) => r.id === crmLeadId)?.name ??
         item.pushName ??
         'Cliente'
       const zv = await processZapVoiceInbound({
         supabase,
         userId,
         instanceName: instance,
-        leadId: ensured.id,
+        leadId: crmLeadId,
         phoneDigits,
         leadName: leadDisplayName,
         messageText: zvText,
@@ -906,7 +962,7 @@ serve(async (req) => {
     }
 
     const { error: insErr } = await supabase.from('chat_messages').insert({
-      lead_id: ensured.id,
+      lead_id: crmLeadId,
       sender_type: 'cliente',
       content_type: dbContentType,
       message_body: finalBody,
@@ -961,7 +1017,7 @@ serve(async (req) => {
       const { data: leadAi, error: aiErr } = await supabase
         .from('leads')
         .select('id, ai_enabled, funnel_locked_until')
-        .eq('id', ensured.id)
+        .eq('id', crmLeadId)
         .eq('user_id', userId)
         .maybeSingle()
 
@@ -974,7 +1030,7 @@ serve(async (req) => {
           const t = new Date(lockedUntil).getTime()
           if (!Number.isNaN(t) && Date.now() < t) {
             console.log('[IA] Lead em funil — ignorando resposta automática.', {
-              leadId: ensured.id,
+              leadId: crmLeadId,
               lockedUntil,
             })
             continue
@@ -1053,7 +1109,7 @@ serve(async (req) => {
                 console.error('[IA] Falha ao enviar via Evolution:', evo.error ?? 'sem erro')
               } else {
                 const { error: iaInsErr } = await supabase.from('chat_messages').insert({
-                  lead_id: ensured.id,
+                  lead_id: crmLeadId,
                   sender_type: 'ia',
                   content_type: 'text',
                   message_body: ai.text,
