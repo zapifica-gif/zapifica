@@ -101,7 +101,7 @@ type FunnelStep = {
   media_url: string | null
   delay_seconds: number
   expected_trigger: string | null
-  advance_type?: 'auto' | 'exact' | null
+  advance_type?: 'auto' | 'exact' | 'timer' | null
   min_delay_seconds?: number | null
   max_delay_seconds?: number | null
   created_at: string
@@ -1544,9 +1544,9 @@ export function ZapVoiceCampaignsPage() {
         media_url: null,
         delay_seconds: 0,
         expected_trigger: null,
-        advance_type: 'auto',
-        min_delay_seconds: null,
-        max_delay_seconds: null,
+        advance_type: 'timer',
+        min_delay_seconds: 2,
+        max_delay_seconds: 15,
       })
       .select(
         'id, flow_id, step_order, message, media_type, media_url, delay_seconds, expected_trigger, advance_type, min_delay_seconds, max_delay_seconds, created_at, updated_at',
@@ -2876,10 +2876,6 @@ function StepCard({
   const [mediaType, setMediaType] = useState<FunnelMediaType>(step.media_type)
   const [mediaUrl, setMediaUrl] = useState(step.media_url ?? '')
   const [delaySeconds, setDelaySeconds] = useState(step.delay_seconds)
-  const [trigger, setTrigger] = useState(step.expected_trigger ?? '')
-  const [advanceType, setAdvanceType] = useState<'auto' | 'exact' | 'timer'>(
-    (step.advance_type ?? 'auto') as 'auto' | 'exact' | 'timer',
-  )
   const [stepMinDelay, setStepMinDelay] = useState<number>(
     typeof step.min_delay_seconds === 'number' ? step.min_delay_seconds : 2,
   )
@@ -2894,8 +2890,6 @@ function StepCard({
     setMediaType(step.media_type)
     setMediaUrl(step.media_url ?? '')
     setDelaySeconds(step.delay_seconds)
-    setTrigger(step.expected_trigger ?? '')
-    setAdvanceType((step.advance_type ?? 'auto') as 'auto' | 'exact' | 'timer')
     setStepMinDelay(typeof step.min_delay_seconds === 'number' ? step.min_delay_seconds : 2)
     setStepMaxDelay(typeof step.max_delay_seconds === 'number' ? step.max_delay_seconds : 15)
   }, [
@@ -2904,8 +2898,6 @@ function StepCard({
     step.media_type,
     step.media_url,
     step.delay_seconds,
-    step.expected_trigger,
-    step.advance_type,
     step.min_delay_seconds,
     step.max_delay_seconds,
   ])
@@ -2916,11 +2908,8 @@ function StepCard({
     mediaType !== step.media_type ||
     (mediaUrl || '').trim() !== (step.media_url ?? '').trim() ||
     delaySeconds !== step.delay_seconds ||
-    (trigger || '') !== (step.expected_trigger ?? '') ||
-    (advanceType || 'auto') !== ((step.advance_type ?? 'auto') as 'auto' | 'exact' | 'timer') ||
-    (advanceType === 'timer' &&
-      (stepMinDelay !== (typeof step.min_delay_seconds === 'number' ? step.min_delay_seconds : 2) ||
-        stepMaxDelay !== (typeof step.max_delay_seconds === 'number' ? step.max_delay_seconds : 15)))
+    stepMinDelay !== (typeof step.min_delay_seconds === 'number' ? step.min_delay_seconds : 2) ||
+    stepMaxDelay !== (typeof step.max_delay_seconds === 'number' ? step.max_delay_seconds : 15)
 
   const handlePickMediaType = (next: FunnelMediaType) => {
     setLocalError(null)
@@ -2959,29 +2948,23 @@ function StepCard({
       setLocalError('Informe a URL da mídia ou faça upload (tipos de imagem, vídeo, áudio e arquivo exigem link público).')
       return
     }
-    if (advanceType === 'exact' && !trigger.trim()) {
-      setLocalError('Para “gatilho exato”, preencha o Gatilho esperado.')
+    if (!Number.isFinite(stepMinDelay) || !Number.isFinite(stepMaxDelay)) {
+      setLocalError('Delay mínimo/máximo inválido.')
       return
     }
-    if (advanceType === 'timer') {
-      if (!Number.isFinite(stepMinDelay) || !Number.isFinite(stepMaxDelay)) {
-        setLocalError('Delay mínimo/máximo inválido.')
-        return
-      }
-      if (stepMinDelay < 0 || stepMaxDelay < 0 || stepMaxDelay < stepMinDelay) {
-        setLocalError('Delay mínimo/máximo precisa ser >= 0 e Máx >= Mín.')
-        return
-      }
+    if (stepMinDelay < 0 || stepMaxDelay < 0 || stepMaxDelay < stepMinDelay) {
+      setLocalError('Delay mínimo/máximo precisa ser >= 0 e Máx >= Mín.')
+      return
     }
     onSave({
       message,
       media_type: mediaType,
       media_url: mediaType === 'text' ? null : mediaUrl.trim() || null,
       delay_seconds: delaySeconds,
-      expected_trigger: trigger.trim() || null,
-      advance_type: advanceType,
-      min_delay_seconds: advanceType === 'timer' ? stepMinDelay : null,
-      max_delay_seconds: advanceType === 'timer' ? stepMaxDelay : null,
+      expected_trigger: null,
+      advance_type: 'timer',
+      min_delay_seconds: stepMinDelay,
+      max_delay_seconds: stepMaxDelay,
     })
   }
 
@@ -3190,100 +3173,42 @@ function StepCard({
 
           <div className="rounded-xl border border-zinc-200 bg-zinc-50/60 p-3">
             <p className="text-[11px] font-semibold uppercase tracking-wider text-zinc-500">
-              Tipo de avanço
+              Avanço temporizado (anti-ban)
             </p>
-            <div className="mt-2 grid gap-2">
-              <label className="flex cursor-pointer items-center gap-2 text-sm text-zinc-700">
-                <input
-                  type="radio"
-                  name={`advance-${step.id}`}
-                  checked={advanceType === 'auto'}
-                  onChange={() => setAdvanceType('auto')}
-                />
-                <span>Avanço automático (qualquer resposta)</span>
-              </label>
-              <label className="flex cursor-pointer items-center gap-2 text-sm text-zinc-700">
-                <input
-                  type="radio"
-                  name={`advance-${step.id}`}
-                  checked={advanceType === 'exact'}
-                  onChange={() => setAdvanceType('exact')}
-                />
-                <span>Avanço por gatilho exato</span>
-              </label>
-              <label className="flex cursor-pointer items-center gap-2 text-sm text-zinc-700">
-                <input
-                  type="radio"
-                  name={`advance-${step.id}`}
-                  checked={advanceType === 'timer'}
-                  onChange={() => setAdvanceType('timer')}
-                />
-                <span>Temporizado (sem aguardar resposta)</span>
-              </label>
-            </div>
-            {advanceType === 'timer' ? (
-              <div className="mt-3 grid grid-cols-2 gap-2">
-                <div>
-                  <p className="text-[10px] font-semibold uppercase tracking-wider text-zinc-500">
-                    Delay Mín (s)
-                  </p>
-                  <input
-                    type="number"
-                    min={0}
-                    value={stepMinDelay}
-                    onChange={(e) => {
-                      const v = Math.max(0, Number(e.target.value) || 0)
-                      setStepMinDelay(v)
-                      setStepMaxDelay((prev) => Math.max(prev, v))
-                    }}
-                    className="mt-1 w-full rounded-lg border border-zinc-200 bg-white px-2.5 py-2 text-sm tabular-nums shadow-inner focus:border-brand-300 focus:outline-none focus:ring-2 focus:ring-brand-500/20"
-                  />
-                </div>
-                <div>
-                  <p className="text-[10px] font-semibold uppercase tracking-wider text-zinc-500">
-                    Delay Máx (s)
-                  </p>
-                  <input
-                    type="number"
-                    min={0}
-                    value={stepMaxDelay}
-                    onChange={(e) => setStepMaxDelay(Math.max(0, Number(e.target.value) || 0))}
-                    className="mt-1 w-full rounded-lg border border-zinc-200 bg-white px-2.5 py-2 text-sm tabular-nums shadow-inner focus:border-brand-300 focus:outline-none focus:ring-2 focus:ring-brand-500/20"
-                  />
-                </div>
-                <p className="col-span-2 mt-1 text-[11px] text-zinc-600">
-                  Essa etapa será enfileirada automaticamente assim que a etapa anterior for enviada.
+            <p className="mt-1 text-[11px] text-zinc-600">
+              Após o gatilho da campanha, todo o fluxo segue automático. Cada etapa
+              espera um tempo aleatório entre <b>Mín</b> e <b>Máx</b> antes de disparar.
+            </p>
+            <div className="mt-3 grid grid-cols-2 gap-2">
+              <div>
+                <p className="text-[10px] font-semibold uppercase tracking-wider text-zinc-500">
+                  Delay Mín (s)
                 </p>
+                <input
+                  type="number"
+                  min={0}
+                  value={stepMinDelay}
+                  onChange={(e) => {
+                    const v = Math.max(0, Number(e.target.value) || 0)
+                    setStepMinDelay(v)
+                    setStepMaxDelay((prev) => Math.max(prev, v))
+                  }}
+                  className="mt-1 w-full rounded-lg border border-zinc-200 bg-white px-2.5 py-2 text-sm tabular-nums shadow-inner focus:border-brand-300 focus:outline-none focus:ring-2 focus:ring-brand-500/20"
+                />
               </div>
-            ) : advanceType === 'exact' ? (
-              <p className="mt-2 text-[11px] text-zinc-600">
-                Preencha o campo <b>Gatilho esperado</b> abaixo. O lead precisa digitar exatamente essa palavra/frase.
-              </p>
-            ) : (
-              <p className="mt-2 text-[11px] text-zinc-600">
-                O lead avança assim que responder qualquer coisa (texto/legenda/transcrição).
-              </p>
-            )}
-          </div>
-
-          <div>
-            <label className="mb-1.5 flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wider text-zinc-500">
-              <Sparkles className="h-3 w-3" aria-hidden />
-              Gatilho esperado
-            </label>
-            <input
-              value={trigger}
-              onChange={(e) => setTrigger(e.target.value)}
-              placeholder="Quero, Saber mais"
-              className="w-full rounded-lg border border-zinc-200 bg-white px-2.5 py-2 text-sm shadow-inner focus:border-brand-300 focus:outline-none focus:ring-2 focus:ring-brand-500/20"
-            />
-            <p className="mt-1 text-[10px] text-zinc-500">
-              {advanceType === 'exact'
-                ? 'Obrigatório quando o Tipo de avanço é “gatilho exato”.'
-                : advanceType === 'timer'
-                  ? 'Não se aplica no modo temporizado.'
-                  : 'Opcional (não é usado no avanço automático).'}
-            </p>
+              <div>
+                <p className="text-[10px] font-semibold uppercase tracking-wider text-zinc-500">
+                  Delay Máx (s)
+                </p>
+                <input
+                  type="number"
+                  min={0}
+                  value={stepMaxDelay}
+                  onChange={(e) => setStepMaxDelay(Math.max(0, Number(e.target.value) || 0))}
+                  className="mt-1 w-full rounded-lg border border-zinc-200 bg-white px-2.5 py-2 text-sm tabular-nums shadow-inner focus:border-brand-300 focus:outline-none focus:ring-2 focus:ring-brand-500/20"
+                />
+              </div>
+            </div>
           </div>
 
           <button

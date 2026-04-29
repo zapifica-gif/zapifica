@@ -190,27 +190,19 @@ async function handleActiveCampaignProgress(
     progressNext === primeiraOrdem
 
   if (isPrimeiraEtapaPosIsca) {
-    // Só aqui vale o gatilho da campanha (isca → resposta igual "Ok").
+    // Modelo simplificado: o gatilho VALE só aqui (palavra-chave da campanha).
+    // A partir desta etapa, todo o fluxo segue automaticamente pelo timer
+    // (worker enfileira as próximas etapas).
     const step = primeiraEtapaRaw as FunnelRow
-    const adv = (step.advance_type ?? 'auto') as 'auto' | 'exact' | 'timer'
-    if (adv === 'exact') {
-      const expectedNorm = normText(step.expected_trigger ?? '')
-      if (expectedNorm) {
-        if (messageNorm !== expectedNorm) {
-          return {
-            enqueued: false,
-            reason: 'gatilho_nao_bateu',
-            campaignId: progress.campaign_id,
-            suppressAi: true,
-          }
-        }
-      } else if (!triggerConditionSatisfied(cond, messageNorm, camp.trigger_keyword ?? '')) {
-        return {
-          enqueued: false,
-          reason: 'gatilho_nao_bateu',
-          campaignId: progress.campaign_id,
-          suppressAi: true,
-        }
+    if (!triggerConditionSatisfied(cond, messageNorm, camp.trigger_keyword ?? '')) {
+      // O lead respondeu algo que não bate com a palavra-chave da campanha.
+      // Mantemos a IA suprimida para não vazar resposta enquanto o lead estiver
+      // na fila de campanha (ex.: ainda não confirmou interesse).
+      return {
+        enqueued: false,
+        reason: 'gatilho_nao_bateu',
+        campaignId: progress.campaign_id,
+        suppressAi: true,
       }
     }
 
@@ -236,59 +228,15 @@ async function handleActiveCampaignProgress(
     }
   }
 
-  // Próximas etapas: tolera gaps no step_order buscando o próximo >= next_step_order.
-  const { data: stepRow, error: stepErr } = await p.supabase
-    .from('zv_funnels')
-    .select(
-      'id, step_order, message, media_type, media_url, delay_seconds, advance_type, expected_trigger, min_delay_seconds, max_delay_seconds',
-    )
-    .eq('flow_id', flowId)
-    .gte('step_order', progress.next_step_order)
-    .order('step_order', { ascending: true })
-    .limit(1)
-    .maybeSingle()
-
-  if (stepErr) {
-    console.error('[ZapVoice inbound] next step', stepErr.message)
-    return { enqueued: false, reason: 'erro_proximo_passo', campaignId: progress.campaign_id, suppressAi: true }
+  // Lead já está dentro do fluxo (etapa 2+): NÃO avançamos por mensagem do lead.
+  // O worker (process-scheduled-messages) cuida do timer e enfileira as próximas
+  // etapas automaticamente. Aqui só garantimos que a IA permaneça suprimida.
+  return {
+    enqueued: false,
+    reason: 'fluxo_timer_via_agenda',
+    campaignId: progress.campaign_id,
+    suppressAi: true,
   }
-  if (!stepRow) {
-    return { enqueued: false, reason: 'sem_proximo_passo', campaignId: progress.campaign_id, suppressAi: true }
-  }
-
-  const step = stepRow as FunnelRow
-  const adv = (step.advance_type ?? 'auto') as 'auto' | 'exact' | 'timer'
-  // Temporizada: disparo vai pela Agenda (cadeia no worker); mensagens do lead não avançam por aqui nem travam IA.
-  if (adv === 'timer') {
-    return {
-      enqueued: false,
-      reason: 'fluxo_timer_via_agenda',
-      campaignId: progress.campaign_id,
-      suppressAi: false,
-    }
-  }
-
-  const mustBeExact = adv === 'exact'
-  const expectedNorm = normText(step.expected_trigger ?? '')
-  const allowAdvance = mustBeExact
-    ? Boolean(expectedNorm) && messageNorm === expectedNorm
-    : true
-
-  if (!allowAdvance) {
-    return { enqueued: false, reason: 'gatilho_nao_bateu', campaignId: progress.campaign_id, suppressAi: true }
-  }
-
-  return await enqueueFunnelStepAndAdvance({
-    supabase: p.supabase,
-    userId: p.userId,
-    leadId: p.leadId,
-    phoneDigits: p.phoneDigits,
-    instanceName: p.instanceName,
-    progress,
-    step,
-    campMin: camp.min_delay_seconds,
-    campMax: camp.max_delay_seconds,
-  })
 }
 
 export type ZapVoiceInboundResult = {
@@ -536,21 +484,17 @@ export async function processZapVoiceInbound(
     return { enqueued: false, reason: 'sem_etapas', campaignId: matched.id, suppressAi: true }
   }
 
-  // 2) Nenhum gatilho de campanha: continua funil já ativo (ex.: etapa 2+ com expected_trigger).
-  let lastGatilho: ZapVoiceInboundResult | null = null
-  for (const prog of progressed) {
-    const res = await handleActiveCampaignProgress(p, messageNorm, prog)
-    if (res.enqueued) return res
-    if (res.reason === 'gatilho_nao_bateu') {
-      lastGatilho = res
-      continue
+  // 2) Nenhum gatilho de campanha bateu nesta mensagem.
+  //    Se o lead já está em algum fluxo (progresso ativo), a IA fica suprimida
+  //    enquanto o worker dispara as etapas pelo timer. Caso contrário, libera a IA.
+  if (progressed.length > 0) {
+    return {
+      enqueued: false,
+      reason: 'fluxo_em_andamento',
+      campaignId: progressed[0]!.campaign_id,
+      suppressAi: true,
     }
-    if (res.reason === 'fluxo_timer_via_agenda') {
-      continue
-    }
-    if (res.reason && res.reason !== 'sem_match') return res
   }
-  if (lastGatilho) return lastGatilho
 
   return { enqueued: false, reason: 'sem_match' }
 }

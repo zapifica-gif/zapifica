@@ -750,6 +750,9 @@ serve(async () => {
           const nextOrder = Number((prog2 as any).next_step_order ?? 0)
           const totalSteps = Number((prog2 as any).total_steps ?? 0)
           if (nextOrder >= 2 && nextOrder <= totalSteps) {
+            // Modelo simplificado: TODA etapa do fluxo avança por timer. Assim
+            // que uma etapa é enviada, agendamos a próxima imediatamente, sem
+            // depender do `advance_type` configurado.
             const { data: nextStep } = await supabase
               .from('zv_funnels')
               .select(
@@ -760,7 +763,7 @@ serve(async () => {
               .order('step_order', { ascending: true })
               .maybeSingle()
 
-            if (nextStep && String((nextStep as any).advance_type ?? 'auto') === 'timer') {
+            if (nextStep) {
               const minS =
                 typeof (nextStep as any).min_delay_seconds === 'number'
                   ? Math.max(0, Number((nextStep as any).min_delay_seconds))
@@ -800,8 +803,14 @@ serve(async () => {
                 max_delay_seconds: maxS,
               })
 
-              if (!ins2.error) {
-                const updatedNext = nextOrder + 1
+              if (ins2.error) {
+                console.warn(
+                  '[Agenda Suprema] Falha ao enfileirar próxima etapa do funil:',
+                  ins2.error.message,
+                )
+              } else {
+                const enqueuedOrder = Number((nextStep as any).step_order ?? nextOrder)
+                const updatedNext = enqueuedOrder + 1
                 const isLastEnqueued = updatedNext > totalSteps
                 await supabase
                   .from('lead_campaign_progress')
