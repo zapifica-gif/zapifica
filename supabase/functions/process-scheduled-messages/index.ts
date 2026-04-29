@@ -901,6 +901,19 @@ serve(async () => {
           .eq('id', msg.id)
       }
       failed += 1
+      // Fluxo Zap Voice: erro no envio deixa o lead preso sem IA (funnel lock). Liberamos explicitamente.
+      if (msg.lead_id && (msg.zv_campaign_id ?? msg.zv_funnel_step_id)) {
+        const { error: uLock } = await supabase
+          .from('leads')
+          .update({ funnel_locked_until: null })
+          .eq('id', msg.lead_id)
+          .eq('user_id', msg.user_id)
+        if (uLock) {
+          console.warn('[process-scheduled-messages] funnel unlock falhou:', uLock.message)
+        } else {
+          console.warn('[process-scheduled-messages] funnel unlock após erro (Zap Voice)', msg.lead_id)
+        }
+      }
     }
 
     // Sem cooldown global aqui: o delay configurável já é aplicado por mensagem.
