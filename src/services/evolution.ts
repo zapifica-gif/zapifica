@@ -1042,13 +1042,16 @@ export async function sendAudioMessageWithConfig(
 export type EvolutionMediaType = 'image' | 'video' | 'audio' | 'document'
 
 export type SendMediaParams = {
-  /** Base64 puro (SEM prefixo `data:*;base64,`). */
+  /**
+   * Base64 puro (sem prefixo `data:*;base64,`) **ou** URL pública `http(s)://…`
+   * (recomendado para vídeo/PDF pesados — a Evolution baixa do Storage).
+   */
   media: string
   mediaType: EvolutionMediaType
-  /** mimeType do arquivo (ex.: image/png). */
-  mimeType: string
-  /** nome do arquivo (ex.: foto.png). */
-  fileName: string
+  /** mimeType do arquivo (ex.: image/png). Obrigatório para base64; opcional em modo URL. */
+  mimeType?: string
+  /** nome do arquivo (ex.: foto.png). Obrigatório para base64; opcional em modo URL. */
+  fileName?: string
   /** legenda opcional (para image/video/document). */
   caption?: string
   /** Força áudio como Push-to-Talk/nota de voz quando suportado pelo motor. */
@@ -1056,13 +1059,9 @@ export type SendMediaParams = {
 }
 
 /**
- * Envia mídia via `/message/sendMedia/{instance}` usando BASE64 puro.
- *
- * Algumas versões da Evolution falham com URL pública (500). Por isso este
- * método manda sempre o conteúdo em Base64 no campo `media`.
- *
- * Payload estrito:
- *   { number, mediatype, media, caption? }
+ * Envia mídia via `/message/sendMedia/{instance}`.
+ * — Base64 puro no campo `media`, ou
+ * — URL pública `https://` no campo `media` (vídeo/documento/imagem pesados no Storage).
  */
 export async function sendMediaMessageWithConfig(
   userId: string,
@@ -1088,8 +1087,8 @@ export async function sendMediaMessageWithConfig(
   }
   const captionTrim = params.caption?.trim()
   const caption = captionTrim ? captionTrim : undefined
-  const mimeType = params.mimeType.trim() || 'application/octet-stream'
-  const fileName = params.fileName.trim() || 'arquivo'
+  const mimeType = (params.mimeType ?? '').trim() || 'application/octet-stream'
+  const fileName = (params.fileName ?? '').trim() || 'arquivo'
 
   // ÁUDIO: a Evolution falha silenciosamente em /sendMedia para mediatype:'audio'.
   // Forçamos o endpoint dedicado /message/sendWhatsAppAudio com PTT + encoding.
@@ -1101,24 +1100,34 @@ export async function sendMediaMessageWithConfig(
 
   try {
     const url = `${cfg.baseUrl}/message/sendMedia/${encodeURIComponent(instanceName)}`
-    const res = await fetch(url, {
-      method: 'POST',
-      headers: {
-        apikey: cfg.apiKey,
-        Accept: 'application/json',
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        number: normalized.recipient,
-        mediatype: params.mediaType,
-        media: trimmedMedia,
-        // Documentos geralmente exigem mimetype + fileName (senão dá 400).
-        ...(params.mediaType === 'document'
-          ? { mimetype: mimeType, fileName }
-          : {}),
-        ...(caption ? { caption } : {}),
-      }),
-    })
+    const payload: Record<string, unknown> = {
+      number: normalized.recipient,
+      mediatype: params.mediaType,
+      media: trimmedMedia,
+    }
+    if (caption) payload.caption = caption
+    if (params.mediaType === 'document') {
+      payload.mimetype = mimeType
+      payload.fileName = fileName
+    }
+
+    const ctrl = new AbortController()
+    const timeoutId = setTimeout(() => ctrl.abort(), 180_000)
+    let res: Response
+    try {
+      res = await fetch(url, {
+        method: 'POST',
+        headers: {
+          apikey: cfg.apiKey,
+          Accept: 'application/json',
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(payload),
+        signal: ctrl.signal,
+      })
+    } finally {
+      clearTimeout(timeoutId)
+    }
 
     const text = await res.text()
     let data: unknown = null

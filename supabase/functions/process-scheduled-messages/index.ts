@@ -339,8 +339,10 @@ async function sendEvolutionPresence(
 
 /** Gap entre etapas do fluxo menor que isto ⇒ processa inline (sem esperar próximo cron). */
 const INLINE_FUNNEL_GAP_THRESHOLD_MS = 45_000
-/** Teto de duração da invocação Edge para continuar drain (ms). */
-const INLINE_FUNNEL_MAX_WALL_MS = 115_000
+/** Teto da invocação para stay-awake (ms): cabe espera Evolution longa (~vídeo) + gap. */
+const INLINE_FUNNEL_MAX_WALL_MS = 165_000
+/** Timeout único HTTP → Evolution ao enviar mídia (vídeo pode levar bastante tempo). */
+const EVOLUTION_SEND_TIMEOUT_MS = 180_000
 const MAX_FUNNEL_INLINE_DEPTH = 32
 
 /** Margem sobre o gap para concluir o próximo disparo na mesma invocação. */
@@ -348,6 +350,185 @@ const INLINE_FUNNEL_RESUME_BUFFER_MS = 2_500
 
 function remainingWallMs(invocationStartedAtMs: number): number {
   return INLINE_FUNNEL_MAX_WALL_MS - (Date.now() - invocationStartedAtMs)
+}
+
+function isPublicHttpUrl(raw: string): boolean {
+  const t = raw.trim()
+  if (!t || t.startsWith('data:')) return false
+  try {
+    const u = new URL(t)
+    return u.protocol === 'http:' || u.protocol === 'https:'
+  } catch {
+    return false
+  }
+}
+
+function safeFileNameFromPublicUrl(raw: string): string {
+  try {
+    const path = new URL(raw).pathname
+    const name = decodeURIComponent(path.split('/').pop() || 'arquivo.bin')
+    return name.trim() ? name.slice(0, 240) : 'arquivo.bin'
+  } catch {
+    return 'arquivo.bin'
+  }
+}
+
+function mimeGuessFromFilename(name: string): string {
+  const lower = name.toLowerCase()
+  if (lower.endsWith('.mp4')) return 'video/mp4'
+  if (lower.endsWith('.mov')) return 'video/quicktime'
+  if (lower.endsWith('.webm')) return 'video/webm'
+  if (lower.endsWith('.pdf')) return 'application/pdf'
+  if (lower.endsWith('.png')) return 'image/png'
+  if (lower.endsWith('.jpg') || lower.endsWith('.jpeg')) return 'image/jpeg'
+  if (lower.endsWith('.webp')) return 'image/webp'
+  return 'application/octet-stream'
+}
+
+type SupabaseService = ReturnType<typeof createClient>
+
+/**
+ * Agenda a próxima etapa Zap Voice na fila — usada após envio OK ou falha tratada (não trava o funil).
+ */
+async function enqueueZapVoiceNextScheduledMessage(
+  supabase: SupabaseService,
+  msg: ScheduledRow,
+): Promise<{ id: string; gapMs: number } | null> {
+  if (!msg.lead_id || !msg.zv_campaign_id || !msg.zv_funnel_step_id) return null
+
+  const funnelStepUuid = String(msg.zv_funnel_step_id).trim()
+
+  const { data: zvCampRow, error: campE } = await supabase
+    .from('zv_campaigns')
+    .select('flow_id')
+    .eq('user_id', msg.user_id)
+    .eq('id', msg.zv_campaign_id)
+    .maybeSingle()
+  if (campE) console.warn('[ZV-FUNNEL] enqueue: campanha:', campE.message)
+
+  const zvFlowId = (zvCampRow as { flow_id: string | null } | null)?.flow_id ?? null
+
+  const { data: prog2, error: prog2Err } = await supabase
+    .from('lead_campaign_progress')
+    .select('id')
+    .eq('user_id', msg.user_id)
+    .eq('lead_id', msg.lead_id)
+    .eq('campaign_id', msg.zv_campaign_id)
+    .in('status', ['active', 'awaiting_last_send'])
+    .maybeSingle()
+  if (prog2Err) console.warn('[ZV-FUNNEL] enqueue: progress:', prog2Err.message)
+
+  let curOrd = asFiniteOrd(msg.zv_funnel_step_order ?? null)
+
+  if (curOrd === null) {
+    const { data: csr, error: curErr } = await supabase
+      .from('zv_funnels')
+      .select('id, step_order')
+      .eq('id', funnelStepUuid)
+      .limit(1)
+      .maybeSingle()
+    if (curErr) console.warn('[ZV-FUNNEL] enqueue: etapa UUID:', curErr.message)
+    curOrd = csr ? asFiniteOrd((csr as { step_order?: unknown }).step_order) : null
+  }
+
+  if (!zvFlowId || !prog2?.id || curOrd === null) return null
+
+  const { data: nextStep, error: nxErr } = await supabase
+    .from('zv_funnels')
+    .select(
+      'id, step_order, message, media_type, media_url, min_delay_seconds, max_delay_seconds',
+    )
+    .eq('flow_id', zvFlowId)
+    .gt('step_order', curOrd)
+    .order('step_order', { ascending: true })
+    .limit(1)
+    .maybeSingle()
+
+  if (nxErr) console.warn('[ZV-FUNNEL] enqueue: próxima etapa:', nxErr.message)
+  if (!nextStep) return null
+
+  const minS =
+    typeof (nextStep as Record<string, unknown>).min_delay_seconds === 'number'
+      ? Math.max(0, Number((nextStep as { min_delay_seconds: number }).min_delay_seconds))
+      : typeof msg.min_delay_seconds === 'number'
+        ? Math.max(0, msg.min_delay_seconds)
+        : 2
+  const maxS =
+    typeof (nextStep as Record<string, unknown>).max_delay_seconds === 'number'
+      ? Math.max(minS, Number((nextStep as { max_delay_seconds: number }).max_delay_seconds))
+      : typeof msg.max_delay_seconds === 'number'
+        ? Math.max(minS, msg.max_delay_seconds)
+        : 15
+  const delayS = pickRandomIntInclusive(minS, maxS)
+  const scheduledAt = new Date(Date.now() + delayS * 1000).toISOString()
+
+  const rendered = await renderMessageTemplate({
+    supabase,
+    userId: msg.user_id,
+    leadId: msg.lead_id,
+    text: String((nextStep as { message?: string | null }).message ?? ''),
+  })
+
+  const ct = String((nextStep as { media_type?: string }).media_type ?? 'text')
+  const mediaUrl2 =
+    ct === 'text'
+      ? null
+      : String((nextStep as { media_url?: string | null }).media_url ?? '').trim() || null
+
+  const nextOrdRaw = asFiniteOrd((nextStep as { step_order?: unknown }).step_order)
+
+  const ins2 = await supabase
+    .from('scheduled_messages')
+    .insert({
+      user_id: msg.user_id,
+      lead_id: msg.lead_id,
+      zv_campaign_id: msg.zv_campaign_id,
+      zv_funnel_step_id: String((nextStep as { id: string }).id),
+      zv_funnel_step_order: nextOrdRaw,
+      is_active: true,
+      recipient_type: 'personal',
+      content_type: ct,
+      message_body: rendered || null,
+      media_url: mediaUrl2,
+      scheduled_at: scheduledAt,
+      status: 'pending',
+      recipient_phone: msg.recipient_phone,
+      event_id: null,
+      evolution_instance_name: msg.evolution_instance_name,
+      min_delay_seconds: minS,
+      max_delay_seconds: maxS,
+    })
+    .select('id')
+    .single()
+
+  if (ins2.error || !ins2.data?.id) {
+    console.error(
+      '[ZV-FUNNEL] enqueue FALHA insert:',
+      ins2.error?.code,
+      ins2.error?.message,
+    )
+    return null
+  }
+
+  const nsOrd = Number((nextStep as { step_order?: number }).step_order ?? 0)
+  const { data: stepBeyondQueued } = await supabase
+    .from('zv_funnels')
+    .select('id')
+    .eq('flow_id', zvFlowId)
+    .gt('step_order', nsOrd)
+    .limit(1)
+    .maybeSingle()
+  const isLastEnqueued = stepBeyondQueued == null
+  await supabase
+    .from('lead_campaign_progress')
+    .update({
+      next_step_order: nsOrd + 1,
+      status:
+        isLastEnqueued ? ('awaiting_last_send' as const) : ('active' as const),
+    })
+    .eq('id', String((prog2 as { id: string }).id))
+
+  return { id: ins2.data.id, gapMs: delayS * 1000 }
 }
 
 serve(async () => {
@@ -525,81 +706,125 @@ serve(async () => {
       let plan: DispatchPlan
 
       if (mediaUrl) {
-        const { base64, mimeType, fileName } = await downloadMediaAsBase64(mediaUrl)
         const ct = msg.content_type
-        switch (ct) {
-          case 'audio':
-            plan = {
-              kind: 'audio',
-              body: {
-                audio: stripDataUrlBase64(base64),
-                delay: 1000,
-                encoding: true,
-                ptt: true,
-              },
-            }
-            break
-          case 'image':
-            plan = {
-              kind: 'media',
-              mediatype: 'image',
-              body: {
-                mediatype: 'image',
-                media: base64,
-                ...(caption ? { caption } : {}),
-              },
-            }
-            break
-          case 'video':
+        const trimmedUrl = mediaUrl.trim()
+        const sendUrlDirect =
+          isPublicHttpUrl(trimmedUrl) &&
+          (ct === 'video' || ct === 'document' || ct === 'image')
+
+        // Vídeo/imagem/documento por URL pública → Evolution faz o download (evita OOM na Edge).
+        // Áudio/nota ou URLs não HTTP seguem pelo caminho antigo (base64 após fetch).
+        if (sendUrlDirect) {
+          const fnFromUrl = safeFileNameFromPublicUrl(trimmedUrl)
+          const mimeGuess = mimeGuessFromFilename(fnFromUrl)
+          if (ct === 'video') {
             plan = {
               kind: 'media',
               mediatype: 'video',
               body: {
                 mediatype: 'video',
-                media: base64,
+                media: trimmedUrl,
                 ...(caption ? { caption } : {}),
               },
             }
-            break
-          case 'document':
+          } else if (ct === 'image') {
+            plan = {
+              kind: 'media',
+              mediatype: 'image',
+              body: {
+                mediatype: 'image',
+                media: trimmedUrl,
+                ...(caption ? { caption } : {}),
+              },
+            }
+          } else {
             plan = {
               kind: 'media',
               mediatype: 'document',
               body: {
                 mediatype: 'document',
-                mimetype: mimeType,
-                fileName,
-                media: base64,
+                mimetype: mimeGuess,
+                fileName: fnFromUrl,
+                media: trimmedUrl,
                 ...(caption ? { caption } : {}),
               },
             }
-            break
-          case 'text':
-            // legado: linha de agenda antiga com URL mas tipo texto
-            plan = {
-              kind: 'media',
-              mediatype: 'document',
-              body: {
+          }
+        } else {
+          const { base64, mimeType, fileName } = await downloadMediaAsBase64(mediaUrl)
+          switch (ct) {
+            case 'audio':
+              plan = {
+                kind: 'audio',
+                body: {
+                  audio: stripDataUrlBase64(base64),
+                  delay: 1000,
+                  encoding: true,
+                  ptt: true,
+                },
+              }
+              break
+            case 'image':
+              plan = {
+                kind: 'media',
+                mediatype: 'image',
+                body: {
+                  mediatype: 'image',
+                  media: base64,
+                  ...(caption ? { caption } : {}),
+                },
+              }
+              break
+            case 'video':
+              plan = {
+                kind: 'media',
+                mediatype: 'video',
+                body: {
+                  mediatype: 'video',
+                  media: base64,
+                  ...(caption ? { caption } : {}),
+                },
+              }
+              break
+            case 'document':
+              plan = {
+                kind: 'media',
                 mediatype: 'document',
-                mimetype: mimeType,
-                fileName,
-                media: base64,
-                ...(caption ? { caption } : {}),
-              },
-            }
-            break
-          default:
-            plan = {
-              kind: 'media',
-              mediatype: 'document',
-              body: {
+                body: {
+                  mediatype: 'document',
+                  mimetype: mimeType,
+                  fileName,
+                  media: base64,
+                  ...(caption ? { caption } : {}),
+                },
+              }
+              break
+            case 'text':
+              plan = {
+                kind: 'media',
                 mediatype: 'document',
-                mimetype: mimeType,
-                fileName,
-                media: base64,
-                ...(caption ? { caption } : {}),
-              },
-            }
+                body: {
+                  mediatype: 'document',
+                  mimetype: mimeType,
+                  fileName,
+                  media: base64,
+                  ...(caption ? { caption } : {}),
+                },
+              }
+              break
+            default:
+              plan = {
+                kind: 'media',
+                mediatype: 'document',
+                body: {
+                  mediatype: 'document',
+                  mimetype: mimeType,
+                  fileName,
+                  media: base64,
+                  ...(caption ? { caption } : {}),
+                },
+              }
+          }
         }
       } else {
         const body = renderedBody ?? ''
@@ -641,6 +866,8 @@ serve(async () => {
       }
 
       let lastEvolutionId: string | null = null
+      /** Erro tratado aqui sem throw (timeout/rejeição Evolution/vídeo). */
+      let evolutionSendError: string | null = null
 
       for (const phone of phones) {
         let endpoint: string
@@ -672,258 +899,124 @@ serve(async () => {
         )
         await sleep(presenceDelayMs)
 
-        const url = `${evolutionUrl}/${endpoint}/${encodeURIComponent(instanceName)}`
-        const response = await fetch(url, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            apikey: evolutionApiKey,
-          },
-          body: JSON.stringify(payload),
-        })
-
-        const bodyText = await response.text()
-        let bodyJson: unknown = null
-        if (bodyText) {
+        const evolutionReqUrl =
+          `${evolutionUrl}/${endpoint}/${encodeURIComponent(instanceName)}`
+        console.log(
+          '[Agenda Suprema] Evolution POST',
+          endpoint,
+          '| parede-ms≈',
+          remainingWallMs(invocationStartedAtMs),
+        )
+        try {
+          const ctrl = new AbortController()
+          const timeoutId = setTimeout(() => ctrl.abort(), EVOLUTION_SEND_TIMEOUT_MS)
+          let response: Response
           try {
-            bodyJson = JSON.parse(bodyText)
-          } catch {
-            // não-JSON
-          }
-        }
-
-        if (!response.ok) {
-          const detail =
-            (bodyJson &&
-              typeof bodyJson === 'object' &&
-              'message' in bodyJson &&
-              String((bodyJson as { message: unknown }).message)) ||
-            bodyText.slice(0, 400) ||
-            response.statusText
-          throw new Error(
-            `Evolution ${response.status} em ${endpoint}/${instanceName}: ${detail}`,
-          )
-        }
-        if (bodyJson) {
-          const id = extractMessageId(bodyJson)
-          if (id) lastEvolutionId = id
-        }
-      }
-
-      const { error: upErr } = await supabase
-        .from('scheduled_messages')
-        .update({
-          status: 'sent',
-          evolution_message_id: lastEvolutionId,
-          last_error: null,
-          updated_at: new Date().toISOString(),
-        })
-        .eq('id', msg.id)
-      if (upErr) {
-        throw new Error(`Supabase: falha ao marcar sent: ${upErr.message}`)
-      }
-
-      if (msg.lead_id) {
-        const { error: chatErr } = await supabase.from('chat_messages').insert({
-          lead_id: msg.lead_id,
-          sender_type: 'agencia',
-          content_type: toChatContentType(msg.content_type),
-          message_body: messageBodyParaChat(msg),
-          media_url: msg.media_url,
-          evolution_message_id: lastEvolutionId,
-        })
-        if (chatErr) {
-          console.error('[process-scheduled-messages] chat_messages insert:', chatErr)
-          await supabase
-            .from('scheduled_messages')
-            .update({
-              last_error: `Enviado ao WhatsApp, mas o CRM não registrou: ${chatErr.message}`.slice(
-                0,
-                4000,
-              ),
-              updated_at: new Date().toISOString(),
+            response = await fetch(evolutionReqUrl, {
+              method: 'POST',
+              headers: {
+                'Content-Type': 'application/json',
+                apikey: evolutionApiKey,
+              },
+              body: JSON.stringify(payload),
+              signal: ctrl.signal,
             })
-            .eq('id', msg.id)
-        }
-      }
-
-      // --- Zap Voice: Etapa N enviada → enfileira Etapa N+1 na fila ---
-      if (
-        msg.lead_id &&
-        msg.zv_campaign_id &&
-        msg.zv_funnel_step_id
-      ) {
-        const funnelStepUuid = String(msg.zv_funnel_step_id).trim()
-
-        console.log('[ZV-FUNNEL] início encadeamento pós-envio', {
-          sched_id: msg.id,
-          lead_id: msg.lead_id,
-          zv_campaign_id: msg.zv_campaign_id,
-          zv_funnel_step_id: funnelStepUuid,
-          zv_funnel_step_order_col: msg.zv_funnel_step_order ?? null,
-        })
-
-        const { data: zvCampRow, error: campE } = await supabase
-          .from('zv_campaigns')
-          .select('flow_id')
-          .eq('user_id', msg.user_id)
-          .eq('id', msg.zv_campaign_id)
-          .maybeSingle()
-        if (campE) {
-          console.warn('[ZV-FUNNEL] ler campanha:', campE.message)
-        }
-        const zvFlowId = (zvCampRow as { flow_id: string | null } | null)?.flow_id ?? null
-
-        const { data: prog2, error: prog2Err } = await supabase
-          .from('lead_campaign_progress')
-          .select('id')
-          .eq('user_id', msg.user_id)
-          .eq('lead_id', msg.lead_id)
-          .eq('campaign_id', msg.zv_campaign_id)
-          .in('status', ['active', 'awaiting_last_send'])
-          .maybeSingle()
-        if (prog2Err) {
-          console.warn('[ZV-FUNNEL] ler lead_campaign_progress:', prog2Err.message)
-        }
-
-        // 1) Preferir número gravado na fila (coerente mesmo se UUID falhar ao bater na tabela)
-        let curOrd = asFiniteOrd(msg.zv_funnel_step_order ?? null)
-
-        // 2) Fallback: FK em zv_funnels
-        if (curOrd === null) {
-          const { data: csr, error: curErr } = await supabase
-            .from('zv_funnels')
-            .select('id, step_order')
-            .eq('id', funnelStepUuid)
-            .limit(1)
-            .maybeSingle()
-          if (curErr) {
-            console.warn('[ZV-FUNNEL] ler etapa atual por UUID:', curErr.message)
+          } finally {
+            clearTimeout(timeoutId)
           }
-          curOrd = csr ? asFiniteOrd((csr as { step_order?: unknown }).step_order) : null
-          console.log('[ZV-FUNNEL] fallback UUID → step_order=', curOrd, 'row?', Boolean(csr))
-        }
 
-        if (!zvFlowId) {
-          console.error('[ZV-FUNNEL] ABORT sem flow_id na campanha', msg.zv_campaign_id)
-        } else if (!prog2?.id) {
-          console.error('[ZV-FUNNEL] ABORT sem lead_campaign_progress ativo para lead/campanha')
-        } else if (curOrd === null) {
-          console.error(
-            '[ZV-FUNNEL] ABORT não resolveu step_order (coluna nova ausente até migrar?). rode: supabase db push',
-          )
-        } else {
-          const { data: nextStep, error: nxErr } = await supabase
-            .from('zv_funnels')
-            .select(
-              'id, step_order, message, media_type, media_url, min_delay_seconds, max_delay_seconds',
-            )
-            .eq('flow_id', zvFlowId)
-            .gt('step_order', curOrd)
-            .order('step_order', { ascending: true })
-            .limit(1)
-            .maybeSingle()
-
-          if (nxErr) {
-            console.warn('[ZV-FUNNEL] query próxima etapa:', nxErr.message)
-          }
-          console.log('[ZV-FUNNEL] próxima etapa após ord', curOrd, '→', nextStep?.id ?? 'nenhuma')
-
-          if (!nextStep) {
-            console.log('[ZV-FUNNEL] fim do fluxo neste envio (sem etapa seguinte)')
-          } else {
-            const minS =
-              typeof (nextStep as Record<string, unknown>).min_delay_seconds === 'number'
-                ? Math.max(0, Number((nextStep as { min_delay_seconds: number }).min_delay_seconds))
-                : typeof msg.min_delay_seconds === 'number'
-                  ? Math.max(0, msg.min_delay_seconds)
-                  : 2
-            const maxS =
-              typeof (nextStep as Record<string, unknown>).max_delay_seconds === 'number'
-                ? Math.max(minS, Number((nextStep as { max_delay_seconds: number }).max_delay_seconds))
-                : typeof msg.max_delay_seconds === 'number'
-                  ? Math.max(minS, msg.max_delay_seconds)
-                  : 15
-            const delayS = pickRandomIntInclusive(minS, maxS)
-            const scheduledAt = new Date(Date.now() + delayS * 1000).toISOString()
-
-            const rendered = await renderMessageTemplate({
-              supabase,
-              userId: msg.user_id,
-              leadId: msg.lead_id,
-              text: String((nextStep as { message?: string | null }).message ?? ''),
-            })
-
-            const ct = String((nextStep as { media_type?: string }).media_type ?? 'text')
-            const mediaUrl2 =
-              ct === 'text'
-                ? null
-                : String((nextStep as { media_url?: string | null }).media_url ?? '').trim() ||
-                  null
-
-            const nextOrdRaw = asFiniteOrd((nextStep as { step_order?: unknown }).step_order)
-
-            const ins2 = await supabase
-              .from('scheduled_messages')
-              .insert({
-                user_id: msg.user_id,
-                lead_id: msg.lead_id,
-                zv_campaign_id: msg.zv_campaign_id,
-                zv_funnel_step_id: String((nextStep as { id: string }).id),
-                zv_funnel_step_order: nextOrdRaw,
-                is_active: true,
-                recipient_type: 'personal',
-                content_type: ct,
-                message_body: rendered || null,
-                media_url: mediaUrl2,
-                scheduled_at: scheduledAt,
-                status: 'pending',
-                recipient_phone: msg.recipient_phone,
-                event_id: null,
-                evolution_instance_name: msg.evolution_instance_name,
-                min_delay_seconds: minS,
-                max_delay_seconds: maxS,
-              })
-              .select('id')
-              .single()
-
-            if (ins2.error) {
-              console.error(
-                '[ZV-FUNNEL] FALHA insert próxima etapa (ver RLS/schema):',
-                ins2.error.code,
-                ins2.error.message,
-                JSON.stringify(ins2.error),
-              )
-            } else {
-              console.log('[ZV-FUNNEL] próxima etapa AGENDADA', {
-                new_sched_preview: scheduledAt,
-                next_step_order: nextOrdRaw,
-                next_media: ct,
-                new_id: ins2.data?.id,
-              })
-              const nsOrd = Number((nextStep as { step_order?: number }).step_order ?? 0)
-              const { data: stepBeyondQueued } = await supabase
-                .from('zv_funnels')
-                .select('id')
-                .eq('flow_id', zvFlowId)
-                .gt('step_order', nsOrd)
-                .limit(1)
-                .maybeSingle()
-              const isLastEnqueued = stepBeyondQueued == null
-              await supabase
-                .from('lead_campaign_progress')
-                .update({
-                  next_step_order: nsOrd + 1,
-                  status:
-                    isLastEnqueued ? ('awaiting_last_send' as const) : ('active' as const),
-                })
-                .eq('id', String((prog2 as { id: string }).id))
-              if (ins2.data?.id) {
-                queuedInline = { id: ins2.data.id, gapMs: delayS * 1000 }
-              }
+          const bodyText = await response.text()
+          let bodyJson: unknown = null
+          if (bodyText) {
+            try {
+              bodyJson = JSON.parse(bodyText)
+            } catch {
+              // não-JSON
             }
           }
+
+          if (!response.ok) {
+            const detail =
+              (bodyJson &&
+                typeof bodyJson === 'object' &&
+                'message' in bodyJson &&
+                String((bodyJson as { message: unknown }).message)) ||
+              bodyText.slice(0, 400) ||
+              response.statusText
+            evolutionSendError = `Evolution ${response.status} em ${endpoint}/${instanceName}: ${detail}`
+            console.error('[process-scheduled-messages]', evolutionSendError)
+            break
+          }
+          if (bodyJson) {
+            const id = extractMessageId(bodyJson)
+            if (id) lastEvolutionId = id
+          }
+        } catch (e) {
+          const em = e instanceof Error ? e.message : String(e)
+          evolutionSendError = `Evolution/rede-timeout: ${em}`.slice(0, 2000)
+          console.error('[process-scheduled-messages] Evolution exceção (rede ou timeout?):', em)
+          break
         }
+        if (evolutionSendError) break
+      }
+
+      if (!evolutionSendError) {
+        const { error: upErr } = await supabase
+          .from('scheduled_messages')
+          .update({
+            status: 'sent',
+            evolution_message_id: lastEvolutionId,
+            last_error: null,
+            updated_at: new Date().toISOString(),
+          })
+          .eq('id', msg.id)
+        if (upErr) {
+          throw new Error(`Supabase: falha ao marcar sent: ${upErr.message}`)
+        }
+
+        if (msg.lead_id) {
+          const { error: chatErr } = await supabase.from('chat_messages').insert({
+            lead_id: msg.lead_id,
+            sender_type: 'agencia',
+            content_type: toChatContentType(msg.content_type),
+            message_body: messageBodyParaChat(msg),
+            media_url: msg.media_url,
+            evolution_message_id: lastEvolutionId,
+          })
+          if (chatErr) {
+            console.error('[process-scheduled-messages] chat_messages insert:', chatErr)
+            await supabase
+              .from('scheduled_messages')
+              .update({
+                last_error: `Enviado ao WhatsApp, mas o CRM não registrou: ${chatErr.message}`.slice(
+                  0,
+                  4000,
+                ),
+                updated_at: new Date().toISOString(),
+              })
+              .eq('id', msg.id)
+          }
+        }
+
+        sent += 1
+      } else {
+        console.warn('[process-scheduled-messages] Disparo falhou — marca failed e mantém Zap Voice vivo', {
+          sched_id: msg.id,
+          err: evolutionSendError.slice(0, 500),
+        })
+        await supabase
+          .from('scheduled_messages')
+          .update({
+            status: 'failed',
+            last_error: evolutionSendError.slice(0, 4000),
+            updated_at: new Date().toISOString(),
+          })
+          .eq('id', msg.id)
+        failed += 1
+      }
+
+      if (msg.lead_id && msg.zv_campaign_id && msg.zv_funnel_step_id) {
+        queuedInline = await enqueueZapVoiceNextScheduledMessage(supabase, msg)
       }
 
       // --- Zap Voice: sem pendentes nesta campanha+lead → conclui e libera IA ---
@@ -994,8 +1087,6 @@ serve(async () => {
           }
         }
       }
-
-      sent += 1
 
       if (queuedInline !== null) {
         const qi = queuedInline

@@ -184,6 +184,38 @@ async function renderMessageTemplate(params: {
 
 type ChatContentType = 'text' | 'audio' | 'image' | 'document'
 
+function isPublicHttpUrlStr(raw: string): boolean {
+  const t = raw.trim()
+  if (!t.startsWith('http')) return false
+  try {
+    const u = new URL(t)
+    return u.protocol === 'http:' || u.protocol === 'https:'
+  } catch {
+    return false
+  }
+}
+
+function safeFileNameFromPublicUrl(raw: string): string {
+  try {
+    const path = new URL(raw).pathname
+    const name = decodeURIComponent(path.split('/').pop() || 'midia.bin')
+    return name.trim() ? name.slice(0, 240) : 'midia.bin'
+  } catch {
+    return 'midia.bin'
+  }
+}
+
+function mimeGuessFromFilename(name: string): string {
+  const lower = name.toLowerCase()
+  if (lower.endsWith('.mp4')) return 'video/mp4'
+  if (lower.endsWith('.mov')) return 'video/quicktime'
+  if (lower.endsWith('.pdf')) return 'application/pdf'
+  if (lower.endsWith('.png')) return 'image/png'
+  if (lower.endsWith('.jpg') || lower.endsWith('.jpeg')) return 'image/jpeg'
+  if (lower.endsWith('.webp')) return 'image/webp'
+  return 'application/octet-stream'
+}
+
 async function downloadMediaAsBase64(
   publicUrl: string,
 ): Promise<{ base64: string; mimeType: string; fileName: string }> {
@@ -271,7 +303,7 @@ function asFiniteOrd(v: unknown): number | null {
 
 /** Gap curto entre etapas: o worker segura a mesma execução (alinha Edge). */
 const INLINE_FUNNEL_GAP_THRESHOLD_MS = 45_000
-const INLINE_FUNNEL_MAX_WALL_MS = 115_000
+const INLINE_FUNNEL_MAX_WALL_MS = 165_000
 const INLINE_FUNNEL_RESUME_BUFFER_MS = 2_500
 const MAX_FUNNEL_INLINE_DEPTH = 32
 
@@ -574,6 +606,57 @@ async function resolveRecipientPhones(
   return { targets, error: null }
 }
 
+/** Mesmo bloco da Edge: sem pendentes → completion + liberar IA. */
+async function maybeFinalizeZapVoiceCampaignLead(
+  supabase: SupabaseClient,
+  row: ScheduledRow,
+): Promise<void> {
+  if (!row.lead_id || !row.zv_campaign_id) return
+
+  const { data: prog } = await supabase
+    .from('lead_campaign_progress')
+    .select('id, status')
+    .eq('user_id', row.user_id)
+    .eq('lead_id', row.lead_id)
+    .eq('campaign_id', row.zv_campaign_id)
+    .in('status', ['active', 'awaiting_last_send'])
+    .maybeSingle()
+
+  const { count } = await supabase
+    .from('scheduled_messages')
+    .select('id', { count: 'exact', head: true })
+    .eq('user_id', row.user_id)
+    .eq('lead_id', row.lead_id)
+    .eq('zv_campaign_id', row.zv_campaign_id)
+    .in('status', ['pending', 'processing'])
+    .eq('is_active', true)
+
+  if ((count ?? 0) === 0) {
+    const isAwaiting =
+      prog && typeof (prog as { status?: unknown }).status === 'string'
+        ? String((prog as { status: unknown }).status) === 'awaiting_last_send'
+        : false
+    if (!prog || isAwaiting) {
+      const { error: compErr } = await supabase.from('lead_campaign_completions').insert({
+        user_id: row.user_id,
+        lead_id: row.lead_id,
+        campaign_id: row.zv_campaign_id,
+      })
+      if (compErr && (compErr as { code?: string }).code !== '23505') {
+        console.warn('[worker] completion insert:', compErr.message)
+      }
+      if (prog && (prog as { id?: string }).id) {
+        await supabase.from('lead_campaign_progress').delete().eq('id', (prog as { id: string }).id)
+      }
+      await supabase
+        .from('leads')
+        .update({ funnel_locked_until: null })
+        .eq('id', row.lead_id)
+        .eq('user_id', row.user_id)
+    }
+  }
+}
+
 async function sendOne(
   deps: WorkerDeps,
   row: ScheduledRow,
@@ -591,6 +674,59 @@ async function sendOne(
   const mediaUrl = row.media_url?.trim()
 
   if (mediaUrl) {
+    const ct = row.content_type
+    const trimmedMu = mediaUrl.trim()
+    const heavyByUrl =
+      (ct === 'video' || ct === 'document' || ct === 'image') &&
+      isPublicHttpUrlStr(trimmedMu)
+
+    // Vídeo/documento/imagem em URL pública: Evolution baixa direto (evita RAM no worker).
+    if (heavyByUrl && ct !== 'audio') {
+      const fn = safeFileNameFromPublicUrl(trimmedMu)
+      const mime = mimeGuessFromFilename(fn)
+      if (ct === 'image') {
+        return sendMediaMessageWithConfig(
+          uid,
+          recipient,
+          {
+            media: trimmedMu,
+            mediaType: 'image',
+            mimeType: mime,
+            fileName: fn,
+            caption,
+          },
+          evolution,
+        )
+      }
+      if (ct === 'video') {
+        return sendMediaMessageWithConfig(
+          uid,
+          recipient,
+          {
+            media: trimmedMu,
+            mediaType: 'video',
+            mimeType: mime,
+            fileName: fn,
+            caption,
+          },
+          evolution,
+        )
+      }
+      return sendMediaMessageWithConfig(
+        uid,
+        recipient,
+        {
+          media: trimmedMu,
+          mediaType: 'document',
+          mimeType: mime,
+          fileName: fn,
+          caption,
+          ptt: false,
+        },
+        evolution,
+      )
+    }
+
     let b64: string
     let mimeType: string
     let fileName: string
@@ -600,11 +736,10 @@ async function sendOne(
       mimeType = d.mimeType
       fileName = d.fileName
     } catch (e) {
-      const msg = e instanceof Error ? e.message : String(e)
-      return { ok: false, error: msg, messageId: null }
+      const msgErr = e instanceof Error ? e.message : String(e)
+      return { ok: false, error: msgErr, messageId: null }
     }
 
-    const ct = row.content_type
     if (ct === 'audio') {
       return sendAudioMessageWithConfig(uid, recipient, b64, evolution)
     }
@@ -796,55 +931,7 @@ export async function checkAndSendScheduledMessages(
             queuedInline = await enqueueNextFunnelStepAfterSend(supabase, row)
           }
 
-          if (row.lead_id && row.zv_campaign_id) {
-            const { data: prog } = await supabase
-              .from('lead_campaign_progress')
-              .select('id, status')
-              .eq('user_id', row.user_id)
-              .eq('lead_id', row.lead_id)
-              .eq('campaign_id', row.zv_campaign_id)
-              .in('status', ['active', 'awaiting_last_send'])
-              .maybeSingle()
-
-            const { count } = await supabase
-              .from('scheduled_messages')
-              .select('id', { count: 'exact', head: true })
-              .eq('user_id', row.user_id)
-              .eq('lead_id', row.lead_id)
-              .eq('zv_campaign_id', row.zv_campaign_id)
-              .in('status', ['pending', 'processing'])
-              .eq('is_active', true)
-
-            if ((count ?? 0) === 0) {
-              const isAwaiting =
-                prog && typeof (prog as any).status === 'string'
-                  ? String((prog as any).status) === 'awaiting_last_send'
-                  : false
-              if (!prog || isAwaiting) {
-                const { error: compErr } = await supabase
-                  .from('lead_campaign_completions')
-                  .insert({
-                    user_id: row.user_id,
-                    lead_id: row.lead_id,
-                    campaign_id: row.zv_campaign_id,
-                  })
-                if (compErr && (compErr as any).code !== '23505') {
-                  console.warn('[worker] completion insert:', compErr.message)
-                }
-                if (prog && (prog as any).id) {
-                  await supabase
-                    .from('lead_campaign_progress')
-                    .delete()
-                    .eq('id', (prog as any).id)
-                }
-                await supabase
-                  .from('leads')
-                  .update({ funnel_locked_until: null })
-                  .eq('id', row.lead_id)
-                  .eq('user_id', row.user_id)
-              }
-            }
-          }
+          await maybeFinalizeZapVoiceCampaignLead(supabase, row)
 
           processed += 1
 
@@ -916,16 +1003,73 @@ export async function checkAndSendScheduledMessages(
           const failText = fails
             .map((f) => f.error ?? 'Erro desconhecido')
             .join(' | ')
+          console.error('[worker] envios falharam (100%)', {
+            scheduled_id: row.id,
+            detalhe: failText.slice(0, 800),
+          })
           await supabase
             .from('scheduled_messages')
             .update({
-              status: 'error',
+              status: 'failed',
               evolution_message_id: null,
               last_error: failText.slice(0, 4000),
               updated_at: new Date().toISOString(),
             })
             .eq('id', row.id)
+
+          if (row.lead_id && row.zv_campaign_id) {
+            queuedInline = await enqueueNextFunnelStepAfterSend(supabase, row)
+          }
+
+          await maybeFinalizeZapVoiceCampaignLead(supabase, row)
+
           processed += 1
+
+          if (queuedInline !== null) {
+            const qi = queuedInline
+            const gapMs = qi.gapMs
+            const wallOk =
+              remainingWallMs(invocationStartedAtMs) >=
+              gapMs + INLINE_FUNNEL_RESUME_BUFFER_MS
+            if (
+              gapMs < INLINE_FUNNEL_GAP_THRESHOLD_MS &&
+              wallOk &&
+              chainDepth < MAX_FUNNEL_INLINE_DEPTH
+            ) {
+              chainDepth += 1
+              console.log('[ZV-FUNNEL][worker] stay-awake após falha tratada', {
+                next_id: qi.scheduledMessageId,
+                gapMs,
+                chainDepth,
+                wallMs: remainingWallMs(invocationStartedAtMs),
+              })
+              await sleep(gapMs)
+              const { error: uErr } = await supabase
+                .from('scheduled_messages')
+                .update({
+                  scheduled_at: new Date().toISOString(),
+                  status: 'processing',
+                  updated_at: new Date().toISOString(),
+                })
+                .eq('id', qi.scheduledMessageId)
+              if (uErr) {
+                console.warn('[worker] stay-awake update:', uErr.message)
+                break inner
+              }
+              const { data: nxtRow, error: nxErr } = await supabase
+                .from('scheduled_messages')
+                .select('*')
+                .eq('id', qi.scheduledMessageId)
+                .single()
+              if (nxErr || !nxtRow) {
+                console.warn('[worker] stay-awake fetch:', nxErr?.message)
+                break inner
+              }
+              row = nxtRow as ScheduledRow
+              continue inner
+            }
+          }
+
           break inner
         }
       }
