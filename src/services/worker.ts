@@ -64,6 +64,9 @@ type ScheduledRow = {
   min_delay_seconds?: number | null
   max_delay_seconds?: number | null
   zv_campaign_id?: string | null
+  zv_funnel_step_id?: string | null
+  evolution_instance_name?: string | null
+  is_active?: boolean
 }
 
 type UserSettingsRow = {
@@ -257,6 +260,134 @@ function resolveDispatchDelayMs(row: ScheduledRow): number {
   const safeMin = Number.isFinite(minS) ? Math.max(0, minS) : 0
   const safeMax = Number.isFinite(maxS) ? Math.max(0, maxS) : safeMin
   return pickRandomIntInclusive(safeMin, safeMax) * 1000
+}
+
+/**
+ * Zap Voice: assim que uma etapa do funil é ENVIADA, agenda a próxima pela ordem
+ * em `zv_funnels` (mesma lógica da Edge `process-scheduled-messages`).
+ */
+async function enqueueNextFunnelStepAfterSend(
+  supabase: SupabaseClient,
+  row: ScheduledRow,
+): Promise<void> {
+  const sid = (row.zv_funnel_step_id ?? '').trim()
+  if (!row.lead_id || !row.zv_campaign_id || !sid) return
+
+  const { data: zvCampRow } = await supabase
+    .from('zv_campaigns')
+    .select('flow_id')
+    .eq('user_id', row.user_id)
+    .eq('id', row.zv_campaign_id)
+    .maybeSingle()
+  const zvFlowId = (zvCampRow as { flow_id: string | null } | null)?.flow_id ?? null
+  if (!zvFlowId) return
+
+  const { data: prog2 } = await supabase
+    .from('lead_campaign_progress')
+    .select('id')
+    .eq('user_id', row.user_id)
+    .eq('lead_id', row.lead_id)
+    .eq('campaign_id', row.zv_campaign_id)
+    .in('status', ['active', 'awaiting_last_send'])
+    .maybeSingle()
+  if (!prog2) return
+
+  const { data: currentStepRow, error: curErr } = await supabase
+    .from('zv_funnels')
+    .select(
+      'id, step_order, message, media_type, media_url, min_delay_seconds, max_delay_seconds',
+    )
+    .eq('id', sid)
+    .maybeSingle()
+  if (curErr) {
+    console.warn('[worker] Ler etapa enviada (funil):', curErr.message)
+    return
+  }
+  const curOrd = Number((currentStepRow as { step_order?: number } | null)?.step_order ?? NaN)
+  if (!currentStepRow || !Number.isFinite(curOrd)) return
+
+  const { data: nextStep } = await supabase
+    .from('zv_funnels')
+    .select(
+      'id, step_order, message, media_type, media_url, min_delay_seconds, max_delay_seconds',
+    )
+    .eq('flow_id', zvFlowId)
+    .gt('step_order', curOrd)
+    .order('step_order', { ascending: true })
+    .maybeSingle()
+  if (!nextStep) return
+
+  const minS =
+    typeof (nextStep as { min_delay_seconds?: number | null }).min_delay_seconds === 'number'
+      ? Math.max(0, Number((nextStep as { min_delay_seconds: number }).min_delay_seconds))
+      : typeof row.min_delay_seconds === 'number'
+        ? Math.max(0, row.min_delay_seconds)
+        : 2
+  const maxS =
+    typeof (nextStep as { max_delay_seconds?: number | null }).max_delay_seconds === 'number'
+      ? Math.max(
+          minS,
+          Number((nextStep as { max_delay_seconds: number }).max_delay_seconds),
+        )
+      : typeof row.max_delay_seconds === 'number'
+        ? Math.max(minS, row.max_delay_seconds)
+        : 15
+  const delayS = pickRandomIntInclusive(minS, maxS)
+  const scheduledAt = new Date(Date.now() + delayS * 1000).toISOString()
+
+  const rendered = await renderMessageTemplate({
+    supabase,
+    userId: row.user_id,
+    leadId: row.lead_id,
+    text: String((nextStep as { message?: string | null }).message ?? ''),
+  })
+
+  const ct = String((nextStep as { media_type?: string }).media_type ?? 'text')
+  const mediaUrl2 =
+    ct === 'text'
+      ? null
+      : (String((nextStep as { media_url?: string | null }).media_url ?? '').trim() || null)
+
+  const ins2 = await supabase.from('scheduled_messages').insert({
+    user_id: row.user_id,
+    lead_id: row.lead_id,
+    zv_campaign_id: row.zv_campaign_id,
+    zv_funnel_step_id: String((nextStep as { id: string }).id),
+    is_active: true,
+    recipient_type: 'personal',
+    content_type: ct,
+    message_body: rendered || null,
+    media_url: mediaUrl2,
+    scheduled_at: scheduledAt,
+    status: 'pending',
+    recipient_phone: row.recipient_phone,
+    event_id: null,
+    evolution_instance_name: row.evolution_instance_name ?? null,
+    min_delay_seconds: minS,
+    max_delay_seconds: maxS,
+  })
+
+  if (ins2.error) {
+    console.warn('[worker] Falha ao enfileirar próxima etapa do funil:', ins2.error.message)
+    return
+  }
+
+  const nsOrd = Number((nextStep as { step_order?: number }).step_order ?? 0)
+  const { data: stepBeyondQueued } = await supabase
+    .from('zv_funnels')
+    .select('id')
+    .eq('flow_id', zvFlowId)
+    .gt('step_order', nsOrd)
+    .limit(1)
+    .maybeSingle()
+  const isLastEnqueued = stepBeyondQueued == null
+  await supabase
+    .from('lead_campaign_progress')
+    .update({
+      next_step_order: nsOrd + 1,
+      status: isLastEnqueued ? 'awaiting_last_send' : 'active',
+    })
+    .eq('id', String((prog2 as { id: string }).id))
 }
 
 function pickPersonalRawFromUser(user: {
@@ -583,6 +714,11 @@ export async function checkAndSendScheduledMessages(
               })
               .eq('id', row.id)
           }
+        }
+
+        // Próximas etapas do funil Zap Voice (igual à Edge `process-scheduled-messages`).
+        if (row.lead_id && row.zv_campaign_id) {
+          await enqueueNextFunnelStepAfterSend(supabase, row)
         }
 
         // Finalização de campanha + unlock da IA (mesma regra da Edge Function).
