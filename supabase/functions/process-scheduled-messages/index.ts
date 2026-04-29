@@ -337,6 +337,19 @@ async function sendEvolutionPresence(
   }
 }
 
+/** Gap entre etapas do fluxo menor que isto ⇒ processa inline (sem esperar próximo cron). */
+const INLINE_FUNNEL_GAP_THRESHOLD_MS = 45_000
+/** Teto de duração da invocação Edge para continuar drain (ms). */
+const INLINE_FUNNEL_MAX_WALL_MS = 115_000
+const MAX_FUNNEL_INLINE_DEPTH = 32
+
+/** Margem sobre o gap para concluir o próximo disparo na mesma invocação. */
+const INLINE_FUNNEL_RESUME_BUFFER_MS = 2_500
+
+function remainingWallMs(invocationStartedAtMs: number): number {
+  return INLINE_FUNNEL_MAX_WALL_MS - (Date.now() - invocationStartedAtMs)
+}
+
 serve(async () => {
   console.log('[Agenda Suprema] Robô acordou! Buscando pendentes...')
 
@@ -377,6 +390,7 @@ serve(async () => {
       detectSessionInUrl: false,
     },
   })
+  const invocationStartedAtMs = Date.now()
 
   const nowIso = new Date().toISOString()
   console.log(
@@ -412,12 +426,16 @@ serve(async () => {
   let failed = 0
 
   for (const rawMsg of candidates) {
-    const msg = rawMsg as ScheduledRow
-
-    console.log('[Agenda Suprema] Disparando mensagem ID:', msg.id)
+    let msg = rawMsg as ScheduledRow
 
     try {
-      // Anti-ban (configurável): delay aleatório antes de cada disparo.
+      let chainDepth = 0
+      inner: while (true) {
+        let queuedInline: { id: string; gapMs: number } | null = null
+
+        console.log('[Agenda Suprema] Disparando mensagem ID:', msg.id)
+
+        // Anti-ban (configurável): delay aleatório antes de cada disparo.
       // Etapas do Zap Voice (zv_funnel_step_id): não empilhar atrasos longos + presença
       let dispatchDelayMs = resolveDispatchDelayMs(msg)
       if (msg.zv_funnel_step_id) {
@@ -845,25 +863,29 @@ serve(async () => {
 
             const nextOrdRaw = asFiniteOrd((nextStep as { step_order?: unknown }).step_order)
 
-            const ins2 = await supabase.from('scheduled_messages').insert({
-              user_id: msg.user_id,
-              lead_id: msg.lead_id,
-              zv_campaign_id: msg.zv_campaign_id,
-              zv_funnel_step_id: String((nextStep as { id: string }).id),
-              zv_funnel_step_order: nextOrdRaw,
-              is_active: true,
-              recipient_type: 'personal',
-              content_type: ct,
-              message_body: rendered || null,
-              media_url: mediaUrl2,
-              scheduled_at: scheduledAt,
-              status: 'pending',
-              recipient_phone: msg.recipient_phone,
-              event_id: null,
-              evolution_instance_name: msg.evolution_instance_name,
-              min_delay_seconds: minS,
-              max_delay_seconds: maxS,
-            })
+            const ins2 = await supabase
+              .from('scheduled_messages')
+              .insert({
+                user_id: msg.user_id,
+                lead_id: msg.lead_id,
+                zv_campaign_id: msg.zv_campaign_id,
+                zv_funnel_step_id: String((nextStep as { id: string }).id),
+                zv_funnel_step_order: nextOrdRaw,
+                is_active: true,
+                recipient_type: 'personal',
+                content_type: ct,
+                message_body: rendered || null,
+                media_url: mediaUrl2,
+                scheduled_at: scheduledAt,
+                status: 'pending',
+                recipient_phone: msg.recipient_phone,
+                event_id: null,
+                evolution_instance_name: msg.evolution_instance_name,
+                min_delay_seconds: minS,
+                max_delay_seconds: maxS,
+              })
+              .select('id')
+              .single()
 
             if (ins2.error) {
               console.error(
@@ -877,6 +899,7 @@ serve(async () => {
                 new_sched_preview: scheduledAt,
                 next_step_order: nextOrdRaw,
                 next_media: ct,
+                new_id: ins2.data?.id,
               })
               const nsOrd = Number((nextStep as { step_order?: number }).step_order ?? 0)
               const { data: stepBeyondQueued } = await supabase
@@ -895,6 +918,9 @@ serve(async () => {
                     isLastEnqueued ? ('awaiting_last_send' as const) : ('active' as const),
                 })
                 .eq('id', String((prog2 as { id: string }).id))
+              if (ins2.data?.id) {
+                queuedInline = { id: ins2.data.id, gapMs: delayS * 1000 }
+              }
             }
           }
         }
@@ -970,6 +996,58 @@ serve(async () => {
       }
 
       sent += 1
+
+      if (queuedInline !== null) {
+        const qi = queuedInline
+        const gapMs = qi.gapMs
+        const wallOk =
+          remainingWallMs(invocationStartedAtMs) >= gapMs + INLINE_FUNNEL_RESUME_BUFFER_MS
+        if (
+          gapMs < INLINE_FUNNEL_GAP_THRESHOLD_MS &&
+          wallOk &&
+          chainDepth < MAX_FUNNEL_INLINE_DEPTH
+        ) {
+          chainDepth += 1
+          console.log('[ZV-FUNNEL] stay-awake (mesma invocação)', {
+            next_id: qi.id,
+            gapMs,
+            chainDepth,
+            wallMs: remainingWallMs(invocationStartedAtMs),
+          })
+          await sleep(gapMs)
+          const { error: uErr } = await supabase
+            .from('scheduled_messages')
+            .update({
+              scheduled_at: new Date().toISOString(),
+              status: 'processing',
+              updated_at: new Date().toISOString(),
+            })
+            .eq('id', qi.id)
+          if (uErr) {
+            console.warn('[ZV-FUNNEL] stay-awake não pôde preparar linha:', uErr.message)
+            break inner
+          }
+          const { data: nxtRow, error: nxtErr } = await supabase
+            .from('scheduled_messages')
+            .select('*')
+            .eq('id', qi.id)
+            .single()
+          if (nxtErr || !nxtRow) {
+            console.warn('[ZV-FUNNEL] stay-awake fetch linha:', nxtErr?.message)
+            break inner
+          }
+          msg = nxtRow as ScheduledRow
+          continue inner
+        }
+        console.log('[ZV-FUNNEL] stay-awake omitido (gap longo, budget ou profundidade)', {
+          gapMs,
+          wallOk,
+          chainDepth,
+        })
+      }
+
+      break inner
+      }
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err)
       console.error('[process-scheduled-messages] ERRO FATAL NO DISPARO:', err)

@@ -269,16 +269,32 @@ function asFiniteOrd(v: unknown): number | null {
   return Number.isFinite(n) ? n : null
 }
 
+/** Gap curto entre etapas: o worker segura a mesma execução (alinha Edge). */
+const INLINE_FUNNEL_GAP_THRESHOLD_MS = 45_000
+const INLINE_FUNNEL_MAX_WALL_MS = 115_000
+const INLINE_FUNNEL_RESUME_BUFFER_MS = 2_500
+const MAX_FUNNEL_INLINE_DEPTH = 32
+
+function remainingWallMs(invocationStartedAtMs: number): number {
+  return INLINE_FUNNEL_MAX_WALL_MS - (Date.now() - invocationStartedAtMs)
+}
+
+type ZapVoiceQueuedNextInline = {
+  scheduledMessageId: string
+  gapMs: number
+}
+
 /**
  * Zap Voice: assim que uma etapa do funil é ENVIADA, agenda a próxima pela ordem
  * em `zv_funnels` (alinhado à Edge `process-scheduled-messages`).
+ * Retorna o id na fila e o gap (ms) para stay-awake na mesma invocação.
  */
 async function enqueueNextFunnelStepAfterSend(
   supabase: SupabaseClient,
   row: ScheduledRow,
-): Promise<void> {
+): Promise<ZapVoiceQueuedNextInline | null> {
   const sid = (row.zv_funnel_step_id ?? '').trim()
-  if (!row.lead_id || !row.zv_campaign_id || !sid) return
+  if (!row.lead_id || !row.zv_campaign_id || !sid) return null
 
   console.log('[ZV-FUNNEL][worker] encadeamento pós-envio', {
     sched_id: row.id,
@@ -299,7 +315,7 @@ async function enqueueNextFunnelStepAfterSend(
   const zvFlowId = (zvCampRow as { flow_id: string | null } | null)?.flow_id ?? null
   if (!zvFlowId) {
     console.error('[ZV-FUNNEL][worker] ABORT sem flow_id na campanha')
-    return
+    return null
   }
 
   const { data: prog2, error: progE } = await supabase
@@ -313,7 +329,7 @@ async function enqueueNextFunnelStepAfterSend(
   if (progE) console.warn('[ZV-FUNNEL][worker] progress:', progE.message)
   if (!prog2?.id) {
     console.error('[ZV-FUNNEL][worker] ABORT sem lead_campaign_progress')
-    return
+    return null
   }
 
   let curOrd = asFiniteOrd(row.zv_funnel_step_order ?? null)
@@ -332,7 +348,7 @@ async function enqueueNextFunnelStepAfterSend(
     console.error(
       '[ZV-FUNNEL][worker] ABORT não resolveu step_order; rode a migration zv_funnel_step_order ou redeploy do webhook.',
     )
-    return
+    return null
   }
 
   const { data: nextStep, error: nxErr } = await supabase
@@ -349,7 +365,7 @@ async function enqueueNextFunnelStepAfterSend(
 
   if (!nextStep) {
     console.log('[ZV-FUNNEL][worker] sem etapa após ord', curOrd)
-    return
+    return null
   }
 
   console.log('[ZV-FUNNEL][worker] enfileirando etapa', (nextStep as { step_order?: number }).step_order)
@@ -387,25 +403,29 @@ async function enqueueNextFunnelStepAfterSend(
 
   const nextOrd = asFiniteOrd((nextStep as { step_order?: unknown }).step_order)
 
-  const ins2 = await supabase.from('scheduled_messages').insert({
-    user_id: row.user_id,
-    lead_id: row.lead_id,
-    zv_campaign_id: row.zv_campaign_id,
-    zv_funnel_step_id: String((nextStep as { id: string }).id),
-    zv_funnel_step_order: nextOrd,
-    is_active: true,
-    recipient_type: 'personal',
-    content_type: ct,
-    message_body: rendered || null,
-    media_url: mediaUrl2,
-    scheduled_at: scheduledAt,
-    status: 'pending',
-    recipient_phone: row.recipient_phone,
-    event_id: null,
-    evolution_instance_name: row.evolution_instance_name ?? null,
-    min_delay_seconds: minS,
-    max_delay_seconds: maxS,
-  })
+  const ins2 = await supabase
+    .from('scheduled_messages')
+    .insert({
+      user_id: row.user_id,
+      lead_id: row.lead_id,
+      zv_campaign_id: row.zv_campaign_id,
+      zv_funnel_step_id: String((nextStep as { id: string }).id),
+      zv_funnel_step_order: nextOrd,
+      is_active: true,
+      recipient_type: 'personal',
+      content_type: ct,
+      message_body: rendered || null,
+      media_url: mediaUrl2,
+      scheduled_at: scheduledAt,
+      status: 'pending',
+      recipient_phone: row.recipient_phone,
+      event_id: null,
+      evolution_instance_name: row.evolution_instance_name ?? null,
+      min_delay_seconds: minS,
+      max_delay_seconds: maxS,
+    })
+    .select('id')
+    .single()
 
   if (ins2.error) {
     console.error(
@@ -413,7 +433,7 @@ async function enqueueNextFunnelStepAfterSend(
       ins2.error.code,
       ins2.error.message,
     )
-    return
+    return null
   }
 
   const nsOrd = Number((nextStep as { step_order?: number }).step_order ?? 0)
@@ -433,7 +453,9 @@ async function enqueueNextFunnelStepAfterSend(
     })
     .eq('id', String((prog2 as { id: string }).id))
 
-  console.log('[ZV-FUNNEL][worker] próxima etapa agendada', scheduledAt)
+  const newId = (ins2.data as { id: string }).id
+  console.log('[ZV-FUNNEL][worker] próxima etapa agendada', scheduledAt, 'id=', newId)
+  return { scheduledMessageId: newId, gapMs: delayS * 1000 }
 }
 
 function pickPersonalRawFromUser(user: {
@@ -681,171 +703,231 @@ export async function checkAndSendScheduledMessages(
   let skipped = 0
 
   for (const raw of candidates ?? []) {
-    const row = raw as ScheduledRow
+    let row = raw as ScheduledRow
 
     try {
-      const delayMs = resolveDispatchDelayMs(row)
-      console.log(`[worker] Delay antes do envio: ${delayMs}ms | msg=${row.id}`)
-      await sleep(delayMs)
+      const invocationStartedAtMs = Date.now()
+      let chainDepth = 0
+      inner: while (true) {
+        let queuedInline: ZapVoiceQueuedNextInline | null = null
 
-      const { targets, error: resolveErr } = await resolveRecipientPhones(
-        supabase,
-        row,
-      )
-      if (resolveErr || targets.length === 0) {
-        await supabase
-          .from('scheduled_messages')
-          .update({
-            status: 'error',
-            last_error: resolveErr ?? 'Sem destinatários.',
-            updated_at: new Date().toISOString(),
-          })
-          .eq('id', row.id)
-        processed += 1
-        continue
-      }
-
-      const sendResults: {
-        ok: boolean
-        error: string | null
-        messageId: string | null
-      }[] = []
-
-      for (const recipient of targets) {
-        try {
-          const r = await sendOne(deps, row, recipient)
-          sendResults.push(r)
-        } catch (e) {
-          const msg = e instanceof Error ? e.message : String(e)
-          sendResults.push({ ok: false, error: msg, messageId: null })
+        let delayMs = resolveDispatchDelayMs(row)
+        if (row.zv_funnel_step_id) {
+          delayMs = Math.min(delayMs, 2500)
         }
-      }
+        console.log(`[worker] Delay antes do envio: ${delayMs}ms | msg=${row.id}`)
+        await sleep(delayMs)
 
-      const oks = sendResults.filter((r) => r.ok)
-      const fails = sendResults.filter((r) => !r.ok)
+        const { targets, error: resolveErr } = await resolveRecipientPhones(
+          supabase,
+          row,
+        )
+        if (resolveErr || targets.length === 0) {
+          await supabase
+            .from('scheduled_messages')
+            .update({
+              status: 'error',
+              last_error: resolveErr ?? 'Sem destinatários.',
+              updated_at: new Date().toISOString(),
+            })
+            .eq('id', row.id)
+          processed += 1
+          break inner
+        }
 
-      if (oks.length === sendResults.length) {
-        const ids = oks
-          .map((r) => r.messageId)
-          .filter((x): x is string => Boolean(x))
-        await supabase
-          .from('scheduled_messages')
-          .update({
-            status: 'sent',
-            evolution_message_id: ids.length ? ids.join(',') : null,
-            last_error: null,
-            updated_at: new Date().toISOString(),
-          })
-          .eq('id', row.id)
+        const sendResults: {
+          ok: boolean
+          error: string | null
+          messageId: string | null
+        }[] = []
 
-        if (row.lead_id) {
-          const evoId = oks[0]?.messageId ?? (ids[0] ?? null)
-          const { error: chatErr } = await supabase.from('chat_messages').insert({
-            lead_id: row.lead_id,
-            sender_type: 'agencia',
-            content_type: toChatContentType(row),
-            message_body: messageBodyParaChat(row),
-            media_url: row.media_url,
-            evolution_message_id: evoId,
-          })
-          if (chatErr) {
-            await supabase
-              .from('scheduled_messages')
-              .update({
-                last_error: `Enviado ao WhatsApp, mas o CRM não registrou a mensagem: ${chatErr.message}`.slice(
-                  0,
-                  4000,
-                ),
-                updated_at: new Date().toISOString(),
-              })
-              .eq('id', row.id)
+        for (const recipient of targets) {
+          try {
+            const r = await sendOne(deps, row, recipient)
+            sendResults.push(r)
+          } catch (e) {
+            const msg = e instanceof Error ? e.message : String(e)
+            sendResults.push({ ok: false, error: msg, messageId: null })
           }
         }
 
-        // Próximas etapas do funil Zap Voice (igual à Edge `process-scheduled-messages`).
-        if (row.lead_id && row.zv_campaign_id) {
-          await enqueueNextFunnelStepAfterSend(supabase, row)
-        }
+        const oks = sendResults.filter((r) => r.ok)
+        const fails = sendResults.filter((r) => !r.ok)
 
-        // Finalização de campanha + unlock da IA (mesma regra da Edge Function).
-        if (row.lead_id && row.zv_campaign_id) {
-          const { data: prog } = await supabase
-            .from('lead_campaign_progress')
-            .select('id, status')
-            .eq('user_id', row.user_id)
-            .eq('lead_id', row.lead_id)
-            .eq('campaign_id', row.zv_campaign_id)
-            .in('status', ['active', 'awaiting_last_send'])
-            .maybeSingle()
-
-          const { count } = await supabase
+        if (oks.length === sendResults.length) {
+          const ids = oks
+            .map((r) => r.messageId)
+            .filter((x): x is string => Boolean(x))
+          await supabase
             .from('scheduled_messages')
-            .select('id', { count: 'exact', head: true })
-            .eq('user_id', row.user_id)
-            .eq('lead_id', row.lead_id)
-            .eq('zv_campaign_id', row.zv_campaign_id)
-            .in('status', ['pending', 'processing'])
-            .eq('is_active', true)
+            .update({
+              status: 'sent',
+              evolution_message_id: ids.length ? ids.join(',') : null,
+              last_error: null,
+              updated_at: new Date().toISOString(),
+            })
+            .eq('id', row.id)
 
-          if ((count ?? 0) === 0) {
-            const isAwaiting =
-              prog && typeof (prog as any).status === 'string'
-                ? String((prog as any).status) === 'awaiting_last_send'
-                : false
-            if (!prog || isAwaiting) {
-              const { error: compErr } = await supabase
-                .from('lead_campaign_completions')
-                .insert({
-                  user_id: row.user_id,
-                  lead_id: row.lead_id,
-                  campaign_id: row.zv_campaign_id,
-                })
-              if (compErr && (compErr as any).code !== '23505') {
-                console.warn('[worker] completion insert:', compErr.message)
-              }
-              if (prog && (prog as any).id) {
-                await supabase
-                  .from('lead_campaign_progress')
-                  .delete()
-                  .eq('id', (prog as any).id)
-              }
+          if (row.lead_id) {
+            const evoId = oks[0]?.messageId ?? (ids[0] ?? null)
+            const { error: chatErr } = await supabase.from('chat_messages').insert({
+              lead_id: row.lead_id,
+              sender_type: 'agencia',
+              content_type: toChatContentType(row),
+              message_body: messageBodyParaChat(row),
+              media_url: row.media_url,
+              evolution_message_id: evoId,
+            })
+            if (chatErr) {
               await supabase
-                .from('leads')
-                .update({ funnel_locked_until: null })
-                .eq('id', row.lead_id)
-                .eq('user_id', row.user_id)
+                .from('scheduled_messages')
+                .update({
+                  last_error: `Enviado ao WhatsApp, mas o CRM não registrou a mensagem: ${chatErr.message}`.slice(
+                    0,
+                    4000,
+                  ),
+                  updated_at: new Date().toISOString(),
+                })
+                .eq('id', row.id)
             }
           }
+
+          if (row.lead_id && row.zv_campaign_id) {
+            queuedInline = await enqueueNextFunnelStepAfterSend(supabase, row)
+          }
+
+          if (row.lead_id && row.zv_campaign_id) {
+            const { data: prog } = await supabase
+              .from('lead_campaign_progress')
+              .select('id, status')
+              .eq('user_id', row.user_id)
+              .eq('lead_id', row.lead_id)
+              .eq('campaign_id', row.zv_campaign_id)
+              .in('status', ['active', 'awaiting_last_send'])
+              .maybeSingle()
+
+            const { count } = await supabase
+              .from('scheduled_messages')
+              .select('id', { count: 'exact', head: true })
+              .eq('user_id', row.user_id)
+              .eq('lead_id', row.lead_id)
+              .eq('zv_campaign_id', row.zv_campaign_id)
+              .in('status', ['pending', 'processing'])
+              .eq('is_active', true)
+
+            if ((count ?? 0) === 0) {
+              const isAwaiting =
+                prog && typeof (prog as any).status === 'string'
+                  ? String((prog as any).status) === 'awaiting_last_send'
+                  : false
+              if (!prog || isAwaiting) {
+                const { error: compErr } = await supabase
+                  .from('lead_campaign_completions')
+                  .insert({
+                    user_id: row.user_id,
+                    lead_id: row.lead_id,
+                    campaign_id: row.zv_campaign_id,
+                  })
+                if (compErr && (compErr as any).code !== '23505') {
+                  console.warn('[worker] completion insert:', compErr.message)
+                }
+                if (prog && (prog as any).id) {
+                  await supabase
+                    .from('lead_campaign_progress')
+                    .delete()
+                    .eq('id', (prog as any).id)
+                }
+                await supabase
+                  .from('leads')
+                  .update({ funnel_locked_until: null })
+                  .eq('id', row.lead_id)
+                  .eq('user_id', row.user_id)
+              }
+            }
+          }
+
+          processed += 1
+
+          if (queuedInline !== null) {
+            const qi = queuedInline
+            const gapMs = qi.gapMs
+            const wallOk =
+              remainingWallMs(invocationStartedAtMs) >=
+              gapMs + INLINE_FUNNEL_RESUME_BUFFER_MS
+            if (
+              gapMs < INLINE_FUNNEL_GAP_THRESHOLD_MS &&
+              wallOk &&
+              chainDepth < MAX_FUNNEL_INLINE_DEPTH
+            ) {
+              chainDepth += 1
+              console.log('[ZV-FUNNEL][worker] stay-awake mesma execução', {
+                next_id: qi.scheduledMessageId,
+                gapMs,
+                chainDepth,
+                wallMs: remainingWallMs(invocationStartedAtMs),
+              })
+              await sleep(gapMs)
+              const { error: uErr } = await supabase
+                .from('scheduled_messages')
+                .update({
+                  scheduled_at: new Date().toISOString(),
+                  status: 'processing',
+                  updated_at: new Date().toISOString(),
+                })
+                .eq('id', qi.scheduledMessageId)
+              if (uErr) {
+                console.warn('[worker] stay-awake update:', uErr.message)
+                break inner
+              }
+              const { data: nxtRow, error: nxErr } = await supabase
+                .from('scheduled_messages')
+                .select('*')
+                .eq('id', qi.scheduledMessageId)
+                .single()
+              if (nxErr || !nxtRow) {
+                console.warn('[worker] stay-awake fetch:', nxErr?.message)
+                break inner
+              }
+              row = nxtRow as ScheduledRow
+              continue inner
+            }
+          }
+
+          break inner
+        } else if (oks.length > 0) {
+          const failText = fails
+            .map((f) => f.error ?? 'Erro desconhecido')
+            .join(' | ')
+          await supabase
+            .from('scheduled_messages')
+            .update({
+              status: 'error',
+              evolution_message_id: oks
+                .map((r) => r.messageId)
+                .filter(Boolean)
+                .join(','),
+              last_error: `Envio parcial: ${oks.length} ok, ${fails.length} falha(s). ${failText}`,
+              updated_at: new Date().toISOString(),
+            })
+            .eq('id', row.id)
+          processed += 1
+          break inner
+        } else {
+          const failText = fails
+            .map((f) => f.error ?? 'Erro desconhecido')
+            .join(' | ')
+          await supabase
+            .from('scheduled_messages')
+            .update({
+              status: 'error',
+              evolution_message_id: null,
+              last_error: failText.slice(0, 4000),
+              updated_at: new Date().toISOString(),
+            })
+            .eq('id', row.id)
+          processed += 1
+          break inner
         }
-      } else if (oks.length > 0) {
-        const failText = fails
-          .map((f) => f.error ?? 'Erro desconhecido')
-          .join(' | ')
-        await supabase
-          .from('scheduled_messages')
-          .update({
-            status: 'error',
-            evolution_message_id: oks
-              .map((r) => r.messageId)
-              .filter(Boolean)
-              .join(','),
-            last_error: `Envio parcial: ${oks.length} ok, ${fails.length} falha(s). ${failText}`,
-            updated_at: new Date().toISOString(),
-          })
-          .eq('id', row.id)
-      } else {
-        const failText = fails
-          .map((f) => f.error ?? 'Erro desconhecido')
-          .join(' | ')
-        await supabase
-          .from('scheduled_messages')
-          .update({
-            status: 'error',
-            evolution_message_id: null,
-            last_error: failText.slice(0, 4000),
-            updated_at: new Date().toISOString(),
-          })
-          .eq('id', row.id)
       }
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e)
@@ -857,9 +939,8 @@ export async function checkAndSendScheduledMessages(
           updated_at: new Date().toISOString(),
         })
         .eq('id', row.id)
+      processed += 1
     }
-
-    processed += 1
   }
 
   return { processed, skipped }
