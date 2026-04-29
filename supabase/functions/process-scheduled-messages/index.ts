@@ -30,9 +30,16 @@ type ScheduledRow = {
   max_delay_seconds?: number | null
   zv_campaign_id?: string | null
   zv_funnel_step_id?: string | null
+  /** Espelho de zv_funnels.step_order ao enfileirar (migration 20260430180000). */
+  zv_funnel_step_order?: number | null
 }
 
 type ChatContentType = 'text' | 'audio' | 'image' | 'document'
+
+function asFiniteOrd(v: unknown): number | null {
+  const n = typeof v === 'number' ? v : Number(v)
+  return Number.isFinite(n) ? n : null
+}
 
 function instanceNameFromUserId(userId: string): string {
   const safe = userId.replace(/[^a-zA-Z0-9-]/g, '_')
@@ -722,25 +729,34 @@ serve(async () => {
         }
       }
 
-      // --- Zap Voice: após enviar etapa de fluxo, enfileira a próxima (por step_order) ---
+      // --- Zap Voice: Etapa N enviada → enfileira Etapa N+1 na fila ---
       if (
         msg.lead_id &&
         msg.zv_campaign_id &&
         msg.zv_funnel_step_id
       ) {
-        // Fluxo Zap Voice (etapa com zv_funnel_step_id): após ENVIAR uma etapa,
-        // acha a próxima linha em `zv_funnels` (step_order maior) e enfileira.
-        // NÃO dependemos só de `lead_campaign_progress.next_step_order` — esse
-        // ponteiro pode ficar inconsistente entre webhook e agenda.
-        const { data: zvCampRow } = await supabase
+        const funnelStepUuid = String(msg.zv_funnel_step_id).trim()
+
+        console.log('[ZV-FUNNEL] início encadeamento pós-envio', {
+          sched_id: msg.id,
+          lead_id: msg.lead_id,
+          zv_campaign_id: msg.zv_campaign_id,
+          zv_funnel_step_id: funnelStepUuid,
+          zv_funnel_step_order_col: msg.zv_funnel_step_order ?? null,
+        })
+
+        const { data: zvCampRow, error: campE } = await supabase
           .from('zv_campaigns')
           .select('flow_id')
           .eq('user_id', msg.user_id)
           .eq('id', msg.zv_campaign_id)
           .maybeSingle()
+        if (campE) {
+          console.warn('[ZV-FUNNEL] ler campanha:', campE.message)
+        }
         const zvFlowId = (zvCampRow as { flow_id: string | null } | null)?.flow_id ?? null
 
-        const { data: prog2 } = await supabase
+        const { data: prog2, error: prog2Err } = await supabase
           .from('lead_campaign_progress')
           .select('id')
           .eq('user_id', msg.user_id)
@@ -748,27 +764,37 @@ serve(async () => {
           .eq('campaign_id', msg.zv_campaign_id)
           .in('status', ['active', 'awaiting_last_send'])
           .maybeSingle()
-
-        const { data: currentStepRow, error: curErr } = await supabase
-          .from('zv_funnels')
-          .select(
-            'id, step_order, message, media_type, media_url, min_delay_seconds, max_delay_seconds',
-          )
-          .eq('id', msg.zv_funnel_step_id)
-          .maybeSingle()
-
-        if (curErr) {
-          console.warn('[Agenda Suprema] Ler etapa enviada (funil):', curErr.message)
+        if (prog2Err) {
+          console.warn('[ZV-FUNNEL] ler lead_campaign_progress:', prog2Err.message)
         }
 
-        const curOrd = Number((currentStepRow as { step_order?: number } | null)?.step_order ?? NaN)
-        if (
-          prog2 &&
-          zvFlowId &&
-          currentStepRow &&
-          Number.isFinite(curOrd)
-        ) {
-          const { data: nextStep } = await supabase
+        // 1) Preferir número gravado na fila (coerente mesmo se UUID falhar ao bater na tabela)
+        let curOrd = asFiniteOrd(msg.zv_funnel_step_order ?? null)
+
+        // 2) Fallback: FK em zv_funnels
+        if (curOrd === null) {
+          const { data: csr, error: curErr } = await supabase
+            .from('zv_funnels')
+            .select('id, step_order')
+            .eq('id', funnelStepUuid)
+            .maybeSingle()
+          if (curErr) {
+            console.warn('[ZV-FUNNEL] ler etapa atual por UUID:', curErr.message)
+          }
+          curOrd = csr ? asFiniteOrd((csr as { step_order?: unknown }).step_order) : null
+          console.log('[ZV-FUNNEL] fallback UUID → step_order=', curOrd, 'row?', Boolean(csr))
+        }
+
+        if (!zvFlowId) {
+          console.error('[ZV-FUNNEL] ABORT sem flow_id na campanha', msg.zv_campaign_id)
+        } else if (!prog2?.id) {
+          console.error('[ZV-FUNNEL] ABORT sem lead_campaign_progress ativo para lead/campanha')
+        } else if (curOrd === null) {
+          console.error(
+            '[ZV-FUNNEL] ABORT não resolveu step_order (coluna nova ausente até migrar?). rode: supabase db push',
+          )
+        } else {
+          const { data: nextStep, error: nxErr } = await supabase
             .from('zv_funnels')
             .select(
               'id, step_order, message, media_type, media_url, min_delay_seconds, max_delay_seconds',
@@ -778,19 +804,26 @@ serve(async () => {
             .order('step_order', { ascending: true })
             .maybeSingle()
 
-          if (nextStep) {
+          if (nxErr) {
+            console.warn('[ZV-FUNNEL] query próxima etapa:', nxErr.message)
+          }
+          console.log('[ZV-FUNNEL] próxima etapa após ord', curOrd, '→', nextStep?.id ?? 'nenhuma')
+
+          if (!nextStep) {
+            console.log('[ZV-FUNNEL] fim do fluxo neste envio (sem etapa seguinte)')
+          } else {
             const minS =
-              typeof (nextStep as any).min_delay_seconds === 'number'
-                ? Math.max(0, Number((nextStep as any).min_delay_seconds))
-                : (typeof msg.min_delay_seconds === 'number'
+              typeof (nextStep as Record<string, unknown>).min_delay_seconds === 'number'
+                ? Math.max(0, Number((nextStep as { min_delay_seconds: number }).min_delay_seconds))
+                : typeof msg.min_delay_seconds === 'number'
                   ? Math.max(0, msg.min_delay_seconds)
-                  : 2)
+                  : 2
             const maxS =
-              typeof (nextStep as any).max_delay_seconds === 'number'
-                ? Math.max(minS, Number((nextStep as any).max_delay_seconds))
-                : (typeof msg.max_delay_seconds === 'number'
+              typeof (nextStep as Record<string, unknown>).max_delay_seconds === 'number'
+                ? Math.max(minS, Number((nextStep as { max_delay_seconds: number }).max_delay_seconds))
+                : typeof msg.max_delay_seconds === 'number'
                   ? Math.max(minS, msg.max_delay_seconds)
-                  : 15)
+                  : 15
             const delayS = pickRandomIntInclusive(minS, maxS)
             const scheduledAt = new Date(Date.now() + delayS * 1000).toISOString()
 
@@ -798,16 +831,24 @@ serve(async () => {
               supabase,
               userId: msg.user_id,
               leadId: msg.lead_id,
-              text: String((nextStep as any).message ?? ''),
+              text: String((nextStep as { message?: string | null }).message ?? ''),
             })
 
-            const ct = String((nextStep as any).media_type ?? 'text')
-            const mediaUrl2 = ct === 'text' ? null : (String((nextStep as any).media_url ?? '').trim() || null)
+            const ct = String((nextStep as { media_type?: string }).media_type ?? 'text')
+            const mediaUrl2 =
+              ct === 'text'
+                ? null
+                : String((nextStep as { media_url?: string | null }).media_url ?? '').trim() ||
+                  null
+
+            const nextOrdRaw = asFiniteOrd((nextStep as { step_order?: unknown }).step_order)
+
             const ins2 = await supabase.from('scheduled_messages').insert({
               user_id: msg.user_id,
               lead_id: msg.lead_id,
               zv_campaign_id: msg.zv_campaign_id,
-              zv_funnel_step_id: String((nextStep as any).id),
+              zv_funnel_step_id: String((nextStep as { id: string }).id),
+              zv_funnel_step_order: nextOrdRaw,
               is_active: true,
               recipient_type: 'personal',
               content_type: ct,
@@ -823,12 +864,19 @@ serve(async () => {
             })
 
             if (ins2.error) {
-              console.warn(
-                '[Agenda Suprema] Falha ao enfileirar próxima etapa do funil:',
+              console.error(
+                '[ZV-FUNNEL] FALHA insert próxima etapa (ver RLS/schema):',
+                ins2.error.code,
                 ins2.error.message,
+                JSON.stringify(ins2.error),
               )
             } else {
-              const nsOrd = Number((nextStep as any).step_order ?? 0)
+              console.log('[ZV-FUNNEL] próxima etapa AGENDADA', {
+                new_sched_preview: scheduledAt,
+                next_step_order: nextOrdRaw,
+                next_media: ct,
+              })
+              const nsOrd = Number((nextStep as { step_order?: number }).step_order ?? 0)
               const { data: stepBeyondQueued } = await supabase
                 .from('zv_funnels')
                 .select('id')
@@ -844,7 +892,7 @@ serve(async () => {
                   status:
                     isLastEnqueued ? ('awaiting_last_send' as const) : ('active' as const),
                 })
-                .eq('id', String((prog2 as any).id))
+                .eq('id', String((prog2 as { id: string }).id))
             }
           }
         }

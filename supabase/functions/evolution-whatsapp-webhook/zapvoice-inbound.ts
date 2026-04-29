@@ -547,11 +547,13 @@ async function enqueueFunnelStepAndAdvance(p: {
     }
   }
 
+  const ord = Number(p.step.step_order)
   const ins = await p.supabase.from('scheduled_messages').insert({
     user_id: p.userId,
     lead_id: p.leadId,
     zv_campaign_id: p.progress.campaign_id,
     zv_funnel_step_id: p.step.id,
+    zv_funnel_step_order: Number.isFinite(ord) ? ord : null,
     is_active: true,
     recipient_type: 'personal',
     content_type: ct,

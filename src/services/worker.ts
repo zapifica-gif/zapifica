@@ -65,6 +65,8 @@ type ScheduledRow = {
   max_delay_seconds?: number | null
   zv_campaign_id?: string | null
   zv_funnel_step_id?: string | null
+  /** Espelho de zv_funnels.step_order (migration 20260430180000). */
+  zv_funnel_step_order?: number | null
   evolution_instance_name?: string | null
   is_active?: boolean
 }
@@ -262,9 +264,14 @@ function resolveDispatchDelayMs(row: ScheduledRow): number {
   return pickRandomIntInclusive(safeMin, safeMax) * 1000
 }
 
+function asFiniteOrd(v: unknown): number | null {
+  const n = typeof v === 'number' ? v : Number(v)
+  return Number.isFinite(n) ? n : null
+}
+
 /**
  * Zap Voice: assim que uma etapa do funil é ENVIADA, agenda a próxima pela ordem
- * em `zv_funnels` (mesma lógica da Edge `process-scheduled-messages`).
+ * em `zv_funnels` (alinhado à Edge `process-scheduled-messages`).
  */
 async function enqueueNextFunnelStepAfterSend(
   supabase: SupabaseClient,
@@ -273,16 +280,29 @@ async function enqueueNextFunnelStepAfterSend(
   const sid = (row.zv_funnel_step_id ?? '').trim()
   if (!row.lead_id || !row.zv_campaign_id || !sid) return
 
-  const { data: zvCampRow } = await supabase
+  console.log('[ZV-FUNNEL][worker] encadeamento pós-envio', {
+    sched_id: row.id,
+    lead_id: row.lead_id,
+    zv_campaign_id: row.zv_campaign_id,
+    zv_funnel_step_id: sid,
+    zv_funnel_step_order_col: row.zv_funnel_step_order ?? null,
+  })
+
+  const { data: zvCampRow, error: campE } = await supabase
     .from('zv_campaigns')
     .select('flow_id')
     .eq('user_id', row.user_id)
     .eq('id', row.zv_campaign_id)
     .maybeSingle()
-  const zvFlowId = (zvCampRow as { flow_id: string | null } | null)?.flow_id ?? null
-  if (!zvFlowId) return
+  if (campE) console.warn('[ZV-FUNNEL][worker] campanha:', campE.message)
 
-  const { data: prog2 } = await supabase
+  const zvFlowId = (zvCampRow as { flow_id: string | null } | null)?.flow_id ?? null
+  if (!zvFlowId) {
+    console.error('[ZV-FUNNEL][worker] ABORT sem flow_id na campanha')
+    return
+  }
+
+  const { data: prog2, error: progE } = await supabase
     .from('lead_campaign_progress')
     .select('id')
     .eq('user_id', row.user_id)
@@ -290,23 +310,31 @@ async function enqueueNextFunnelStepAfterSend(
     .eq('campaign_id', row.zv_campaign_id)
     .in('status', ['active', 'awaiting_last_send'])
     .maybeSingle()
-  if (!prog2) return
-
-  const { data: currentStepRow, error: curErr } = await supabase
-    .from('zv_funnels')
-    .select(
-      'id, step_order, message, media_type, media_url, min_delay_seconds, max_delay_seconds',
-    )
-    .eq('id', sid)
-    .maybeSingle()
-  if (curErr) {
-    console.warn('[worker] Ler etapa enviada (funil):', curErr.message)
+  if (progE) console.warn('[ZV-FUNNEL][worker] progress:', progE.message)
+  if (!prog2?.id) {
+    console.error('[ZV-FUNNEL][worker] ABORT sem lead_campaign_progress')
     return
   }
-  const curOrd = Number((currentStepRow as { step_order?: number } | null)?.step_order ?? NaN)
-  if (!currentStepRow || !Number.isFinite(curOrd)) return
 
-  const { data: nextStep } = await supabase
+  let curOrd = asFiniteOrd(row.zv_funnel_step_order ?? null)
+  if (curOrd === null) {
+    const { data: csr, error: curErr } = await supabase
+      .from('zv_funnels')
+      .select('step_order')
+      .eq('id', sid)
+      .maybeSingle()
+    if (curErr) console.warn('[ZV-FUNNEL][worker] etapa atual UUID:', curErr.message)
+    curOrd = csr ? asFiniteOrd((csr as { step_order?: unknown }).step_order) : null
+  }
+
+  if (curOrd === null) {
+    console.error(
+      '[ZV-FUNNEL][worker] ABORT não resolveu step_order; rode a migration zv_funnel_step_order ou redeploy do webhook.',
+    )
+    return
+  }
+
+  const { data: nextStep, error: nxErr } = await supabase
     .from('zv_funnels')
     .select(
       'id, step_order, message, media_type, media_url, min_delay_seconds, max_delay_seconds',
@@ -315,7 +343,14 @@ async function enqueueNextFunnelStepAfterSend(
     .gt('step_order', curOrd)
     .order('step_order', { ascending: true })
     .maybeSingle()
-  if (!nextStep) return
+  if (nxErr) console.warn('[ZV-FUNNEL][worker] próxima etapa:', nxErr.message)
+
+  if (!nextStep) {
+    console.log('[ZV-FUNNEL][worker] sem etapa após ord', curOrd)
+    return
+  }
+
+  console.log('[ZV-FUNNEL][worker] enfileirando etapa', (nextStep as { step_order?: number }).step_order)
 
   const minS =
     typeof (nextStep as { min_delay_seconds?: number | null }).min_delay_seconds === 'number'
@@ -348,11 +383,14 @@ async function enqueueNextFunnelStepAfterSend(
       ? null
       : (String((nextStep as { media_url?: string | null }).media_url ?? '').trim() || null)
 
+  const nextOrd = asFiniteOrd((nextStep as { step_order?: unknown }).step_order)
+
   const ins2 = await supabase.from('scheduled_messages').insert({
     user_id: row.user_id,
     lead_id: row.lead_id,
     zv_campaign_id: row.zv_campaign_id,
     zv_funnel_step_id: String((nextStep as { id: string }).id),
+    zv_funnel_step_order: nextOrd,
     is_active: true,
     recipient_type: 'personal',
     content_type: ct,
@@ -368,7 +406,11 @@ async function enqueueNextFunnelStepAfterSend(
   })
 
   if (ins2.error) {
-    console.warn('[worker] Falha ao enfileirar próxima etapa do funil:', ins2.error.message)
+    console.error(
+      '[ZV-FUNNEL][worker] FALHA insert próxima etapa:',
+      ins2.error.code,
+      ins2.error.message,
+    )
     return
   }
 
@@ -388,6 +430,8 @@ async function enqueueNextFunnelStepAfterSend(
       status: isLastEnqueued ? 'awaiting_last_send' : 'active',
     })
     .eq('id', String((prog2 as { id: string }).id))
+
+  console.log('[ZV-FUNNEL][worker] próxima etapa agendada', scheduledAt)
 }
 
 function pickPersonalRawFromUser(user: {
