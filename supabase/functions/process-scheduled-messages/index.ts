@@ -777,6 +777,7 @@ serve(async () => {
             .from('zv_funnels')
             .select('id, step_order')
             .eq('id', funnelStepUuid)
+            .limit(1)
             .maybeSingle()
           if (curErr) {
             console.warn('[ZV-FUNNEL] ler etapa atual por UUID:', curErr.message)
@@ -802,6 +803,7 @@ serve(async () => {
             .eq('flow_id', zvFlowId)
             .gt('step_order', curOrd)
             .order('step_order', { ascending: true })
+            .limit(1)
             .maybeSingle()
 
           if (nxErr) {

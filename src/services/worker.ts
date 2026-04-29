@@ -322,6 +322,7 @@ async function enqueueNextFunnelStepAfterSend(
       .from('zv_funnels')
       .select('step_order')
       .eq('id', sid)
+      .limit(1)
       .maybeSingle()
     if (curErr) console.warn('[ZV-FUNNEL][worker] etapa atual UUID:', curErr.message)
     curOrd = csr ? asFiniteOrd((csr as { step_order?: unknown }).step_order) : null
@@ -342,6 +343,7 @@ async function enqueueNextFunnelStepAfterSend(
     .eq('flow_id', zvFlowId)
     .gt('step_order', curOrd)
     .order('step_order', { ascending: true })
+    .limit(1)
     .maybeSingle()
   if (nxErr) console.warn('[ZV-FUNNEL][worker] próxima etapa:', nxErr.message)
 
