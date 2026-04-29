@@ -322,11 +322,9 @@ export function CrmKanbanBoard() {
       }
       const effectiveUserId = imp.targetUserId ?? user.id
 
-      const { data, error } = await supabase
-        .from('leads')
-        .select('id, name, phone, status')
-        .eq('user_id', effectiveUserId)
-        .order('created_at', { ascending: true })
+      const { data, error } = await supabase.rpc('crm_leads_with_conversation', {
+        p_user_id: effectiveUserId,
+      })
 
       if (error) {
         if (!background) {
@@ -345,7 +343,7 @@ export function CrmKanbanBoard() {
         setLoading(false)
       }
     },
-    [],
+    [imp.targetUserId],
   )
 
   useEffect(() => {
@@ -367,7 +365,7 @@ export function CrmKanbanBoard() {
       const effectiveUserId = imp.targetUserId ?? user.id
 
       channel = supabase
-        .channel(`leads-realtime-${effectiveUserId}`)
+        .channel(`crm-realtime-${effectiveUserId}`)
         .on(
           'postgres_changes',
           {
@@ -375,6 +373,17 @@ export function CrmKanbanBoard() {
             schema: 'public',
             table: 'leads',
             filter: `user_id=eq.${effectiveUserId}`,
+          },
+          () => {
+            void fetchLeads({ background: true })
+          },
+        )
+        .on(
+          'postgres_changes',
+          {
+            event: 'INSERT',
+            schema: 'public',
+            table: 'chat_messages',
           },
           () => {
             void fetchLeads({ background: true })
@@ -391,7 +400,7 @@ export function CrmKanbanBoard() {
         void supabase.removeChannel(channel)
       }
     }
-  }, [fetchLeads])
+  }, [fetchLeads, imp.targetUserId])
 
   const handleDragOver = useCallback((event: DragOverEvent) => {
     const { active, over } = event
@@ -590,6 +599,7 @@ export function CrmKanbanBoard() {
         phone: phoneDigits,
         status: 'novo',
         user_id: effectiveUserId,
+        crm_show_without_chat: true,
       })
       .select('id, name, phone, status')
       .single()
@@ -612,7 +622,7 @@ export function CrmKanbanBoard() {
     })
 
     return { error: null }
-  }, [])
+  }, [imp.targetUserId])
 
   if (loading) {
     return (
@@ -648,6 +658,11 @@ export function CrmKanbanBoard() {
           {persistError}
         </div>
       ) : null}
+
+      <p className="mb-3 text-xs text-zinc-500">
+        Exibimos só leads com conversa no WhatsApp (ou criados por &quot;+ Novo Lead&quot; aqui). Importações
+        em massa ficam na Base de Contatos até alguém enviar ou receber mensagem.
+      </p>
 
       <DndContext
         sensors={sensors}

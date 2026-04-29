@@ -116,6 +116,12 @@ export function ContactsBasePanel({ userId, onContactsChanged, onError, onSucces
   const [deleteTarget, setDeleteTarget] = useState<LeadRow | null>(null)
   const [deleteBusy, setDeleteBusy] = useState(false)
 
+  const [bulkDeleteTagPick, setBulkDeleteTagPick] = useState('')
+  const [bulkDeletePreview, setBulkDeletePreview] = useState<number | null>(null)
+  const [bulkDeleteConfirmTag, setBulkDeleteConfirmTag] = useState<string | null>(null)
+  const [bulkDeleteBusy, setBulkDeleteBusy] = useState(false)
+  const [bulkDeletePreviewBusy, setBulkDeletePreviewBusy] = useState(false)
+
   // seleção para criar público
   const [selectedLeadIds, setSelectedLeadIds] = useState<Set<string>>(() => new Set())
   const [audienceOpen, setAudienceOpen] = useState(false)
@@ -383,6 +389,74 @@ export function ContactsBasePanel({ userId, onContactsChanged, onError, onSucces
       void load()
     } catch (err) {
       onError(err instanceof Error ? err.message : String(err))
+    }
+  }
+
+  async function loadBulkDeleteCount() {
+    const tag = bulkDeleteTagPick.trim()
+    if (!tag) {
+      onError('Escolha ou digite uma etiqueta (texto idêntico aos contatos).')
+      setBulkDeletePreview(null)
+      return
+    }
+    setBulkDeletePreviewBusy(true)
+    try {
+      const { count, error } = await supabase
+        .from('leads')
+        .select('*', { count: 'exact', head: true })
+        .eq('user_id', userId)
+        .eq('tag', tag)
+      if (error) {
+        onError(error.message)
+        setBulkDeletePreview(null)
+        return
+      }
+      setBulkDeletePreview(count ?? 0)
+      if ((count ?? 0) === 0) {
+        onError('Nenhum contato com essa etiqueta exata.')
+      }
+    } finally {
+      setBulkDeletePreviewBusy(false)
+    }
+  }
+
+  function openBulkDeleteConfirm() {
+    const tag = bulkDeleteTagPick.trim()
+    if (!tag) {
+      onError('Escolha ou digite a etiqueta da lista que deseja apagar.')
+      return
+    }
+    if ((bulkDeletePreview ?? 0) < 1) {
+      onError('Clique em «Contar contatos» e confira o número antes de excluir.')
+      return
+    }
+    setBulkDeleteConfirmTag(tag)
+  }
+
+  async function executeBulkDeleteByTag() {
+    if (!bulkDeleteConfirmTag) return
+    setBulkDeleteBusy(true)
+    try {
+      const { error } = await supabase
+        .from('leads')
+        .delete()
+        .eq('user_id', userId)
+        .eq('tag', bulkDeleteConfirmTag)
+      if (error) {
+        onError(`Exclusão em massa: ${error.message}`)
+        return
+      }
+      onSuccess(
+        `Todos os contatos com a etiqueta «${bulkDeleteConfirmTag}» foram excluídos.`,
+      )
+      setBulkDeleteConfirmTag(null)
+      setBulkDeleteTagPick('')
+      setBulkDeletePreview(null)
+      setSelectedLeadIds(new Set())
+      onContactsChanged()
+      void load()
+    } finally {
+      setBulkDeleteBusy(false)
     }
   }
 
@@ -1149,6 +1223,94 @@ export function ContactsBasePanel({ userId, onContactsChanged, onError, onSucces
                 className="mt-3 rounded-xl border border-brand-200 bg-brand-50 px-4 py-2 text-sm font-semibold text-brand-900 hover:bg-brand-100 disabled:opacity-50"
               >
                 {massBusy ? 'Aplicando…' : 'Aplicar rename em todos'}
+              </button>
+            </div>
+
+            <div className="mt-8 border-t border-red-100 pt-6">
+              <p className="text-xs font-semibold uppercase tracking-wide text-red-700">
+                Excluir lista inteira (por etiqueta)
+              </p>
+              <p className="mt-1 text-xs text-zinc-600">
+                Cada importação CSV recebe uma etiqueta do tipo{' '}
+                <span className="font-mono text-[11px]">Importação Manual - DD/MM/AAAA</span>. Escolha a
+                mesma etiqueta para apagar só aquela lista, ou qualquer etiqueta exata igual em todos os
+                contatos.
+              </p>
+              <div className="mt-3 flex flex-col gap-2 sm:flex-row sm:items-center">
+                <input
+                  type="text"
+                  value={bulkDeleteTagPick}
+                  onChange={(e) => {
+                    setBulkDeleteTagPick(e.target.value)
+                    setBulkDeletePreview(null)
+                  }}
+                  placeholder="Digite ou escolha a etiqueta"
+                  list="contact-tag-delete-list"
+                  className="min-w-0 flex-1 rounded-xl border border-zinc-200 px-3 py-2 text-sm"
+                />
+                <datalist id="contact-tag-delete-list">
+                  {tagAutocompleteList.map((t) => (
+                    <option key={t} value={t} />
+                  ))}
+                </datalist>
+                <button
+                  type="button"
+                  disabled={bulkDeletePreviewBusy || !bulkDeleteTagPick.trim()}
+                  onClick={() => void loadBulkDeleteCount()}
+                  className="shrink-0 rounded-xl border border-zinc-200 bg-white px-4 py-2 text-sm font-semibold text-zinc-800 hover:bg-zinc-50 disabled:opacity-50"
+                >
+                  {bulkDeletePreviewBusy ? 'Contando…' : 'Contar contatos'}
+                </button>
+              </div>
+              {bulkDeletePreview !== null ? (
+                <p className="mt-2 text-sm font-medium text-zinc-800">
+                  {bulkDeletePreview} contato(s) com esta etiqueta.
+                </p>
+              ) : null}
+              <button
+                type="button"
+                disabled={bulkDeleteBusy || (bulkDeletePreview ?? 0) < 1}
+                onClick={() => openBulkDeleteConfirm()}
+                className="mt-3 rounded-xl bg-red-600 px-4 py-2 text-sm font-semibold text-white hover:bg-red-700 disabled:opacity-50"
+              >
+                Excluir todos com esta etiqueta…
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
+
+      {bulkDeleteConfirmTag ? (
+        <div
+          className="fixed inset-0 z-[90] flex items-center justify-center bg-zinc-950/60 p-4"
+          role="alertdialog"
+          aria-modal="true"
+        >
+          <div className="w-full max-w-md rounded-2xl border border-red-100 bg-white p-6 shadow-2xl">
+            <p className="text-base font-semibold text-red-900">Exclusão irreversível</p>
+            <p className="mt-3 text-sm text-zinc-700">
+              Serão removidos <strong>todos os contatos</strong> cuja etiqueta é exatamente:{' '}
+              <strong className="break-all">{bulkDeleteConfirmTag}</strong>.
+            </p>
+            <p className="mt-2 text-sm text-zinc-600">
+              Isso apaga também o histórico de mensagens vinculado a esses leads, conforme o banco.
+            </p>
+            <div className="mt-6 flex flex-wrap justify-end gap-2">
+              <button
+                type="button"
+                disabled={bulkDeleteBusy}
+                onClick={() => setBulkDeleteConfirmTag(null)}
+                className="rounded-xl px-4 py-2 text-sm font-medium text-zinc-700 hover:bg-zinc-100"
+              >
+                Cancelar
+              </button>
+              <button
+                type="button"
+                disabled={bulkDeleteBusy}
+                onClick={() => void executeBulkDeleteByTag()}
+                className="rounded-xl bg-red-700 px-4 py-2 text-sm font-semibold text-white hover:bg-red-800 disabled:opacity-60"
+              >
+                {bulkDeleteBusy ? 'Excluindo…' : 'Sim, excluir todos'}
               </button>
             </div>
           </div>

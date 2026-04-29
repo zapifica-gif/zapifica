@@ -131,6 +131,8 @@ async function handleActiveCampaignProgress(
 
     // Primeira etapa do fluxo pós-gatilho. Pode haver gaps no step_order (ex.: usuário deletou etapa no painel).
     // Então buscamos a PRIMEIRA etapa existente (step_order >= 1, ordenado).
+    // PostgREST: `.maybeSingle()` com 2+ linhas retorna ERRO (não a primeira linha).
+    // Sempre use `.limit(1)` antes de `.maybeSingle()` ao buscar "próxima etapa".
     const { data: firstStep, error: s1Err } = await p.supabase
       .from('zv_funnels')
       .select(
@@ -139,6 +141,7 @@ async function handleActiveCampaignProgress(
       .eq('flow_id', flowId)
       .gte('step_order', 1)
       .order('step_order', { ascending: true })
+      .limit(1)
       .maybeSingle()
 
     if (s1Err) {
@@ -185,6 +188,7 @@ async function handleActiveCampaignProgress(
     .eq('flow_id', flowId)
     .gte('step_order', progress.next_step_order)
     .order('step_order', { ascending: true })
+    .limit(1)
     .maybeSingle()
 
   if (stepErr) {

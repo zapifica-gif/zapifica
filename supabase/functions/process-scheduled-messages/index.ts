@@ -411,7 +411,11 @@ serve(async () => {
 
     try {
       // Anti-ban (configurável): delay aleatório antes de cada disparo.
-      const dispatchDelayMs = resolveDispatchDelayMs(msg)
+      // Etapas do Zap Voice (zv_funnel_step_id): não empilhar atrasos longos + presença
+      let dispatchDelayMs = resolveDispatchDelayMs(msg)
+      if (msg.zv_funnel_step_id) {
+        dispatchDelayMs = Math.min(dispatchDelayMs, 2500)
+      }
       console.log(`[Agenda Suprema] Delay antes do envio: ${dispatchDelayMs}ms`)
       await sleep(dispatchDelayMs)
 
@@ -629,7 +633,10 @@ serve(async () => {
 
         // Anti-ban / humanização: "digitando…" (texto/mídia) ou "gravando…" (áudio).
         const presence = presenceForPlan(plan)
-        const presenceDelayMs = Math.floor(Math.random() * (5000 - 2000 + 1)) + 2000
+        let presenceDelayMs = Math.floor(Math.random() * (5000 - 2000 + 1)) + 2000
+        if (msg.zv_funnel_step_id) {
+          presenceDelayMs = Math.floor(Math.random() * (1200 - 400 + 1)) + 400
+        }
         await sendEvolutionPresence(
           evolutionUrl,
           evolutionApiKey,
