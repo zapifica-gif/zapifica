@@ -40,7 +40,24 @@ const ZAPIFICA_SYSTEM = `Age como a atendente comercial virtual da agência Zapi
 Regras: responde em português (Brasil), tom cordial, profissional e direto, adequado ao WhatsApp.
 Ajudas com informações da agência, prazos, qualificação de leads e próximos passos.
 Não inventes preços, números contratuais ou serviços inexistentes: se faltar dado, diz que um consultor humano pode alinhar.
-Mensagens curtas (em geral até 2–3 parágrafos), sem jargão excessivo.`
+Mensagens curtas (em geral até 2–3 parágrafos), sem jargão excessivo.
+
+REGRA DE OURO: Aja como um humano natural. NUNCA inicie todas as frases com o nome do cliente. Se você já o cumprimentou, continue a conversa normalmente sem repetir o nome.`
+
+const MS_24H = 24 * 60 * 60 * 1000
+
+/** timestamptz do PostgREST → comparação segura com Date.now() (evita falsos negativos de parse). */
+function isAiPausedUntilActive(aiPausedUntil: unknown): boolean {
+  if (aiPausedUntil == null) return false
+  const raw =
+    typeof aiPausedUntil === 'string'
+      ? aiPausedUntil.trim()
+      : String(aiPausedUntil).trim()
+  if (!raw) return false
+  const pauseTime = new Date(raw).getTime()
+  if (!Number.isFinite(pauseTime)) return false
+  return Date.now() < pauseTime
+}
 
 type ChatMessageRow = {
   id: string
@@ -323,6 +340,27 @@ async function runPipeline(
 
   const leadData = lead as LeadRow
 
+  // Pausa humana já gravada antes deste disparo (ex.: fromMe chegou primeiro).
+  const { data: pauseEarly, error: pauseEarlyErr } = await supabase
+    .from('leads')
+    .select('ai_paused_until')
+    .eq('id', triggerRow.lead_id)
+    .maybeSingle()
+  if (pauseEarlyErr) {
+    return { error: `ai_pause_check_early: ${pauseEarlyErr.message}` }
+  }
+  if (
+    isAiPausedUntilActive(
+      (pauseEarly as { ai_paused_until?: unknown } | null)?.ai_paused_until,
+    )
+  ) {
+    return {
+      ok: true,
+      ignored: 'ai_paused_human_handoff',
+      lead_id: triggerRow.lead_id,
+    }
+  }
+
   // ───────────────────────────────────────────────────────────────────────
   // HARD BLOCK 1 (síncrono, antes do delay e do LLM):
   // Se o texto bate com o gatilho de QUALQUER campanha ativa do tenant,
@@ -412,16 +450,12 @@ async function runPipeline(
   if (pauseErr) {
     return { error: `ai_pause_check: ${pauseErr.message}` }
   }
-  const pauseIsoRaw = (pauseRow as { ai_paused_until?: string | null } | null)?.ai_paused_until
-  const pauseIso = (pauseIsoRaw ?? '').trim() || null
-  if (pauseIso) {
-    const pauseTs = new Date(pauseIso).getTime()
-    if (!Number.isNaN(pauseTs) && Date.now() < pauseTs) {
-      return {
-        ok: true,
-        ignored: 'ai_paused_human_handoff',
-        lead_id: triggerRow.lead_id,
-      }
+  const pauseRawLate = (pauseRow as { ai_paused_until?: unknown } | null)?.ai_paused_until
+  if (isAiPausedUntilActive(pauseRawLate)) {
+    return {
+      ok: true,
+      ignored: 'ai_paused_human_handoff',
+      lead_id: triggerRow.lead_id,
     }
   }
 
@@ -430,16 +464,27 @@ async function runPipeline(
     return { error: 'Telefone do lead inválido para a Evolution' }
   }
 
-  const { data: historyDesc, error: hErr } = await supabase
-    .from('chat_messages')
-    .select('id, lead_id, sender_type, content_type, message_body, created_at')
-    .eq('lead_id', triggerRow.lead_id)
-    .order('created_at', { ascending: false })
-    .limit(HISTORY_LIMIT)
+  const cutoff24hIso = new Date(Date.now() - MS_24H).toISOString()
+  const [{ data: historyDesc, error: hErr }, { count: countMsgs24h, error: c24Err }] =
+    await Promise.all([
+      supabase
+        .from('chat_messages')
+        .select('id, lead_id, sender_type, content_type, message_body, created_at')
+        .eq('lead_id', triggerRow.lead_id)
+        .order('created_at', { ascending: false })
+        .limit(HISTORY_LIMIT),
+      supabase
+        .from('chat_messages')
+        .select('id', { count: 'exact', head: true })
+        .eq('lead_id', triggerRow.lead_id)
+        .gte('created_at', cutoff24hIso),
+    ])
 
   if (hErr) {
     return { error: `history: ${hErr.message}` }
   }
+  const interactionCount24h = countMsgs24h ?? 0
+  const includeClientNameHint = !c24Err && interactionCount24h < 2
 
   const rowsChrono = [...(historyDesc ?? [])].reverse() as ChatMessageRow[]
 
@@ -453,11 +498,11 @@ async function runPipeline(
 
   let systemPrompt = ZAPIFICA_SYSTEM
 
-  if (clientFirst) {
+  if (clientFirst && includeClientNameHint) {
     systemPrompt +=
       `\n\n--- CONTEXTO DO CONTATO ---\n` +
       `O nome do cliente com quem você está falando é ${clientFirst}. ` +
-      `Se esta for a primeira interação do dia ou o início de uma conversa, seja educado e chame-o pelo nome.\n`
+      `Só cumprimente pelo nome quando fizer sentido no início; depois converse de forma natural, sem repetir o nome.\n`
   }
 
   if (historyPortugueseBlock.trim()) {
@@ -466,6 +511,22 @@ async function runPipeline(
       `Trecho em ordem cronológica (do mais antigo ao mais recente). ` +
       `"Cliente" é a pessoa atendida; "Você" é a empresa (humano ou você, o assistente).\n\n` +
       `${historyPortugueseBlock}\n`
+  }
+
+  const { data: pausePreLlm, error: pausePreErr } = await supabase
+    .from('leads')
+    .select('ai_paused_until')
+    .eq('id', triggerRow.lead_id)
+    .maybeSingle()
+  if (pausePreErr) {
+    return { error: `ai_pause_pre_llm: ${pausePreErr.message}` }
+  }
+  if (isAiPausedUntilActive((pausePreLlm as { ai_paused_until?: unknown } | null)?.ai_paused_until)) {
+    return {
+      ok: true,
+      ignored: 'ai_paused_human_handoff',
+      lead_id: triggerRow.lead_id,
+    }
   }
 
   const { text, error: dsErr } = await callDeepSeek(

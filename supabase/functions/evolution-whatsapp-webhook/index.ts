@@ -65,6 +65,23 @@ type TrainingCategoryRow = { id: string }
 const FALLBACK_MASTER_PROMPT =
   'Você é o assistente virtual da agência de marketing Floripa Web. Seja direto, gentil, persuasivo e use respostas curtas em português do Brasil. Tente entender a necessidade do cliente.'
 
+const GOLDEN_RULE_NATURAL_NAME = `REGRA DE OURO: Aja como um humano natural. NUNCA inicie todas as frases com o nome do cliente. Se você já o cumprimentou, continue a conversa normalmente sem repetir o nome.`
+
+const MS_24H = 24 * 60 * 60 * 1000
+
+/** timestamptz (Postgres/PostgREST) → comparação com Date.now() sem falsos negativos de parse. */
+function isAiPausedUntilActive(aiPausedUntil: unknown): boolean {
+  if (aiPausedUntil == null) return false
+  const raw =
+    typeof aiPausedUntil === 'string'
+      ? aiPausedUntil.trim()
+      : String(aiPausedUntil).trim()
+  if (!raw) return false
+  const pauseTime = new Date(raw).getTime()
+  if (!Number.isFinite(pauseTime)) return false
+  return Date.now() < pauseTime
+}
+
 /** Primeiro nome para humanizar a IA; ignora quando o nome é só o número de telefone. */
 function extractClientFirstNameForAi(
   leadName: string | null | undefined,
@@ -112,6 +129,8 @@ function buildDeepSeekSystemPrompt(params: {
   trainingTexts: string[]
   clientFirstName?: string | null
   recentConversationBlock?: string | null
+  /** Se true (menos de 2 mensagens nas últimas 24h neste lead), injeta o bloco com o nome. */
+  includeClientNameHint?: boolean
 }): string {
   const master = (params.masterPrompt ?? '').trim() || FALLBACK_MASTER_PROMPT
   const materials = params.trainingTexts
@@ -126,19 +145,20 @@ function buildDeepSeekSystemPrompt(params: {
   // Defesa contra prompt infinito (token/contexto do modelo). Mantém o pedido do usuário,
   // mas impõe um teto seguro em caracteres.
   const MAX_CHARS = 12000
-  let out = base
+  let out = `${base}\n${GOLDEN_RULE_NATURAL_NAME}\n`
   for (const m of materials) {
     if (out.length >= MAX_CHARS) break
     const chunk = (m + '\n\n')
     out += chunk
   }
 
+  const includeName = params.includeClientNameHint === true
   const first = (params.clientFirstName ?? '').trim()
-  if (first) {
+  if (includeName && first) {
     out +=
       `\n--- CONTEXTO DO CONTATO ---\n` +
       `O nome do cliente com quem você está falando é ${first}. ` +
-      `Se esta for a primeira interação do dia ou o início de uma conversa, seja educado e chame-o pelo nome.\n`
+      `Só cumprimente pelo nome quando fizer sentido no início; depois converse de forma natural, sem repetir o nome.\n`
   }
 
   const hist = (params.recentConversationBlock ?? '').trim()
@@ -1069,6 +1089,7 @@ serve(async (req) => {
             phoneDigitsFm,
             mergedFm,
           )
+          console.log('PAUSANDO IA PARA O LEAD:', ensuredFm.id)
           const { error: pauseErr } = await supabase.rpc('set_lead_ai_paused_60_min', {
             p_lead_id: crmFm,
             p_user_id: userId,
@@ -1354,7 +1375,7 @@ serve(async (req) => {
       }
       const { data: leadAi, error: aiErr } = await supabase
         .from('leads')
-        .select('id, ai_enabled, funnel_locked_until, name, phone')
+        .select('id, ai_enabled, funnel_locked_until, name, phone, ai_paused_until')
         .eq('id', crmLeadId)
         .eq('user_id', userId)
         .maybeSingle()
@@ -1375,16 +1396,27 @@ serve(async (req) => {
           }
         }
 
+        const pauseRawLead = (leadAi as { ai_paused_until?: unknown } | null)?.ai_paused_until
+        if (isAiPausedUntilActive(pauseRawLead)) {
+          console.log('[IA] Human handoff — ai_paused_until ativo, ignorando resposta automática.', {
+            leadId: crmLeadId,
+          })
+          skipped.push(`ai_paused_human_handoff:${item.msgId}`)
+          continue
+        }
+
         if (enabled) {
           if (!deepSeekKey) {
             console.warn('[IA] DEEPSEEK_API_KEY ausente; ignorando resposta automática.')
           } else if (!evolutionUrl || !evolutionApiKey) {
             console.warn('[IA] EVOLUTION_API_URL/KEY ausentes; não consigo responder.')
           } else {
+            const cutoff24hIso = new Date(Date.now() - MS_24H).toISOString()
             const [
               { data: ctx, error: ctxErr },
               { data: mats, error: matsErr },
               { data: histMessages, error: histErr },
+              { count: countMsgs24h, error: count24Err },
             ] = await Promise.all([
               supabase
                 .from('ai_company_context')
@@ -1402,6 +1434,11 @@ serve(async (req) => {
                 .eq('lead_id', crmLeadId)
                 .order('created_at', { ascending: false })
                 .limit(20),
+              supabase
+                .from('chat_messages')
+                .select('id', { count: 'exact', head: true })
+                .eq('lead_id', crmLeadId)
+                .gte('created_at', cutoff24hIso),
             ])
 
             if (ctxErr) {
@@ -1412,6 +1449,9 @@ serve(async (req) => {
             }
             if (histErr) {
               console.error('[IA] Falha ao carregar histórico recente (chat_messages):', histErr.message)
+            }
+            if (count24Err) {
+              console.error('[IA] Falha ao contar mensagens 24h:', count24Err.message)
             }
 
             const masterPrompt = (ctx as CompanyContextRow | null)?.master_prompt ?? null
@@ -1446,12 +1486,33 @@ serve(async (req) => {
               phoneDigits,
             )
 
+            const interactionCount24h = countMsgs24h ?? 0
+            const includeClientNameHint = !count24Err && interactionCount24h < 2
+
             const systemPrompt = buildDeepSeekSystemPrompt({
               masterPrompt,
               trainingTexts,
               clientFirstName,
               recentConversationBlock: recentConversationBlock || null,
+              includeClientNameHint,
             })
+
+            const { data: pauseRecheck, error: pauseReErr } = await supabase
+              .from('leads')
+              .select('ai_paused_until')
+              .eq('id', crmLeadId)
+              .eq('user_id', userId)
+              .maybeSingle()
+            if (pauseReErr) {
+              console.error('[IA] Falha ao releer ai_paused_until antes do DeepSeek:', pauseReErr.message)
+            } else if (isAiPausedUntilActive(pauseRecheck?.ai_paused_until)) {
+              console.log(
+                '[IA] Human handoff (recheck antes do LLM) — ignorando resposta automática.',
+                { leadId: crmLeadId },
+              )
+              skipped.push(`ai_paused_human_handoff_recheck:${item.msgId}`)
+              continue
+            }
 
             const ai = await callDeepSeek({
               apiKey: deepSeekKey,
