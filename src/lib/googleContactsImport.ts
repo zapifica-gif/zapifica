@@ -3,10 +3,18 @@
  * Requer o `provider_token` do Google na sessão Supabase, quando disponível.
  */
 
-export type GoogleContactRow = { name: string; phone: string }
+export type GoogleContactRow = {
+  name: string
+  phone: string
+  email: string | null
+  job_title: string | null
+  company_name: string | null
+  city: string | null
+  address_line: string | null
+}
 
 const PEOPLE_LIST =
-  'https://people.googleapis.com/v1/people/me/connections?personFields=names%2CphoneNumbers&pageSize=1000'
+  'https://people.googleapis.com/v1/people/me/connections?personFields=names%2CphoneNumbers%2CemailAddresses%2Corganizations%2Caddresses&pageSize=1000'
 
 /**
  * Tenta listar conexões do Google e devolve nome + 1 telefone canônico por pessoa
@@ -28,6 +36,9 @@ export async function fetchGoogleContacts(
     connections?: Array<{
       names?: { displayName?: string; unstructuredName?: string }[]
       phoneNumbers?: { value?: string; canonicalForm?: string }[]
+      emailAddresses?: { value?: string }[]
+      organizations?: { title?: string; name?: string }[]
+      addresses?: { city?: string; formattedValue?: string }[]
     }>
   }
   const out: GoogleContactRow[] = []
@@ -42,7 +53,14 @@ export async function fetchGoogleContacts(
     const d = raw.replace(/\D/g, '')
     if (d.length < 10) continue
     const phone = d.startsWith('55') && d.length >= 12 ? d : d.length === 10 || d.length === 11 ? `55${d}` : d
-    out.push({ name, phone })
+    const org = c.organizations?.[0]
+    const addr = c.addresses?.[0]
+    const email = c.emailAddresses?.[0]?.value?.trim() || null
+    const job_title = org?.title?.trim() || null
+    const company_name = org?.name?.trim() || null
+    const city = addr?.city?.trim() || null
+    const address_line = addr?.formattedValue?.trim() || null
+    out.push({ name, phone, email, job_title, company_name, city, address_line })
   }
   return out
 }

@@ -65,7 +65,7 @@ function leadTagForCampaign(c: CampaignRow): string {
   const tags = c.audience_tags?.map((t) => t.trim()).filter(Boolean) ?? []
   if (tags.length > 0) return tags[0]!
   const n = c.name?.trim() || 'Campanha'
-  return `Gatilho Meta — ${n.slice(0, 60)}`
+  return `Campanha — ${n.slice(0, 60)}`
 }
 
 /** Delay da etapa: null/NaN quebrava `new Date(now+NaN)` e derrubava o webhook sem insert na fila. */
@@ -384,7 +384,7 @@ export async function processZapVoiceInbound(
     const leadTag = leadTagForCampaign(matched)
     const { error: upErr } = await p.supabase
       .from('leads')
-      .update({ source: 'meta_ads', tag: leadTag })
+      .update({ tag: leadTag })
       .eq('id', p.leadId)
       .eq('user_id', p.userId)
     if (upErr) {

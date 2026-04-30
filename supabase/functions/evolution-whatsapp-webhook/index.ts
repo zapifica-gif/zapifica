@@ -248,6 +248,38 @@ function toEvolutionDigits(raw: string | null | undefined): string | null {
   return null
 }
 
+/** Após DDI 55: alterna 9º dígito típico de celular BR (DDD + 9 + 8 vs DDD + 8). */
+function brazilAlternateNationalNine(national: string): string | null {
+  const n = national.replace(/\D/g, '')
+  // 11 = DDD(2) + 9 + 8 dígitos
+  if (n.length === 11 && n[2] === '9') {
+    const ddd = n.slice(0, 2)
+    const rest = n.slice(3)
+    if (rest.length === 8) return ddd + rest
+  }
+  // 10 = DDD(2) + 8 dígitos (formato antigo / Evolution sem 9)
+  if (n.length === 10) {
+    const ddd = n.slice(0, 2)
+    const rest = n.slice(2)
+    if (rest.length === 8) return ddd + '9' + rest
+  }
+  return null
+}
+
+/** Todas as chaves completas equivalentes para match (Evolution vs CSV). */
+function canonicalBrazilPhoneKeys(fullDigits: string): string[] {
+  const d = fullDigits.replace(/\D/g, '')
+  if (!d || d.includes('@')) return []
+  const out = new Set<string>()
+  out.add(d)
+  if (d.startsWith('55') && d.length >= 12) {
+    const nat = d.slice(2)
+    const alt = brazilAlternateNationalNine(nat)
+    if (alt) out.add(`55${alt}`)
+  }
+  return [...out]
+}
+
 function nationalTail(digits: string | null | undefined): string | null {
   if (!digits) return null
   if (digits.includes('@')) return null
@@ -257,6 +289,17 @@ function nationalTail(digits: string | null | undefined): string | null {
     return only.slice(2)
   }
   return only.slice(-11)
+}
+
+function tailVariantsForBrazilFull(fullDigits: string): Set<string> {
+  const tails = new Set<string>()
+  const nat = nationalTail(fullDigits)
+  if (nat) {
+    tails.add(nat)
+    const altNat = brazilAlternateNationalNine(nat)
+    if (altNat) tails.add(altNat)
+  }
+  return tails
 }
 
 function prettifyPhone(digits: string): string {
@@ -555,19 +598,34 @@ function buildLeadIndex(rows: LeadRow[]): LeadIndex {
 
   for (const r of rows) {
     const full = toEvolutionDigits(r.phone ?? null)
-    if (full && !byFull.has(full)) byFull.set(full, r.id)
-    const tail = nationalTail(full ?? r.phone ?? null)
-    if (tail && !byTail.has(tail)) byTail.set(tail, r.id)
+    if (!full || full.includes('@')) continue
+
+    for (const k of canonicalBrazilPhoneKeys(full)) {
+      if (!byFull.has(k)) byFull.set(k, r.id)
+    }
+
+    const tv = tailVariantsForBrazilFull(full)
+    for (const tail of tv) {
+      if (!byTail.has(tail)) byTail.set(tail, r.id)
+    }
+
+    const rawTail = nationalTail(full ?? r.phone ?? null)
+    if (rawTail && !byTail.has(rawTail)) byTail.set(rawTail, r.id)
   }
 
   return { byFull, byTail, rows }
 }
 
 function findLeadId(idx: LeadIndex, fullDigits: string): string | null {
-  const hitFull = idx.byFull.get(fullDigits)
-  if (hitFull) return hitFull
-  const tail = nationalTail(fullDigits)
-  if (tail) {
+  const cleanInbound = fullDigits.replace(/\D/g, '')
+  for (const k of canonicalBrazilPhoneKeys(cleanInbound)) {
+    const hitFull = idx.byFull.get(k)
+    if (hitFull) return hitFull
+  }
+  const tailSet = tailVariantsForBrazilFull(cleanInbound)
+  const tailFallback = nationalTail(cleanInbound)
+  if (tailFallback) tailSet.add(tailFallback)
+  for (const tail of tailSet) {
     const hitTail = idx.byTail.get(tail)
     if (hitTail) return hitTail
   }
@@ -575,12 +633,20 @@ function findLeadId(idx: LeadIndex, fullDigits: string): string | null {
 }
 
 function phonesMatch(inboundDigits: string, leadPhone: string | null | undefined): boolean {
-  if (!leadPhone) return false
-  const d = toEvolutionDigits(leadPhone)
-  if (d && d === inboundDigits) return true
-  const t1 = nationalTail(inboundDigits)
-  const t2 = nationalTail(leadPhone)
-  if (t1 && t2 && t1 === t2) return true
+  const a = toEvolutionDigits(inboundDigits)
+  const b = toEvolutionDigits(leadPhone ?? null)
+  if (!a || !b || a.includes('@') || b.includes('@')) return false
+  const keysA = new Set(canonicalBrazilPhoneKeys(a))
+  for (const kb of canonicalBrazilPhoneKeys(b)) {
+    if (keysA.has(kb)) return true
+  }
+  const ta = tailVariantsForBrazilFull(a)
+  const na = nationalTail(a)
+  if (na) ta.add(na)
+  const tb = tailVariantsForBrazilFull(b)
+  const nb = nationalTail(b)
+  if (nb) tb.add(nb)
+  for (const t of ta) if (tb.has(t)) return true
   return false
 }
 
@@ -634,6 +700,7 @@ async function ensureLeadId(
       name: displayName,
       phone: fullDigits,
       status: 'novo',
+      source: 'inbound_whatsapp',
     })
     .select('id, phone, name')
     .single()
@@ -641,9 +708,11 @@ async function ensureLeadId(
   if (!error && data) {
     const row = data as LeadRow
     idx.rows.push(row)
-    idx.byFull.set(fullDigits, row.id)
-    const tail = nationalTail(fullDigits)
-    if (tail) idx.byTail.set(tail, row.id)
+    for (const k of canonicalBrazilPhoneKeys(fullDigits)) idx.byFull.set(k, row.id)
+    const tset = tailVariantsForBrazilFull(fullDigits)
+    const nf = nationalTail(fullDigits)
+    if (nf) tset.add(nf)
+    for (const tail of tset) idx.byTail.set(tail, row.id)
     return { id: row.id, created: true, error: null }
   }
 
@@ -823,17 +892,27 @@ serve(async (req) => {
     }
     if (ensured.created) createdLeads += 1
 
+    const mergedForDupResolve = [...((allLeads ?? []) as LeadRow[])]
+    const seen = new Set(mergedForDupResolve.map((r) => r.id))
+    for (const r of index.rows) {
+      if (!seen.has(r.id)) {
+        seen.add(r.id)
+        mergedForDupResolve.push(r)
+      }
+    }
     const crmLeadId = await resolveCanonicalLeadIdForPhone(
       supabase,
       userId,
       ensured.id,
       phoneDigits,
-      (allLeads ?? []) as LeadRow[],
+      mergedForDupResolve,
     )
     if (crmLeadId !== ensured.id) {
-      index.byFull.set(phoneDigits, crmLeadId)
-      const tailK = nationalTail(phoneDigits)
-      if (tailK) index.byTail.set(tailK, crmLeadId)
+      for (const k of canonicalBrazilPhoneKeys(phoneDigits)) index.byFull.set(k, crmLeadId)
+      const ts = tailVariantsForBrazilFull(phoneDigits)
+      const t0 = nationalTail(phoneDigits)
+      if (t0) ts.add(t0)
+      for (const tailK of ts) index.byTail.set(tailK, crmLeadId)
       console.log(
         '[evolution-whatsapp-webhook] mesmo telefone em vários contatos — roteando para o lead com funil ativo',
         { anterior: ensured.id, canonico: crmLeadId },
