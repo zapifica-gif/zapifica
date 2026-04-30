@@ -30,7 +30,7 @@ import {
   verticalListSortingStrategy,
 } from '@dnd-kit/sortable'
 import { CSS } from '@dnd-kit/utilities'
-import { GripVertical, Pencil, Phone, Users } from 'lucide-react'
+import { Bot, GripVertical, Pencil, Phone, Users } from 'lucide-react'
 import { toEvolutionDigits } from '../../lib/phoneBrazil'
 import { supabase } from '../../lib/supabase'
 import { ChatWindow } from './ChatWindow'
@@ -50,6 +50,8 @@ export type Lead = {
   profilePictureUrl: string | null
   isGroup: boolean
   lastActivityIso: string | null
+  /** ISO de `ai_paused_until`; se ainda no futuro, IA não responde (atendimento manual). */
+  aiPausedUntilIso: string | null
 }
 
 type LeadRow = {
@@ -61,6 +63,7 @@ type LeadRow = {
   is_group: boolean
   last_message_at: string | null
   updated_at: string
+  ai_paused_until: string | null
 }
 
 const COLUMN_ORDER: ColumnId[] = [
@@ -103,7 +106,15 @@ function rowToLead(row: LeadRow): Lead {
     profilePictureUrl: row.profile_picture_url ?? null,
     isGroup: Boolean(row.is_group),
     lastActivityIso: row.last_message_at ?? row.updated_at ?? null,
+    aiPausedUntilIso: row.ai_paused_until ?? null,
   }
+}
+
+/** Indica janela de pausa da IA definida pelo webhook (mensagem fromMe). */
+function isLeadAiPaused(aiPausedUntilIso: string | null | undefined): boolean {
+  if (!aiPausedUntilIso) return false
+  const t = Date.parse(aiPausedUntilIso)
+  return !Number.isNaN(t) && Date.now() < t
 }
 
 function avatarHue(seed: string): number {
@@ -359,6 +370,15 @@ function LeadCardFace({
               >
                 <Users className="h-3 w-3" aria-hidden />
                 Grupo
+              </span>
+            ) : null}
+            {isLeadAiPaused(lead.aiPausedUntilIso) ? (
+              <span
+                className="inline-flex shrink-0 items-center gap-0.5 rounded-full bg-violet-50 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-violet-800 ring-1 ring-violet-200/90 dark:bg-violet-950/35 dark:text-violet-200 dark:ring-violet-800"
+                title="IA pausada: você respondeu pelo WhatsApp. Retoma sozinha após ~60 min."
+              >
+                <Bot className="h-3 w-3" aria-hidden />
+                Manual · Zzz
               </span>
             ) : null}
             <span
@@ -781,7 +801,7 @@ export function CrmKanbanBoard() {
         crm_show_without_chat: true,
       })
       .select(
-        'id, name, phone, status, profile_picture_url, is_group, last_message_at, updated_at',
+        'id, name, phone, status, profile_picture_url, is_group, last_message_at, updated_at, ai_paused_until',
       )
       .single()
 

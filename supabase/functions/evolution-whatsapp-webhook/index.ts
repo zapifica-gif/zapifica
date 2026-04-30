@@ -1035,8 +1035,55 @@ serve(async (req) => {
   const errors: string[] = []
 
   for (const item of items) {
+    // Resposta humana (dono do WhatsApp): pausa a IA 60 min neste lead/contato.
     if (item.fromMe) {
-      skipped.push(`fromMe:${item.msgId}`)
+      const phoneDigitsFm = toEvolutionDigits(item.remoteJid)
+      const isGroupFm = Boolean(phoneDigitsFm?.includes('@g.us'))
+      if (
+        !phoneDigitsFm ||
+        (phoneDigitsFm.includes('@') && !isGroupFm)
+      ) {
+        skipped.push(`fromMe:${item.msgId || 'noId'}:badJid`)
+      } else {
+        const ensuredFm = await ensureLeadId(
+          supabase,
+          userId,
+          index,
+          phoneDigitsFm,
+          item.pushName,
+        )
+        if (ensuredFm.id) {
+          if (ensuredFm.created) createdLeads += 1
+          const mergedFm = [...((allLeads ?? []) as LeadRow[])]
+          const seenFm = new Set(mergedFm.map((r) => r.id))
+          for (const r of index.rows) {
+            if (!seenFm.has(r.id)) {
+              seenFm.add(r.id)
+              mergedFm.push(r)
+            }
+          }
+          const crmFm = await resolveCanonicalLeadIdForPhone(
+            supabase,
+            userId,
+            ensuredFm.id,
+            phoneDigitsFm,
+            mergedFm,
+          )
+          const { error: pauseErr } = await supabase.rpc('set_lead_ai_paused_60_min', {
+            p_lead_id: crmFm,
+            p_user_id: userId,
+          })
+          if (pauseErr) {
+            console.warn(
+              '[evolution-whatsapp-webhook] set_lead_ai_paused_60_min (fromMe):',
+              pauseErr.message,
+            )
+          }
+        } else {
+          errors.push(`fromMe_lead:${phoneDigitsFm}:${ensuredFm.error ?? 'sem id'}`)
+        }
+      }
+      skipped.push(`fromMe:${item.msgId || 'noId'}`)
       continue
     }
 

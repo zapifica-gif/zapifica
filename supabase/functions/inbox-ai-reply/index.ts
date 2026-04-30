@@ -403,6 +403,28 @@ async function runPipeline(
     }
   }
 
+  // Human handoff: releitura após o delay anti-corrida (fromMe pode ter pausado a IA durante a espera).
+  const { data: pauseRow, error: pauseErr } = await supabase
+    .from('leads')
+    .select('ai_paused_until')
+    .eq('id', triggerRow.lead_id)
+    .maybeSingle()
+  if (pauseErr) {
+    return { error: `ai_pause_check: ${pauseErr.message}` }
+  }
+  const pauseIsoRaw = (pauseRow as { ai_paused_until?: string | null } | null)?.ai_paused_until
+  const pauseIso = (pauseIsoRaw ?? '').trim() || null
+  if (pauseIso) {
+    const pauseTs = new Date(pauseIso).getTime()
+    if (!Number.isNaN(pauseTs) && Date.now() < pauseTs) {
+      return {
+        ok: true,
+        ignored: 'ai_paused_human_handoff',
+        lead_id: triggerRow.lead_id,
+      }
+    }
+  }
+
   const destination = toEvolutionDigits(leadData.phone)
   if (!destination) {
     return { error: 'Telefone do lead inválido para a Evolution' }
