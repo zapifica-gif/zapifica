@@ -814,7 +814,15 @@ function buildLeadIndex(rows: LeadRow[]): LeadIndex {
 
 function findLeadId(idx: LeadIndex, fullDigits: string): string | null {
   const gid = normalizeGroupJid(fullDigits)
-  if (gid.includes('@g.us')) return idx.byGroupJid.get(gid) ?? null
+  if (gid.includes('@g.us')) {
+    const hitMap = idx.byGroupJid.get(gid)
+    if (hitMap) return hitMap
+    for (const r of idx.rows) {
+      const rp = normalizeGroupJid((r.phone ?? '').trim())
+      if (rp && rp === gid) return r.id
+    }
+    return null
+  }
 
   const cleanInbound = fullDigits.replace(/\D/g, '')
   for (const k of canonicalBrazilPhoneKeys(cleanInbound)) {
@@ -827,6 +835,13 @@ function findLeadId(idx: LeadIndex, fullDigits: string): string | null {
   for (const tail of tailSet) {
     const hitTail = idx.byTail.get(tail)
     if (hitTail) return hitTail
+  }
+
+  // Telefone salvo em formato que não entrou nos maps (ex.: normalização divergente no index).
+  for (const r of idx.rows) {
+    const raw = (r.phone ?? '').trim()
+    if (raw.includes('@g.us')) continue
+    if (phonesMatch(fullDigits, r.phone)) return r.id
   }
   return null
 }
@@ -1325,6 +1340,7 @@ serve(async (req) => {
     saved += 1
 
     const touchNow = new Date().toISOString()
+    // Não incluir `status` aqui — posição no funil do Kanban deve ser preservada.
     await supabase
       .from('leads')
       .update({ last_message_at: touchNow })

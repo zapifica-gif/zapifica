@@ -192,6 +192,53 @@ function leadSortTimestampMs(row: LeadRow): number {
   return Number.isNaN(upd) ? 0 : upd
 }
 
+/** Uma linha por `id` na RPC (mantém o snapshot mais recente). */
+function dedupeLeadRowsPreferNewest(rows: LeadRow[]): LeadRow[] {
+  const map = new Map<string, LeadRow>()
+  for (const row of rows) {
+    if (!row.id) continue
+    const prev = map.get(row.id)
+    if (!prev || leadSortTimestampMs(row) >= leadSortTimestampMs(prev)) {
+      map.set(row.id, row)
+    }
+  }
+  return [...map.values()]
+}
+
+/** Lista de ids sem repetição, preservando a ordem da primeira aparição. */
+function orderedUniqueStrings(ids: string[]): string[] {
+  const seen = new Set<string>()
+  const out: string[] = []
+  for (const id of ids) {
+    if (!id || seen.has(id)) continue
+    seen.add(id)
+    out.push(id)
+  }
+  return out
+}
+
+/**
+ * Garante um único lugar no board por lead (defensivo para flicker / corrida de refetch + DnD).
+ * Prioridade: coluna mais avançada no funil.
+ */
+function resolveLeadColumnDuplicates(
+  columns: Record<ColumnId, string[]>,
+): Record<ColumnId, string[]> {
+  const canonical = new Map<string, ColumnId>()
+  for (const col of [...COLUMN_ORDER].reverse()) {
+    for (const id of orderedUniqueStrings(columns[col])) {
+      if (!canonical.has(id)) canonical.set(id, col)
+    }
+  }
+  const next = emptyColumns()
+  for (const col of COLUMN_ORDER) {
+    next[col] = orderedUniqueStrings(columns[col]).filter(
+      (id) => canonical.get(id) === col,
+    )
+  }
+  return next
+}
+
 function groupRowsIntoBoard(rows: LeadRow[]): {
   columns: Record<ColumnId, string[]>
   leadsMap: Record<string, Lead>
@@ -200,7 +247,8 @@ function groupRowsIntoBoard(rows: LeadRow[]): {
   const leadsMap: Record<string, Lead> = {}
   const sortTs: Record<string, number> = {}
 
-  for (const row of rows) {
+  const uniqRows = dedupeLeadRowsPreferNewest(rows)
+  for (const row of uniqRows) {
     if (!row.id) continue
     const lead = rowToLead(row)
     const col = statusToColumnId(row.status)
@@ -210,6 +258,7 @@ function groupRowsIntoBoard(rows: LeadRow[]): {
   }
 
   for (const col of COLUMN_ORDER) {
+    columns[col] = orderedUniqueStrings(columns[col])
     columns[col].sort((idA, idB) => {
       const ta = sortTs[idA] ?? 0
       const tb = sortTs[idB] ?? 0
@@ -218,7 +267,9 @@ function groupRowsIntoBoard(rows: LeadRow[]): {
     })
   }
 
-  return { columns, leadsMap }
+  const sanitized = resolveLeadColumnDuplicates(columns)
+
+  return { columns: sanitized, leadsMap }
 }
 
 function findContainer(
@@ -490,6 +541,10 @@ export function CrmKanbanBoard() {
   const columnsRef = useRef(columns)
   const dragStartRef = useRef<DragStartInfo | null>(null)
   const columnsSnapshotRef = useRef<Record<ColumnId, string[]> | null>(null)
+  /** Respostas antigas da RPC são ignoradas quando um refetch mais novo já iniciou ou o componente desmontou. */
+  const fetchGenerationRef = useRef(0)
+  /** Agrupa rajadas INSERT/UPDATE (leads + chat_messages) em um único refetch estável ao board. */
+  const realtimeBoardDebounceRef = useRef<number | null>(null)
 
   const sensors = useSensors(
     useSensor(PointerSensor, { activationConstraint: { distance: 8 } }),
@@ -505,6 +560,9 @@ export function CrmKanbanBoard() {
   const fetchLeads = useCallback(
     async (options?: { background?: boolean }) => {
       const background = options?.background === true
+      const gen = ++fetchGenerationRef.current
+      const isCurrent = () => gen === fetchGenerationRef.current
+
       if (!background) {
         setLoading(true)
       }
@@ -518,7 +576,7 @@ export function CrmKanbanBoard() {
       } = await supabase.auth.getUser()
 
       if (userError || !user) {
-        if (!background) {
+        if (isCurrent() && !background) {
           setLoadError('Sessão inválida. Entre novamente para carregar o CRM.')
           setLoading(false)
         }
@@ -531,12 +589,14 @@ export function CrmKanbanBoard() {
       })
 
       if (error) {
-        if (!background) {
+        if (isCurrent() && !background) {
           setLoadError('Não foi possível carregar os leads. Tente de novo.')
           setLoading(false)
         }
         return
       }
+
+      if (!isCurrent()) return
 
       const rows = (data ?? []) as LeadRow[]
       const { columns: nextCols, leadsMap: nextLeads } = groupRowsIntoBoard(rows)
@@ -549,6 +609,16 @@ export function CrmKanbanBoard() {
     },
     [imp.targetUserId],
   )
+
+  const scheduleRealtimeBoardRefresh = useCallback(() => {
+    if (realtimeBoardDebounceRef.current != null) {
+      window.clearTimeout(realtimeBoardDebounceRef.current)
+    }
+    realtimeBoardDebounceRef.current = window.setTimeout(() => {
+      realtimeBoardDebounceRef.current = null
+      void fetchLeads({ background: true })
+    }, 300)
+  }, [fetchLeads])
 
   const loadColumnTitles = useCallback(async () => {
     const {
@@ -649,7 +719,7 @@ export function CrmKanbanBoard() {
             filter: `user_id=eq.${effectiveUserId}`,
           },
           () => {
-            void fetchLeads({ background: true })
+            scheduleRealtimeBoardRefresh()
           },
         )
         .on(
@@ -660,7 +730,7 @@ export function CrmKanbanBoard() {
             table: 'chat_messages',
           },
           () => {
-            void fetchLeads({ background: true })
+            scheduleRealtimeBoardRefresh()
           },
         )
         .subscribe()
@@ -670,11 +740,16 @@ export function CrmKanbanBoard() {
 
     return () => {
       cancelled = true
+      if (realtimeBoardDebounceRef.current != null) {
+        window.clearTimeout(realtimeBoardDebounceRef.current)
+        realtimeBoardDebounceRef.current = null
+      }
       if (channel) {
         void supabase.removeChannel(channel)
       }
+      fetchGenerationRef.current += 1
     }
-  }, [fetchLeads, imp.targetUserId])
+  }, [scheduleRealtimeBoardRefresh, imp.targetUserId])
 
   const handleDragEnd = useCallback(
     (event: DragEndEvent) => {
