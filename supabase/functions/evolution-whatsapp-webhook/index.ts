@@ -11,6 +11,7 @@ import { processZapVoiceInbound } from './zapvoice-inbound.ts'
 import {
   extractQuotedTextFromMessage,
   fetchBase64FromEvolutionApi,
+  fetchEvolutionProfilePictureUrl,
   formatReplyWithQuote,
   transcribeAudioGemini,
 } from './inbound-enrichment.ts'
@@ -47,7 +48,12 @@ type UpsertItem = {
   pushName: string | null
 }
 
-type LeadRow = { id: string; phone: string | null; name: string | null }
+type LeadRow = {
+  id: string
+  phone: string | null
+  name: string | null
+  profile_picture_url?: string | null
+}
 type LeadAiRow = { id: string; ai_enabled: boolean | null }
 type LeadFunnelLockRow = { id: string; funnel_locked_until: string | null }
 
@@ -208,6 +214,7 @@ async function sendEvolutionText(params: {
 type LeadIndex = {
   byFull: Map<string, string>
   byTail: Map<string, string>
+  byGroupJid: Map<string, string>
   rows: LeadRow[]
 }
 
@@ -592,11 +599,78 @@ function collectUpsertItems(data: unknown): UpsertItem[] {
   return []
 }
 
+function normalizeGroupJid(jid: string): string {
+  return jid.trim()
+}
+
+/** JID esperado pela Evolution para `fetchProfilePictureUrl`. */
+function jidForProfilePictureRequest(remoteJid: string, phoneDigits: string): string {
+  const raw = normalizeGroupJid(remoteJid)
+  if (raw.includes('@g.us')) return raw
+  const core = phoneDigits.replace(/\D/g, '')
+  if (!core || core.includes('@')) return raw
+  return `${core}@s.whatsapp.net`
+}
+
+function scheduleLeadProfilePictureIfEmpty(
+  supabase: SupabaseClient,
+  evolutionUrl: string,
+  evolutionApiKey: string,
+  instanceName: string,
+  userId: string,
+  leadId: string,
+  requestJid: string,
+): void {
+  const base = evolutionUrl.trim()
+  const apiKey = evolutionApiKey.trim()
+  if (!base || !apiKey) return
+
+  const run = async () => {
+    const { data, error } = await supabase
+      .from('leads')
+      .select('id, profile_picture_url')
+      .eq('id', leadId)
+      .eq('user_id', userId)
+      .maybeSingle()
+    if (error || !data) return
+    const existing = stringValue((data as { profile_picture_url?: unknown }).profile_picture_url)
+    if (existing) return
+
+    const urlPic = await fetchEvolutionProfilePictureUrl(
+      base,
+      apiKey,
+      instanceName,
+      requestJid,
+    )
+    if (!urlPic) return
+
+    await supabase
+      .from('leads')
+      .update({
+        profile_picture_url: urlPic.slice(0, 4000),
+        updated_at: new Date().toISOString(),
+      })
+      .eq('id', leadId)
+      .eq('user_id', userId)
+      .is('profile_picture_url', null)
+  }
+
+  tryScheduleBackground(run())
+}
+
 function buildLeadIndex(rows: LeadRow[]): LeadIndex {
   const byFull = new Map<string, string>()
   const byTail = new Map<string, string>()
+  const byGroupJid = new Map<string, string>()
 
   for (const r of rows) {
+    const rawPhone = (r.phone ?? '').trim()
+    if (rawPhone.includes('@g.us')) {
+      const gj = normalizeGroupJid(rawPhone)
+      if (gj && !byGroupJid.has(gj)) byGroupJid.set(gj, r.id)
+      continue
+    }
+
     const full = toEvolutionDigits(r.phone ?? null)
     if (!full || full.includes('@')) continue
 
@@ -613,10 +687,13 @@ function buildLeadIndex(rows: LeadRow[]): LeadIndex {
     if (rawTail && !byTail.has(rawTail)) byTail.set(rawTail, r.id)
   }
 
-  return { byFull, byTail, rows }
+  return { byFull, byTail, byGroupJid, rows }
 }
 
 function findLeadId(idx: LeadIndex, fullDigits: string): string | null {
+  const gid = normalizeGroupJid(fullDigits)
+  if (gid.includes('@g.us')) return idx.byGroupJid.get(gid) ?? null
+
   const cleanInbound = fullDigits.replace(/\D/g, '')
   for (const k of canonicalBrazilPhoneKeys(cleanInbound)) {
     const hitFull = idx.byFull.get(k)
@@ -658,6 +735,8 @@ async function resolveCanonicalLeadIdForPhone(
   inboundDigits: string,
   allRows: LeadRow[],
 ): Promise<string> {
+  if (normalizeGroupJid(inboundDigits).includes('@g.us')) return candidateId
+
   const dupes = allRows.filter((r) => phonesMatch(inboundDigits, r.phone))
   if (dupes.length <= 1) return candidateId
 
@@ -686,47 +765,57 @@ async function ensureLeadId(
   fullDigits: string,
   pushName: string | null,
 ): Promise<{ id: string | null; created: boolean; error: string | null }> {
-  const existing = findLeadId(idx, fullDigits)
+  const jidKey = normalizeGroupJid(fullDigits)
+  const isGroup = jidKey.includes('@g.us')
+
+  const existing = findLeadId(idx, isGroup ? jidKey : fullDigits)
   if (existing) return { id: existing, created: false, error: null }
 
-  const displayName =
-    (pushName && pushName.slice(0, 80)) ||
-    `Novo Lead ${prettifyPhone(fullDigits)}`
+  const displayName = isGroup
+    ? ((pushName && pushName.slice(0, 120)) || 'Grupo WhatsApp').trim() || 'Grupo WhatsApp'
+    : (pushName && pushName.slice(0, 80)) ||
+      `Novo Lead ${prettifyPhone(fullDigits)}`
 
   const { data, error } = await supabase
     .from('leads')
     .insert({
       user_id: userId,
       name: displayName,
-      phone: fullDigits,
+      phone: isGroup ? jidKey : fullDigits,
       status: 'novo',
       source: 'inbound_whatsapp',
+      is_group: isGroup,
     })
-    .select('id, phone, name')
+    .select('id, phone, name, profile_picture_url')
     .single()
 
   if (!error && data) {
     const row = data as LeadRow
     idx.rows.push(row)
-    for (const k of canonicalBrazilPhoneKeys(fullDigits)) idx.byFull.set(k, row.id)
-    const tset = tailVariantsForBrazilFull(fullDigits)
-    const nf = nationalTail(fullDigits)
-    if (nf) tset.add(nf)
-    for (const tail of tset) idx.byTail.set(tail, row.id)
+    if (isGroup) {
+      idx.byGroupJid.set(jidKey, row.id)
+    } else {
+      for (const k of canonicalBrazilPhoneKeys(fullDigits)) idx.byFull.set(k, row.id)
+      const tset = tailVariantsForBrazilFull(fullDigits)
+      const nf = nationalTail(fullDigits)
+      if (nf) tset.add(nf)
+      for (const tail of tset) idx.byTail.set(tail, row.id)
+    }
     return { id: row.id, created: true, error: null }
   }
 
   const retry = await supabase
     .from('leads')
-    .select('id, phone, name')
+    .select('id, phone, name, profile_picture_url')
     .eq('user_id', userId)
 
   if (!retry.error && Array.isArray(retry.data)) {
     const refreshed = buildLeadIndex(retry.data as LeadRow[])
     idx.byFull = refreshed.byFull
     idx.byTail = refreshed.byTail
+    idx.byGroupJid = refreshed.byGroupJid
     idx.rows = refreshed.rows
-    const again = findLeadId(idx, fullDigits)
+    const again = findLeadId(idx, isGroup ? jidKey : fullDigits)
     if (again) return { id: again, created: false, error: null }
   }
 
@@ -818,7 +907,7 @@ serve(async (req) => {
 
   const { data: allLeads, error: leErr } = await supabase
     .from('leads')
-    .select('id, phone, name')
+    .select('id, phone, name, profile_picture_url')
     .eq('user_id', userId)
 
   if (leErr) {
@@ -844,11 +933,6 @@ serve(async (req) => {
   const errors: string[] = []
 
   for (const item of items) {
-    if (item.remoteJid.includes('@g.us')) {
-      skipped.push(`group:${item.msgId}`)
-      continue
-    }
-
     if (item.fromMe) {
       skipped.push(`fromMe:${item.msgId}`)
       continue
@@ -874,7 +958,11 @@ serve(async (req) => {
     }
 
     const phoneDigits = toEvolutionDigits(item.remoteJid)
-    if (!phoneDigits || phoneDigits.includes('@')) {
+    const isGroupInbound = Boolean(phoneDigits?.includes('@g.us'))
+    if (
+      !phoneDigits ||
+      (phoneDigits.includes('@') && !isGroupInbound)
+    ) {
       skipped.push(`badJid:${item.remoteJid}`)
       continue
     }
@@ -908,11 +996,15 @@ serve(async (req) => {
       mergedForDupResolve,
     )
     if (crmLeadId !== ensured.id) {
-      for (const k of canonicalBrazilPhoneKeys(phoneDigits)) index.byFull.set(k, crmLeadId)
-      const ts = tailVariantsForBrazilFull(phoneDigits)
-      const t0 = nationalTail(phoneDigits)
-      if (t0) ts.add(t0)
-      for (const tailK of ts) index.byTail.set(tailK, crmLeadId)
+      if (isGroupInbound) {
+        index.byGroupJid.set(normalizeGroupJid(phoneDigits), crmLeadId)
+      } else {
+        for (const k of canonicalBrazilPhoneKeys(phoneDigits)) index.byFull.set(k, crmLeadId)
+        const ts = tailVariantsForBrazilFull(phoneDigits)
+        const t0 = nationalTail(phoneDigits)
+        if (t0) ts.add(t0)
+        for (const tailK of ts) index.byTail.set(tailK, crmLeadId)
+      }
       console.log(
         '[evolution-whatsapp-webhook] mesmo telefone em vários contatos — roteando para o lead com funil ativo',
         { anterior: ensured.id, canonico: crmLeadId },
@@ -1017,6 +1109,7 @@ serve(async (req) => {
     // - texto não vazio e não placeholder
     const zvText = (replyText || '').trim()
     const canTryZapVoice =
+      !isGroupInbound &&
       contentType === 'text' &&
       zvText.length > 0 &&
       !/^\[(imagem|áudio|vídeo|documento|mensagem)\]$/i.test(zvText)
@@ -1061,6 +1154,23 @@ serve(async (req) => {
     }
     saved += 1
 
+    const touchNow = new Date().toISOString()
+    await supabase
+      .from('leads')
+      .update({ last_message_at: touchNow })
+      .eq('id', crmLeadId)
+      .eq('user_id', userId)
+
+    scheduleLeadProfilePictureIfEmpty(
+      supabase,
+      evolutionUrl,
+      evolutionApiKey,
+      instance,
+      userId,
+      crmLeadId,
+      jidForProfilePictureRequest(item.remoteJid, phoneDigits),
+    )
+
     if (zvSuppress) {
       if (zvReason && zvReason !== 'sem_match') {
         console.log('[ZapVoice inbound] handled', {
@@ -1088,7 +1198,7 @@ serve(async (req) => {
         (['image', 'document'].includes(contentType) &&
           !/^\[imagem\]$/i.test((replyText || '').trim())))
 
-    if (hasAiMaterial) {
+    if (hasAiMaterial && !isGroupInbound) {
       if (zvSuppress) {
         skipped.push(`ai_suppressed:${item.msgId}`)
         continue

@@ -106,6 +106,60 @@ function pickKeyFromEnvelope(envelope: Record<string, unknown>): Record<
   return nestedRecord(envelope, 'key') ?? null
 }
 
+/**
+ * Busca URL pública da foto de perfil (contato ou grupo).
+ * Tentativa em rotas compatíveis v1/v2 da Evolution API.
+ */
+export async function fetchEvolutionProfilePictureUrl(
+  evolutionBaseUrl: string,
+  evolutionApiKey: string,
+  instanceName: string,
+  numberOrJid: string,
+): Promise<string | null> {
+  const base = evolutionBaseUrl.replace(/\/+$/, '')
+  const key = evolutionApiKey.trim()
+  if (!base || !key || !numberOrJid.trim()) return null
+
+  const paths = [
+    `${base}/chat/fetchProfilePictureUrl/${encodeURIComponent(instanceName)}`,
+    `${base}/v1/chat/fetchProfilePictureUrl/${encodeURIComponent(instanceName)}`,
+  ]
+
+  for (const url of paths) {
+    try {
+      const res = await fetch(url, {
+        method: 'POST',
+        headers: {
+          apikey: key,
+          Accept: 'application/json',
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ number: numberOrJid.trim() }),
+      })
+      const raw = await res.text()
+      let data: Record<string, unknown> | null = null
+      if (raw) {
+        try {
+          data = JSON.parse(raw) as Record<string, unknown>
+        } catch {
+          data = null
+        }
+      }
+      if (!res.ok || !data) continue
+      const pic =
+        typeof data.profilePictureUrl === 'string'
+          ? data.profilePictureUrl
+          : typeof data.profile_picture_url === 'string'
+            ? data.profile_picture_url
+            : null
+      if (pic && /^https?:\/\//i.test(pic)) return pic
+    } catch {
+      /* próximo endpoint */
+    }
+  }
+  return null
+}
+
 export async function fetchBase64FromEvolutionApi(
   baseUrl: string,
   apiKey: string,

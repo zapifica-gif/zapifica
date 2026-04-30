@@ -36,6 +36,7 @@ type ScheduledChatMessageRow = {
   scheduled_at: string | null
   status: string | null
   created_at: string
+  recurrence?: string | null
 }
 
 type ChatWindowProps = {
@@ -238,6 +239,9 @@ export function ChatWindow({ open, onClose, lead }: ChatWindowProps) {
   const [scheduleModalOpen, setScheduleModalOpen] = useState(false)
   const [scheduleDate, setScheduleDate] = useState('')
   const [scheduleTime, setScheduleTime] = useState('')
+  const [scheduleRecurrence, setScheduleRecurrence] = useState<
+    'none' | 'daily' | 'weekly' | 'monthly' | 'yearly'
+  >('none')
   const [scheduleAttachment, setScheduleAttachment] = useState<File | null>(null)
   const [submittingSchedule, setSubmittingSchedule] = useState(false)
   const [scheduleError, setScheduleError] = useState<string | null>(null)
@@ -754,6 +758,7 @@ export function ChatWindow({ open, onClose, lead }: ChatWindowProps) {
     setScheduleDate(`${yyyy}-${mm}-${dd}`)
     setScheduleTime(`${hh}:${mi}`)
     setScheduleAttachment(null)
+    setScheduleRecurrence('none')
     setScheduleModalOpen(true)
   }
 
@@ -761,6 +766,7 @@ export function ChatWindow({ open, onClose, lead }: ChatWindowProps) {
     setScheduleModalOpen(false)
     setScheduleError(null)
     setScheduleAttachment(null)
+    setScheduleRecurrence('none')
   }
 
   function classificarAnexo(file: File): ScheduledChatMessageRow['content_type'] {
@@ -869,6 +875,7 @@ export function ChatWindow({ open, onClose, lead }: ChatWindowProps) {
           scheduled_at: scheduledAtUtc,
           status: 'pending',
           recipient_phone: lead.phone || null,
+          recurrence: scheduleRecurrence,
         })
         .select('id')
 
@@ -897,7 +904,7 @@ export function ChatWindow({ open, onClose, lead }: ChatWindowProps) {
     const { data, error } = await supabase
       .from('scheduled_messages')
       .select(
-        'id, lead_id, content_type, message_body, media_url, scheduled_at, status, created_at',
+        'id, lead_id, content_type, message_body, media_url, scheduled_at, status, recurrence, created_at',
       )
       .eq('lead_id', leadId)
       .order('scheduled_at', { ascending: true })
@@ -1218,7 +1225,8 @@ export function ChatWindow({ open, onClose, lead }: ChatWindowProps) {
                   Agendar envio para {lead?.name ?? 'este contato'}
                 </h3>
                 <p className="text-xs text-zinc-500">
-                  A mensagem fica na fila e o robô dispara no horário escolhido.
+                  A mensagem fica na fila e o robô dispara no horário escolhido. Opcionalmente pode
+                  repetir (sem afetar fluxos de campanha Zap Voice).
                 </p>
               </div>
               <button
@@ -1256,6 +1264,29 @@ export function ChatWindow({ open, onClose, lead }: ChatWindowProps) {
                   />
                 </label>
               </div>
+
+              <label className="block">
+                <span className="mb-1 block text-xs font-semibold text-zinc-700">Recorrência</span>
+                <select
+                  value={scheduleRecurrence}
+                  onChange={(e) =>
+                    setScheduleRecurrence(
+                      e.target.value as 'none' | 'daily' | 'weekly' | 'monthly' | 'yearly',
+                    )
+                  }
+                  className="w-full rounded-xl border border-zinc-200 bg-zinc-50 px-3 py-2 text-sm outline-none transition focus:border-brand-400 focus:bg-white focus:ring-2 focus:ring-brand-600/20"
+                >
+                  <option value="none">Não repetir</option>
+                  <option value="daily">Diário</option>
+                  <option value="weekly">Semanal</option>
+                  <option value="monthly">Mensal</option>
+                  <option value="yearly">Anual</option>
+                </select>
+                <p className="mt-1 text-[11px] text-zinc-500">
+                  Depois de cada envio bem-sucedido, a mesma mensagem volta para a fila na próxima
+                  data (só agendamentos deste chat, não etapas de campanha).
+                </p>
+              </label>
 
               <div className="rounded-xl border border-zinc-200 bg-zinc-50 p-3">
                 <p className="mb-1 text-xs font-semibold text-zinc-700">Conteúdo</p>
@@ -1425,6 +1456,17 @@ export function ChatWindow({ open, onClose, lead }: ChatWindowProps) {
                           : m.status === 'processing'
                             ? 'bg-amber-50 text-amber-700 ring-amber-200'
                             : 'bg-brand-50 text-brand-700 ring-brand-200'
+                  const recRaw = (m.recurrence ?? 'none').trim().toLowerCase()
+                  const recurrenceLabel =
+                    recRaw === 'daily'
+                      ? 'Diário'
+                      : recRaw === 'weekly'
+                        ? 'Semanal'
+                        : recRaw === 'monthly'
+                          ? 'Mensal'
+                          : recRaw === 'yearly'
+                            ? 'Anual'
+                            : null
                   return (
                     <li
                       key={m.id}
@@ -1440,6 +1482,11 @@ export function ChatWindow({ open, onClose, lead }: ChatWindowProps) {
                           >
                             {statusLabel}
                           </span>
+                          {recurrenceLabel ? (
+                            <span className="inline-flex rounded-full bg-violet-50 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-violet-800 ring-1 ring-violet-200">
+                              Recorrente · {recurrenceLabel}
+                            </span>
+                          ) : null}
                         </div>
                         <p className="mt-1 line-clamp-2 whitespace-pre-wrap break-words text-sm text-zinc-700">
                           {resumo}

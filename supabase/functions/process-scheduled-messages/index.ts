@@ -32,6 +32,60 @@ type ScheduledRow = {
   zv_funnel_step_id?: string | null
   /** Espelho de zv_funnels.step_order ao enfileirar (migration 20260430180000). */
   zv_funnel_step_order?: number | null
+  recurrence?: string | null
+}
+
+type RecurrenceRule = 'none' | 'daily' | 'weekly' | 'monthly' | 'yearly'
+
+function normalizeRecurrence(raw: string | null | undefined): RecurrenceRule {
+  const s = (raw ?? 'none').trim().toLowerCase()
+  if (s === 'daily' || s === 'weekly' || s === 'monthly' || s === 'yearly') return s
+  return 'none'
+}
+
+/** Próximo disparo em UTC preservando horário do agendamento. */
+function computeNextScheduledAtUtc(
+  fromIso: string | null | undefined,
+  rule: RecurrenceRule,
+): string | null {
+  if (rule === 'none') return null
+  const base = fromIso ? new Date(fromIso) : new Date()
+  if (Number.isNaN(base.getTime())) return null
+
+  const y = base.getUTCFullYear()
+  const mo = base.getUTCMonth()
+  const day = base.getUTCDate()
+  const h = base.getUTCHours()
+  const mi = base.getUTCMinutes()
+  const s = base.getUTCSeconds()
+  const ms = base.getUTCMilliseconds()
+
+  switch (rule) {
+    case 'daily':
+      return new Date(Date.UTC(y, mo, day + 1, h, mi, s, ms)).toISOString()
+    case 'weekly':
+      return new Date(Date.UTC(y, mo, day + 7, h, mi, s, ms)).toISOString()
+    case 'monthly': {
+      const nm = mo + 1
+      const ny = y + Math.floor(nm / 12)
+      const nmod = ((nm % 12) + 12) % 12
+      const lastDay = new Date(Date.UTC(ny, nmod + 1, 0)).getUTCDate()
+      const nd = Math.min(day, lastDay)
+      return new Date(Date.UTC(ny, nmod, nd, h, mi, s, ms)).toISOString()
+    }
+    case 'yearly':
+      return new Date(Date.UTC(y + 1, mo, day, h, mi, s, ms)).toISOString()
+    default:
+      return null
+  }
+}
+
+/** Recorrência só para agendamentos do chat CRM (sem Zap Voice). */
+function shouldRescheduleChatRecurrence(msg: ScheduledRow): boolean {
+  if (normalizeRecurrence(msg.recurrence) === 'none') return false
+  if (msg.zv_funnel_step_id) return false
+  if (msg.zv_campaign_id) return false
+  return true
 }
 
 type ChatContentType = 'text' | 'audio' | 'image' | 'document'
@@ -961,17 +1015,37 @@ serve(async () => {
       }
 
       if (!evolutionSendError) {
+        const rec = normalizeRecurrence(msg.recurrence)
+        const bumpRecurring = shouldRescheduleChatRecurrence(msg)
+        const nextAt = bumpRecurring
+          ? computeNextScheduledAtUtc(msg.scheduled_at ?? undefined, rec)
+          : null
+        const useRecurring =
+          bumpRecurring &&
+          nextAt &&
+          new Date(nextAt).getTime() > Date.now()
+
         const { error: upErr } = await supabase
           .from('scheduled_messages')
-          .update({
-            status: 'sent',
-            evolution_message_id: lastEvolutionId,
-            last_error: null,
-            updated_at: new Date().toISOString(),
-          })
+          .update(
+            useRecurring
+              ? {
+                  status: 'pending',
+                  scheduled_at: nextAt,
+                  evolution_message_id: lastEvolutionId,
+                  last_error: null,
+                  updated_at: new Date().toISOString(),
+                }
+              : {
+                  status: 'sent',
+                  evolution_message_id: lastEvolutionId,
+                  last_error: null,
+                  updated_at: new Date().toISOString(),
+                },
+          )
           .eq('id', msg.id)
         if (upErr) {
-          throw new Error(`Supabase: falha ao marcar sent: ${upErr.message}`)
+          throw new Error(`Supabase: falha ao atualizar agendamento: ${upErr.message}`)
         }
 
         if (msg.lead_id) {
@@ -995,6 +1069,12 @@ serve(async () => {
                 updated_at: new Date().toISOString(),
               })
               .eq('id', msg.id)
+          } else {
+            await supabase
+              .from('leads')
+              .update({ last_message_at: new Date().toISOString() })
+              .eq('id', msg.lead_id)
+              .eq('user_id', msg.user_id)
           }
         }
 

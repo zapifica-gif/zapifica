@@ -29,7 +29,7 @@ import {
   verticalListSortingStrategy,
 } from '@dnd-kit/sortable'
 import { CSS } from '@dnd-kit/utilities'
-import { GripVertical, Phone } from 'lucide-react'
+import { GripVertical, Phone, Users } from 'lucide-react'
 import { toEvolutionDigits } from '../../lib/phoneBrazil'
 import { supabase } from '../../lib/supabase'
 import { ChatWindow } from './ChatWindow'
@@ -46,6 +46,9 @@ export type Lead = {
   name: string
   phone: string
   temperature: LeadTemperature
+  profilePictureUrl: string | null
+  isGroup: boolean
+  lastActivityIso: string | null
 }
 
 type LeadRow = {
@@ -53,6 +56,10 @@ type LeadRow = {
   name: string
   phone: string
   status: string
+  profile_picture_url: string | null
+  is_group: boolean
+  last_message_at: string | null
+  updated_at: string
 }
 
 const COLUMN_ORDER: ColumnId[] = [
@@ -92,7 +99,67 @@ function rowToLead(row: LeadRow): Lead {
     name: row.name?.trim() || 'Sem nome',
     phone: row.phone ?? '',
     temperature: 'frio',
+    profilePictureUrl: row.profile_picture_url ?? null,
+    isGroup: Boolean(row.is_group),
+    lastActivityIso: row.last_message_at ?? row.updated_at ?? null,
   }
+}
+
+function avatarHue(seed: string): number {
+  let h = 0
+  for (let i = 0; i < seed.length; i++) h = seed.charCodeAt(i) + ((h << 5) - h)
+  return Math.abs(h) % 360
+}
+
+/** Texto curto tipo “há 2 min”, “há 3 dias” (baseado na última atividade registrada). */
+function tempoRelativoCurto(iso: string | null): string | null {
+  if (!iso) return null
+  const t = new Date(iso).getTime()
+  if (Number.isNaN(t)) return null
+  const diffMs = Math.max(0, Date.now() - t)
+  const sec = Math.floor(diffMs / 1000)
+  if (sec < 45) return 'agora'
+  const min = Math.floor(sec / 60)
+  if (min < 60) return min <= 1 ? 'há 1 min' : `há ${min} min`
+  const horas = Math.floor(min / 60)
+  if (horas < 24) return horas === 1 ? 'há 1 h' : `há ${horas} h`
+  const dias = Math.floor(horas / 24)
+  if (dias < 7) return dias === 1 ? 'há 1 dia' : `há ${dias} dias`
+  const semanas = Math.floor(dias / 7)
+  if (dias < 60) return semanas <= 1 ? 'há 1 semana' : `há ${semanas} semanas`
+  const meses = Math.floor(dias / 30)
+  if (dias < 365) return meses <= 1 ? 'há 1 mês' : `há ${meses} meses`
+  const anos = Math.floor(dias / 365)
+  return anos === 1 ? 'há 1 ano' : `há ${anos} anos`
+}
+
+function LeadKanbanAvatar({ lead }: { lead: Lead }) {
+  const [imgBroken, setImgBroken] = useState(false)
+  const alt = `${lead.name} — avatar`
+  const initial =
+    ((lead.name || '?').trim().charAt(0) || '?').toUpperCase()
+  const hue = avatarHue(lead.name || lead.id)
+
+  if (lead.profilePictureUrl && !imgBroken) {
+    return (
+      <img
+        src={lead.profilePictureUrl}
+        alt={alt}
+        className="h-10 w-10 shrink-0 rounded-full bg-zinc-100 object-cover shadow-inner ring-1 ring-zinc-200/90"
+        onError={() => setImgBroken(true)}
+      />
+    )
+  }
+
+  return (
+    <div
+      className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full text-sm font-semibold text-white shadow-inner ring-1 ring-black/10"
+      style={{ backgroundColor: `hsl(${hue} 54% 46%)` }}
+      aria-hidden
+    >
+      {initial}
+    </div>
+  )
 }
 
 /** Converte `status` do PostgREST para a coluna do board (inclui legado `atendimento`). */
@@ -179,28 +246,48 @@ function LeadCardFace({
   className?: string
 }) {
   const temp = tempStyles[lead.temperature]
+  const tempo = tempoRelativoCurto(lead.lastActivityIso)
   return (
     <article
       className={`rounded-xl border border-zinc-200/90 bg-white p-4 shadow-sm ring-1 ring-zinc-100/80 transition hover:border-zinc-300 hover:shadow-md ${className}`}
     >
-      <div className="min-w-0">
-        <div className="flex flex-wrap items-center gap-2">
-          <h3 className="text-sm font-semibold tracking-tight text-zinc-900">
-            {lead.name}
-          </h3>
-          <span
-            className={`inline-flex rounded-full px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide ${temp.className}`}
-          >
-            {temp.label}
-          </span>
+      <div className="flex gap-3 min-w-0">
+        <LeadKanbanAvatar lead={lead} />
+        <div className="min-w-0 flex-1">
+          <div className="flex flex-wrap items-center gap-2">
+            <h3 className="truncate text-sm font-semibold tracking-tight text-zinc-900">
+              {lead.name}
+            </h3>
+            {lead.isGroup ? (
+              <span
+                className="inline-flex shrink-0 items-center gap-0.5 rounded-full bg-indigo-50 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-indigo-800 ring-1 ring-indigo-100"
+                title="Conversa em grupo WhatsApp"
+              >
+                <Users className="h-3 w-3" aria-hidden />
+                Grupo
+              </span>
+            ) : null}
+            <span
+              className={`inline-flex rounded-full px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide ${temp.className}`}
+            >
+              {temp.label}
+            </span>
+          </div>
+          <p className="mt-1.5 flex items-center gap-1.5 text-xs text-zinc-500">
+            <Phone className="h-3.5 w-3.5 shrink-0 text-emerald-500" aria-hidden />
+            <span className="truncate tabular-nums text-zinc-600">{lead.phone}</span>
+            <span className="text-[10px] font-medium uppercase tracking-wide text-zinc-400">
+              WhatsApp
+            </span>
+          </p>
+          {tempo ? (
+            <p className="mt-2 text-[11px] font-medium tracking-tight text-zinc-400">
+              Última mensagem · {tempo}
+            </p>
+          ) : (
+            <p className="mt-2 text-[11px] text-zinc-300">Sem registro de atividade recente</p>
+          )}
         </div>
-        <p className="mt-2 flex items-center gap-1.5 text-xs text-zinc-500">
-          <Phone className="h-3.5 w-3.5 shrink-0 text-emerald-500" aria-hidden />
-          <span className="truncate tabular-nums text-zinc-600">{lead.phone}</span>
-          <span className="text-[10px] font-medium uppercase tracking-wide text-zinc-400">
-            WhatsApp
-          </span>
-        </p>
       </div>
     </article>
   )
@@ -601,7 +688,9 @@ export function CrmKanbanBoard() {
         user_id: effectiveUserId,
         crm_show_without_chat: true,
       })
-      .select('id, name, phone, status')
+      .select(
+        'id, name, phone, status, profile_picture_url, is_group, last_message_at, updated_at',
+      )
       .single()
 
     if (error || !data) {

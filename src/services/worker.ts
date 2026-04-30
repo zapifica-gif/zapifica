@@ -61,6 +61,7 @@ type ScheduledRow = {
   message_body: string | null
   segment_lead_ids: string[] | null
   recipient_phone?: string | null
+  scheduled_at?: string | null
   min_delay_seconds?: number | null
   max_delay_seconds?: number | null
   zv_campaign_id?: string | null
@@ -69,6 +70,56 @@ type ScheduledRow = {
   zv_funnel_step_order?: number | null
   evolution_instance_name?: string | null
   is_active?: boolean
+  recurrence?: string | null
+}
+
+type RecurrenceRule = 'none' | 'daily' | 'weekly' | 'monthly' | 'yearly'
+
+function normalizeRecurrence(raw: string | null | undefined): RecurrenceRule {
+  const s = (raw ?? 'none').trim().toLowerCase()
+  if (s === 'daily' || s === 'weekly' || s === 'monthly' || s === 'yearly') return s
+  return 'none'
+}
+
+function computeNextScheduledAtUtc(
+  fromIso: string | null | undefined,
+  rule: RecurrenceRule,
+): string | null {
+  if (rule === 'none') return null
+  const base = fromIso ? new Date(fromIso) : new Date()
+  if (Number.isNaN(base.getTime())) return null
+  const y = base.getUTCFullYear()
+  const mo = base.getUTCMonth()
+  const day = base.getUTCDate()
+  const h = base.getUTCHours()
+  const mi = base.getUTCMinutes()
+  const sec = base.getUTCSeconds()
+  const ms = base.getUTCMilliseconds()
+  switch (rule) {
+    case 'daily':
+      return new Date(Date.UTC(y, mo, day + 1, h, mi, sec, ms)).toISOString()
+    case 'weekly':
+      return new Date(Date.UTC(y, mo, day + 7, h, mi, sec, ms)).toISOString()
+    case 'monthly': {
+      const nm = mo + 1
+      const ny = y + Math.floor(nm / 12)
+      const nmod = ((nm % 12) + 12) % 12
+      const lastDay = new Date(Date.UTC(ny, nmod + 1, 0)).getUTCDate()
+      const nd = Math.min(day, lastDay)
+      return new Date(Date.UTC(ny, nmod, nd, h, mi, sec, ms)).toISOString()
+    }
+    case 'yearly':
+      return new Date(Date.UTC(y + 1, mo, day, h, mi, sec, ms)).toISOString()
+    default:
+      return null
+  }
+}
+
+function shouldRescheduleChatRecurrence(msg: ScheduledRow): boolean {
+  if (normalizeRecurrence(msg.recurrence) === 'none') return false
+  if (msg.zv_funnel_step_id) return false
+  if (msg.zv_campaign_id) return false
+  return true
 }
 
 type UserSettingsRow = {
@@ -893,14 +944,32 @@ export async function checkAndSendScheduledMessages(
           const ids = oks
             .map((r) => r.messageId)
             .filter((x): x is string => Boolean(x))
+          const rec = normalizeRecurrence(row.recurrence)
+          const bump = shouldRescheduleChatRecurrence(row)
+          const nextAt = bump
+            ? computeNextScheduledAtUtc(row.scheduled_at ?? undefined, rec)
+            : null
+          const useRecurring =
+            bump && nextAt && new Date(nextAt).getTime() > Date.now()
+
           await supabase
             .from('scheduled_messages')
-            .update({
-              status: 'sent',
-              evolution_message_id: ids.length ? ids.join(',') : null,
-              last_error: null,
-              updated_at: new Date().toISOString(),
-            })
+            .update(
+              useRecurring
+                ? {
+                    status: 'pending',
+                    scheduled_at: nextAt,
+                    evolution_message_id: ids.length ? ids.join(',') : null,
+                    last_error: null,
+                    updated_at: new Date().toISOString(),
+                  }
+                : {
+                    status: 'sent',
+                    evolution_message_id: ids.length ? ids.join(',') : null,
+                    last_error: null,
+                    updated_at: new Date().toISOString(),
+                  },
+            )
             .eq('id', row.id)
 
           if (row.lead_id) {
@@ -924,6 +993,12 @@ export async function checkAndSendScheduledMessages(
                   updated_at: new Date().toISOString(),
                 })
                 .eq('id', row.id)
+            } else {
+              await supabase
+                .from('leads')
+                .update({ last_message_at: new Date().toISOString() })
+                .eq('id', row.lead_id)
+                .eq('user_id', row.user_id)
             }
           }
 
