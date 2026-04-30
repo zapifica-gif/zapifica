@@ -387,7 +387,7 @@ export function HomePage() {
             <Skeleton className="h-40 w-full" />
           ) : latestLeads.length === 0 ? (
             <p className="rounded-xl border border-dashed border-zinc-200 bg-zinc-50/60 px-4 py-10 text-center text-sm text-zinc-500">
-              Nenhum lead ainda. Comece pelo Extrator, CSV/Google Contacts ou Meta.
+              Nenhum lead ainda. Comece pelo Extrator, importação CSV na base ou Meta.
             </p>
           ) : (
             <table className="w-full min-w-[720px] border-collapse text-left text-sm">

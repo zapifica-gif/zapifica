@@ -19,15 +19,20 @@ import {
 import { supabase } from '../../lib/supabase'
 import {
   CSV_TEMPLATE,
+  buildPhoneToLeadIdMap,
+  findCargoColumn,
+  findCidadeColumn,
+  findEmailColumn,
+  findEmpresaColumn,
+  findEnderecoColumn,
+  findLeadIdForNormalizedPhone,
   findNameColumn,
   findPhoneColumn,
+  findTagColumn,
   parseSimpleCsv,
   phoneDigitsForLead,
+  allCanonicalPhoneKeys,
 } from '../../lib/csvImport'
-import {
-  fetchGoogleContacts,
-  getGoogleProviderToken,
-} from '../../lib/googleContactsImport'
 
 const SOURCE_DEFS: { id: string; label: string; className: string }[] = [
   { id: 'google_maps', label: 'Google Maps', className: 'bg-sky-50 text-sky-900 ring-sky-200' },
@@ -53,14 +58,13 @@ function badgeForSource(source: string | null | undefined) {
   return { label: s, className: 'bg-zinc-100 text-zinc-700 ring-zinc-200' }
 }
 
-function importTagLabel(prefix: 'manual' | 'google'): string {
+function importTagLabelCsvDefault(): string {
   const d = new Date().toLocaleDateString('pt-BR', {
     day: '2-digit',
     month: '2-digit',
     year: 'numeric',
   })
-  if (prefix === 'manual') return `Importação Manual - ${d}`
-  return `Google Contacts - ${d}`
+  return `Importação Manual - ${d}`
 }
 
 type LeadRow = {
@@ -150,7 +154,6 @@ export function ContactsBasePanel({ userId, onContactsChanged, onError, onSucces
   })
   const [csvOpen, setCsvOpen] = useState(false)
   const [csvBusy, setCsvBusy] = useState(false)
-  const [googleBusy, setGoogleBusy] = useState(false)
   const [importProgress, setImportProgress] = useState<string | null>(null)
 
   const [tagManagerOpen, setTagManagerOpen] = useState(false)
@@ -832,51 +835,186 @@ export function ContactsBasePanel({ userId, onContactsChanged, onError, onSucces
       const { headers, rows } = parseSimpleCsv(text)
       const pCol = findPhoneColumn(headers)
       const nCol = findNameColumn(headers)
+      const eCol = findEmailColumn(headers)
+      const cargoCol = findCargoColumn(headers)
+      const empCol = findEmpresaColumn(headers)
+      const cityCol = findCidadeColumn(headers)
+      const addrCol = findEnderecoColumn(headers)
+      const tagCol = findTagColumn(headers)
       if (!pCol) {
-        onError('Não encontrei a coluna de telefone. Use a planilha modelo (nome, telefone).')
+        onError(
+          'Não encontrei a coluna de telefone. Baixe o modelo (nome, telefone, email, cargo, empresa, cidade, endereco, tag).',
+        )
         return
       }
-      const tag = importTagLabel('manual')
-      const toInsert: {
+
+      type Accum = {
+        phone: string
+        name: string
+        email: string | null
+        job_title: string | null
+        company_name: string | null
+        city: string | null
+        address_line: string | null
+        tagCell: string
+      }
+
+      const defaultTag = importTagLabelCsvDefault()
+      const byPhone = new Map<string, Accum>()
+
+      for (const row of rows) {
+        const nameRaw = nCol ? row[nCol] ?? '' : ''
+        const name = (nameRaw || 'Contato').trim().slice(0, 200) || 'Contato'
+        const d = phoneDigitsForLead(row[pCol] ?? '')
+        if (!d) continue
+        const tagCellRaw = tagCol ? (row[tagCol] ?? '').trim() : ''
+        const acc: Accum = {
+          phone: d,
+          name,
+          email: eCol ? (row[eCol] ?? '').trim().slice(0, 320) || null : null,
+          job_title: cargoCol ? (row[cargoCol] ?? '').trim().slice(0, 240) || null : null,
+          company_name: empCol ? (row[empCol] ?? '').trim().slice(0, 240) || null : null,
+          city: cityCol ? (row[cityCol] ?? '').trim().slice(0, 160) || null : null,
+          address_line: addrCol ? (row[addrCol] ?? '').trim().slice(0, 500) || null : null,
+          tagCell: tagCellRaw,
+        }
+        byPhone.set(d, acc)
+      }
+
+      if (byPhone.size === 0) {
+        onError('Nenhum telefone válido no arquivo. Verifique o DDI 55 e o formato.')
+        return
+      }
+
+      const queryKeys: string[] = []
+      for (const phone of byPhone.keys()) {
+        queryKeys.push(...allCanonicalPhoneKeys(phone))
+      }
+      const uniqueQueryKeys = [...new Set(queryKeys)]
+
+      type LeadMini = { id: string; phone: string | null }
+      const existingList: LeadMini[] = []
+      const seenId = new Set<string>()
+      const chunkIn = 100
+      for (let i = 0; i < uniqueQueryKeys.length; i += chunkIn) {
+        const slice = uniqueQueryKeys.slice(i, i + chunkIn)
+        const { data, error: qErr } = await supabase
+          .from('leads')
+          .select('id, phone')
+          .eq('user_id', userId)
+          .in('phone', slice)
+        if (qErr) {
+          onError(`Erro ao buscar existentes: ${qErr.message}`)
+          return
+        }
+        for (const r of (data ?? []) as LeadMini[]) {
+          if (!seenId.has(r.id)) {
+            seenId.add(r.id)
+            existingList.push(r)
+          }
+        }
+      }
+
+      const phoneLookup = buildPhoneToLeadIdMap(existingList)
+
+      type InsertRow = {
         user_id: string
         name: string
         phone: string
         status: string
         ai_enabled: boolean
         source: string
-        tag: string
-      }[] = []
-      for (const row of rows) {
-        const nameRaw = nCol ? row[nCol] ?? '' : 'Contato'
-        const name = (nameRaw || 'Contato').trim().slice(0, 200)
-        const d = phoneDigitsForLead(row[pCol] ?? '')
-        if (!d) continue
-        toInsert.push({
-          user_id: userId,
-          name: name || 'Contato',
-          phone: d,
-          status: 'novo',
-          ai_enabled: true,
-          source: 'manual_csv',
-          tag,
-        })
+        tag: string | null
+        email: string | null
+        job_title: string | null
+        company_name: string | null
+        city: string | null
+        address_line: string | null
       }
-      if (toInsert.length === 0) {
-        onError('Nenhum telefone válido no arquivo. Verifique o DDI 55 e o formato.')
-        return
+
+      type UpdatePatch = {
+        name: string
+        phone: string
+        email: string | null
+        job_title: string | null
+        company_name: string | null
+        city: string | null
+        address_line: string | null
+        updated_at: string
+        tag?: string | null
       }
-      setImportProgress(`Importando ${toInsert.length} contatos…`)
-      const ch = 150
-      for (let i = 0; i < toInsert.length; i += ch) {
-        const { error: insE } = await supabase
-          .from('leads')
-          .insert(toInsert.slice(i, i + ch))
-        if (insE) {
-          onError(`Erro ao salvar: ${insE.message}`)
+
+      const toInsert: InsertRow[] = []
+      const toUpdate: { id: string; patch: UpdatePatch }[] = []
+
+      for (const acc of byPhone.values()) {
+        const existingId = findLeadIdForNormalizedPhone(phoneLookup, acc.phone)
+        const tagExplicit = acc.tagCell.length > 0 ? acc.tagCell.slice(0, 480) : null
+
+        const patchCore = {
+          name: acc.name,
+          phone: acc.phone,
+          email: acc.email,
+          job_title: acc.job_title,
+          company_name: acc.company_name,
+          city: acc.city,
+          address_line: acc.address_line,
+          updated_at: new Date().toISOString(),
+        }
+
+        if (existingId) {
+          const patch: UpdatePatch =
+            tagExplicit !== null
+              ? { ...patchCore, tag: tagExplicit }
+              : { ...patchCore }
+          toUpdate.push({ id: existingId, patch })
+        } else {
+          toInsert.push({
+            user_id: userId,
+            name: acc.name,
+            phone: acc.phone,
+            status: 'novo',
+            ai_enabled: true,
+            source: 'manual_csv',
+            tag: tagExplicit ?? defaultTag,
+            email: acc.email,
+            job_title: acc.job_title,
+            company_name: acc.company_name,
+            city: acc.city,
+            address_line: acc.address_line,
+          })
+        }
+      }
+
+      setImportProgress(`Processando ${byPhone.size} linha(s) — atualizando e criando…`)
+
+      const updChunk = 25
+      for (let i = 0; i < toUpdate.length; i += updChunk) {
+        const slice = toUpdate.slice(i, i + updChunk)
+        const results = await Promise.all(
+          slice.map(({ id, patch }) =>
+            supabase.from('leads').update(patch).eq('id', id).eq('user_id', userId),
+          ),
+        )
+        const failed = results.find((r) => r.error)
+        if (failed?.error) {
+          onError(`Erro ao atualizar: ${failed.error.message}`)
           return
         }
       }
-      onSuccess(`${toInsert.length} contato(s) importado(s) do CSV. Tag: “${tag}”.`)
+
+      const ch = 150
+      for (let i = 0; i < toInsert.length; i += ch) {
+        const { error: insE } = await supabase.from('leads').insert(toInsert.slice(i, i + ch))
+        if (insE) {
+          onError(`Erro ao criar registros: ${insE.message}`)
+          return
+        }
+      }
+
+      onSuccess(
+        `CSV aplicado à base (${byPhone.size} número(s)): ${toUpdate.length} atualizado(s), ${toInsert.length} novo(s). Novos sem tag no arquivo recebem “${defaultTag}”; em atualizações, tag vazia preserva a atual.`,
+      )
       setCsvOpen(false)
       onContactsChanged()
       void load()
@@ -887,92 +1025,6 @@ export function ContactsBasePanel({ userId, onContactsChanged, onError, onSucces
       setImportProgress(null)
     }
   }
-
-  const importFromGoogle = useCallback(async () => {
-    setGoogleBusy(true)
-    setImportProgress(null)
-    try {
-      const {
-        data: { session },
-      } = await supabase.auth.getSession()
-      const token = getGoogleProviderToken(session)
-      if (!token) {
-        onError(
-          'Token do Google indisponível. Faça login de novo (Google) e permita acesso a contatos, ou tente o fluxo OAuth com o painel de auth.',
-        )
-        return
-      }
-      setImportProgress('Buscando contatos no Google…')
-      const contacts = await fetchGoogleContacts(token)
-      if (contacts.length === 0) {
-        onError('Nenhum contato com telefone foi retornado pela API do Google.')
-        return
-      }
-      const tag = importTagLabel('google')
-      const toInsert = contacts.map((c) => ({
-        user_id: userId,
-        name: c.name.slice(0, 200),
-        phone: c.phone,
-        status: 'novo' as const,
-        ai_enabled: true,
-        source: 'google_contacts' as const,
-        tag,
-        email: c.email?.trim().slice(0, 320) || null,
-        job_title: c.job_title?.trim().slice(0, 240) || null,
-        company_name: c.company_name?.trim().slice(0, 240) || null,
-        city: c.city?.trim().slice(0, 160) || null,
-        address_line: c.address_line?.trim().slice(0, 500) || null,
-      }))
-      setImportProgress(`Salvando ${toInsert.length} contato(s)…`)
-      const ch = 150
-      for (let i = 0; i < toInsert.length; i += ch) {
-        const { error: insE } = await supabase.from('leads').insert(toInsert.slice(i, i + ch))
-        if (insE) {
-          onError(`Erro ao salvar: ${insE.message}`)
-          return
-        }
-      }
-      onSuccess(`${toInsert.length} contato(s) importado(s) do Google. Tag: “${tag}”.`)
-      onContactsChanged()
-      void load()
-    } catch (err) {
-      onError(err instanceof Error ? err.message : String(err))
-    } finally {
-      setGoogleBusy(false)
-      setImportProgress(null)
-    }
-  }, [userId, onError, onSuccess, onContactsChanged, load])
-
-  const startGoogleOAuth = useCallback(async () => {
-    setGoogleBusy(true)
-    setImportProgress(null)
-    const redirect = `${window.location.origin}${window.location.pathname}${window.location.search}#contatos`
-    const { data, error: e } = await supabase.auth.signInWithOAuth({
-      provider: 'google',
-      options: {
-        redirectTo: redirect,
-        scopes:
-          'https://www.googleapis.com/auth/contacts.readonly https://www.googleapis.com/auth/userinfo.email',
-        queryParams: { access_type: 'offline', prompt: 'consent' },
-        skipBrowserRedirect: false,
-      },
-    })
-    if (e) {
-      const raw = e.message ?? String(e)
-      if (/not enabled|unsupported provider|validation_failed/i.test(raw)) {
-        onError(
-          'O provedor Google não está ativo no Supabase. No painel: Authentication → Providers → Google → ative e preencha Client ID e Client Secret (Console Google Cloud). Veja também a URL de callback do Supabase nas credenciais OAuth.',
-        )
-      } else {
-        onError(raw)
-      }
-      setGoogleBusy(false)
-      return
-    }
-    if (data.url) {
-      window.location.assign(data.url)
-    }
-  }, [onError])
 
   function toggleSource(id: string) {
     setIncludeSources((prev) => {
@@ -1148,10 +1200,6 @@ export function ContactsBasePanel({ userId, onContactsChanged, onError, onSucces
           </div>
         </div>
       ) : null}
-      {googleBusy && !importProgress ? (
-        <p className="text-xs text-zinc-500">Preparando…</p>
-      ) : null}
-
       {csvOpen ? (
         <div
           className="fixed inset-0 z-[80] flex items-center justify-center bg-zinc-950/50 p-4"
@@ -1161,8 +1209,13 @@ export function ContactsBasePanel({ userId, onContactsChanged, onError, onSucces
           <div className="w-full max-w-md rounded-2xl border border-zinc-200 bg-white p-6 shadow-2xl">
             <h4 className="text-base font-semibold text-zinc-900">Importar CSV</h4>
             <p className="mt-1 text-sm text-zinc-600">
-              O arquivo precisa conter as colunas <code className="text-xs">nome</code> e{' '}
-              <code className="text-xs">telefone</code>.
+              Colunas do modelo:{' '}
+              <code className="text-xs">
+                nome, telefone, email, cargo, empresa, cidade, endereco, tag
+              </code>
+              . Obrigatório: <strong>nome</strong> e <strong>telefone</strong>. Linhas com o mesmo
+              telefone (considerando o 9º dígito BR) são <strong>mescladas</strong> com o cadastro
+              existente.
             </p>
             <button
               type="button"
@@ -1638,23 +1691,6 @@ export function ContactsBasePanel({ userId, onContactsChanged, onError, onSucces
           >
             <Upload className="h-4 w-4 shrink-0 text-[#5f6368]" aria-hidden />
             Importar arquivo
-          </button>
-          <button
-            type="button"
-            disabled={googleBusy}
-            onClick={() => {
-              void (async () => {
-                const {
-                  data: { session },
-                } = await supabase.auth.getSession()
-                if (getGoogleProviderToken(session)) void importFromGoogle()
-                else void startGoogleOAuth()
-              })()
-            }}
-            className="flex w-full items-center gap-2 rounded-r-full px-4 py-2 text-left text-sm text-[#3c4043] hover:bg-[#f1f3f4] disabled:opacity-50"
-          >
-            {googleBusy ? <Loader2 className="h-4 w-4 animate-spin" /> : <Download className="h-4 w-4" />}
-            Importar do Google
           </button>
           <button
             type="button"

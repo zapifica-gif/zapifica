@@ -1,5 +1,7 @@
 /**
- * Importação de CSV (nome/telefone) compartilhada entre Extrator e Base de Contatos.
+ * Importação de CSV para a base de contatos (`public.leads`):
+ * colunas esperadas pelo modelo — nome, telefone, email, cargo, empresa, cidade, endereco, tag.
+ * Telefone normalizado (DDI 55); merge por telefone com variantes BR (com/sem 9º dígito).
  */
 
 export function normalizeCsvHeader(raw: string): string {
@@ -116,12 +118,11 @@ export function findPhoneColumn(headers: string[]): string | null {
 
 export function findNameColumn(headers: string[]): string | null {
   const order = [
-    'nome_empresa',
     'nome',
     'title',
     'name',
     'titulo',
-    'empresa',
+    'nome_empresa',
     'displayname',
     'username',
   ]
@@ -129,6 +130,46 @@ export function findNameColumn(headers: string[]): string | null {
     if (headers.includes(c)) return c
   }
   return headers.find((h) => h && h.length > 0) ?? null
+}
+
+/** Primeira coluna cujo cabeçalho normalizado coincide com algum alias (lista de sinônimos). */
+export function findColumnByAliases(headers: string[], aliases: string[]): string | null {
+  const normAliases = aliases.map((a) => normalizeCsvHeader(a)).filter(Boolean)
+  const headerSet = new Set(headers.filter(Boolean))
+  for (const key of normAliases) {
+    if (headerSet.has(key)) return key
+  }
+  for (const h of headers) {
+    if (!h) continue
+    for (const key of normAliases) {
+      if (key && (h === key || h.includes(key))) return h
+    }
+  }
+  return null
+}
+
+export function findEmailColumn(headers: string[]): string | null {
+  return findColumnByAliases(headers, ['email', 'e-mail', 'mail', 'e_mail'])
+}
+
+export function findCargoColumn(headers: string[]): string | null {
+  return findColumnByAliases(headers, ['cargo', 'job', 'job_title', 'titulo', 'titulo_profissional'])
+}
+
+export function findEmpresaColumn(headers: string[]): string | null {
+  return findColumnByAliases(headers, ['empresa', 'company', 'company_name', 'organizacao', 'organização'])
+}
+
+export function findCidadeColumn(headers: string[]): string | null {
+  return findColumnByAliases(headers, ['cidade', 'city', 'municipio', 'município'])
+}
+
+export function findEnderecoColumn(headers: string[]): string | null {
+  return findColumnByAliases(headers, ['endereco', 'endereço', 'address', 'address_line', 'logradouro'])
+}
+
+export function findTagColumn(headers: string[]): string | null {
+  return findColumnByAliases(headers, ['tag', 'etiqueta', 'label', 'marcador'])
 }
 
 export function phoneDigitsForLead(raw: string | null | undefined): string | null {
@@ -141,4 +182,61 @@ export function phoneDigitsForLead(raw: string | null | undefined): string | nul
   return null
 }
 
-export const CSV_TEMPLATE = 'nome,telefone\n"Maria Silva",48999998888\n"João Souza",+55 11 91234-5678\n'
+/** Igual ao webhook Evolution: alterna 9º dígito BR após DDD. */
+function brazilAlternateNationalNine(national: string): string | null {
+  const n = national.replace(/\D/g, '')
+  if (n.length === 11 && n[2] === '9') {
+    const ddd = n.slice(0, 2)
+    const rest = n.slice(3)
+    if (rest.length === 8) return ddd + rest
+  }
+  if (n.length === 10) {
+    const ddd = n.slice(0, 2)
+    const rest = n.slice(2)
+    if (rest.length === 8) return ddd + '9' + rest
+  }
+  return null
+}
+
+/** Todas as formas equivalentes do mesmo número (Evolution × CSV × 9º dígito). */
+export function allCanonicalPhoneKeys(fullDigits: string): string[] {
+  const d = fullDigits.replace(/\D/g, '')
+  if (!d) return []
+  const out = new Set<string>([d])
+  if (d.startsWith('55') && d.length >= 12) {
+    const nat = d.slice(2)
+    const alt = brazilAlternateNationalNine(nat)
+    if (alt) out.add(`55${alt}`)
+  }
+  return [...out]
+}
+
+export function buildPhoneToLeadIdMap(rows: { id: string; phone: string | null }[]): Map<string, string> {
+  const m = new Map<string, string>()
+  for (const r of rows) {
+    const p = r.phone
+    if (!p) continue
+    for (const k of allCanonicalPhoneKeys(p)) {
+      if (!m.has(k)) m.set(k, r.id)
+    }
+  }
+  return m
+}
+
+export function findLeadIdForNormalizedPhone(
+  lookup: Map<string, string>,
+  normalizedPhone: string,
+): string | undefined {
+  for (const k of allCanonicalPhoneKeys(normalizedPhone)) {
+    const id = lookup.get(k)
+    if (id) return id
+  }
+  return undefined
+}
+
+/** Modelo para download — colunas na ordem acordada. */
+export const CSV_TEMPLATE = [
+  'nome,telefone,email,cargo,empresa,cidade,endereco,tag',
+  '"Maria Silva",48999998888,maria@loja.com.br,Gerente,ACME LTDA,São Paulo,"Av. Brasil, 100 - sala 2",lista-vendas',
+  '"João Souza","+55 11 91234-5678",,Vendedor,,Curitiba,,',
+].join('\n')

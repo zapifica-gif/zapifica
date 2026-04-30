@@ -1695,7 +1695,7 @@ export function ZapVoiceCampaignsPage() {
             {mainTab === 'campanhas'
               ? 'Campanhas (isca e gatilho), fluxos de automação e relatórios — organizados em abas abaixo.'
               : mainTab === 'contatos'
-                ? 'Unifique e limpe a base: importe CSV, Google Contacts e acompanhe origens como no Google Contacts.'
+                ? 'Unifique e limpe a base: importe CSV (modelo completo) e gerencie origens na interface de contatos.'
                 : 'Visualize campanhas concluídas: data do primeiro disparo e quantos leads receberam mensagens agendadas.'}
           </p>
         </div>
@@ -1951,7 +1951,7 @@ export function ZapVoiceCampaignsPage() {
                   options={audienceOptions}
                   value={newAudienceTags}
                   onChange={setNewAudienceTags}
-                  customHint="O disparo inclui qualquer lead cuja tag estiver marcada (lógica OU). Tags vêm do Extrator, CSV ou Google."
+                  customHint="O disparo inclui qualquer lead cuja tag estiver marcada (lógica OU). Tags vêm do Extrator, CSV ou inclusão manual na base."
                 />
               </div>
 
