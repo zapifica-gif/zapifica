@@ -171,19 +171,40 @@ function statusToColumnId(status: string | null | undefined): ColumnId {
   return 'novo'
 }
 
+/** Alinha à ordenação da RPC: last_message_at recente primeiro, depois updated_at. */
+function leadSortTimestampMs(row: LeadRow): number {
+  const last = row.last_message_at
+    ? Date.parse(row.last_message_at)
+    : Number.NaN
+  if (!Number.isNaN(last)) return last
+  const upd = row.updated_at ? Date.parse(row.updated_at) : 0
+  return Number.isNaN(upd) ? 0 : upd
+}
+
 function groupRowsIntoBoard(rows: LeadRow[]): {
   columns: Record<ColumnId, string[]>
   leadsMap: Record<string, Lead>
 } {
   const columns = emptyColumns()
   const leadsMap: Record<string, Lead> = {}
+  const sortTs: Record<string, number> = {}
 
   for (const row of rows) {
     if (!row.id) continue
     const lead = rowToLead(row)
     const col = statusToColumnId(row.status)
     leadsMap[lead.id] = lead
+    sortTs[lead.id] = leadSortTimestampMs(row)
     columns[col].push(lead.id)
+  }
+
+  for (const col of COLUMN_ORDER) {
+    columns[col].sort((idA, idB) => {
+      const ta = sortTs[idA] ?? 0
+      const tb = sortTs[idB] ?? 0
+      if (tb !== ta) return tb - ta
+      return idA.localeCompare(idB)
+    })
   }
 
   return { columns, leadsMap }

@@ -25,7 +25,8 @@ import { createClient, type SupabaseClient } from 'https://esm.sh/@supabase/supa
 
 const DEEPSEEK_URL = 'https://api.deepseek.com/v1/chat/completions'
 const DEEPSEEK_MODEL = 'deepseek-chat'
-const HISTORY_LIMIT = 40
+/** Últimas N mensagens cronológicas carregadas (mais antiga → mais recente no prompt). */
+const HISTORY_LIMIT = 20
 const DEEPSEEK_TIMEOUT_MS = 60_000
 
 const cors: Record<string, string> = {
@@ -55,7 +56,47 @@ type LeadRow = {
   id: string
   user_id: string
   phone: string | null
+  name: string | null
   funnel_locked_until?: string | null
+}
+
+function extractClientFirstNameForAi(
+  leadName: string | null | undefined,
+  phoneDigits: string | null | undefined,
+): string | null {
+  const name = (leadName ?? '').trim()
+  if (!name) return null
+  const phoneNorm = (phoneDigits ?? '').replace(/\D/g, '')
+  const nameDigitsOnly = name.replace(/\D/g, '')
+  if (phoneNorm && nameDigitsOnly === phoneNorm) return null
+  const rawDigits = phoneDigits ?? ''
+  if ((rawDigits && name === rawDigits.trim()) || (phoneNorm && name.replace(/\s/g, '') === phoneNorm)) {
+    return null
+  }
+  const first = (name.split(/\s+/)[0] ?? '').trim()
+  const cleaned = first
+    .normalize('NFC')
+    .replace(/[^\p{L}\p{N}'-]/gu, '')
+    .replace(/^['-]+|['-]+$/g, '')
+  return cleaned || null
+}
+
+function formatConversationHistoryPortuguese(
+  rows: ReadonlyArray<{ sender_type: string; message_body: string | null }>,
+): string {
+  const lines: string[] = []
+  for (const m of rows) {
+    const t = (m.message_body ?? '').trim()
+    if (!t) continue
+    const role =
+      m.sender_type === 'cliente'
+        ? 'Cliente'
+        : m.sender_type === 'agencia' || m.sender_type === 'ia'
+          ? 'Você'
+          : `Remetente(${m.sender_type})`
+    lines.push(`${role}: ${t}`)
+  }
+  return lines.join('\n')
 }
 
 type TriggerCondition = 'equals' | 'contains' | 'starts_with' | 'not_contains'
@@ -155,23 +196,6 @@ function boolValue(value: unknown): boolean | null {
   if (value === true) return true
   if (value === false) return false
   return null
-}
-
-/** Formato de mensagens compatível com Chat Completions (DeepSeek). */
-function toChatCompletionMessages(
-  messages: ChatMessageRow[],
-): { role: string; content: string }[] {
-  const out: { role: string; content: string }[] = []
-  for (const m of messages) {
-    const text = (m.message_body ?? '').trim()
-    if (!text) continue
-    if (m.sender_type === 'cliente') {
-      out.push({ role: 'user', content: text })
-    } else if (m.sender_type === 'agencia' || m.sender_type === 'ia') {
-      out.push({ role: 'assistant', content: text })
-    }
-  }
-  return out
 }
 
 async function callDeepSeek(
@@ -286,7 +310,7 @@ async function runPipeline(
   // Identifica o lead primeiro (precisamos do user_id para checar campanhas).
   const { data: lead, error: leErr } = await supabase
     .from('leads')
-    .select('id, user_id, phone, funnel_locked_until')
+    .select('id, user_id, phone, name, funnel_locked_until')
     .eq('id', triggerRow.lead_id)
     .maybeSingle()
 
@@ -384,26 +408,47 @@ async function runPipeline(
     return { error: 'Telefone do lead inválido para a Evolution' }
   }
 
-  const { data: history, error: hErr } = await supabase
+  const { data: historyDesc, error: hErr } = await supabase
     .from('chat_messages')
     .select('id, lead_id, sender_type, content_type, message_body, created_at')
     .eq('lead_id', triggerRow.lead_id)
-    .order('created_at', { ascending: true })
+    .order('created_at', { ascending: false })
     .limit(HISTORY_LIMIT)
 
   if (hErr) {
     return { error: `history: ${hErr.message}` }
   }
 
-  const rows = (history ?? []) as ChatMessageRow[]
-  const chatMsgs = toChatCompletionMessages(rows)
-  if (chatMsgs.length === 0) {
-    return { error: 'Sem conteúdo de conversa para a IA' }
+  const rowsChrono = [...(historyDesc ?? [])].reverse() as ChatMessageRow[]
+
+  const triggerText = (triggerRow.message_body ?? '').trim()
+  if (!triggerText) {
+    return { error: 'Sem texto na mensagem do cliente para a IA responder' }
+  }
+
+  const historyPortugueseBlock = formatConversationHistoryPortuguese(rowsChrono)
+  const clientFirst = extractClientFirstNameForAi(leadData.name, destination)
+
+  let systemPrompt = ZAPIFICA_SYSTEM
+
+  if (clientFirst) {
+    systemPrompt +=
+      `\n\n--- CONTEXTO DO CONTATO ---\n` +
+      `O nome do cliente com quem você está falando é ${clientFirst}. ` +
+      `Se esta for a primeira interação do dia ou o início de uma conversa, seja educado e chame-o pelo nome.\n`
+  }
+
+  if (historyPortugueseBlock.trim()) {
+    systemPrompt +=
+      `\n--- HISTÓRICO RECENTE DA CONVERSA ---\n` +
+      `Trecho em ordem cronológica (do mais antigo ao mais recente). ` +
+      `"Cliente" é a pessoa atendida; "Você" é a empresa (humano ou você, o assistente).\n\n` +
+      `${historyPortugueseBlock}\n`
   }
 
   const { text, error: dsErr } = await callDeepSeek(
-    ZAPIFICA_SYSTEM,
-    chatMsgs,
+    systemPrompt,
+    [{ role: 'user', content: triggerText }],
     deepseekKey,
   )
   if (dsErr || !text) {

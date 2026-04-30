@@ -56,6 +56,7 @@ type LeadRow = {
 }
 type LeadAiRow = { id: string; ai_enabled: boolean | null }
 type LeadFunnelLockRow = { id: string; funnel_locked_until: string | null }
+type LeadAiNameRow = { name?: string | null }
 
 type CompanyContextRow = { master_prompt: string | null }
 type TrainingTextRow = { content: string | null }
@@ -64,9 +65,53 @@ type TrainingCategoryRow = { id: string }
 const FALLBACK_MASTER_PROMPT =
   'Você é o assistente virtual da agência de marketing Floripa Web. Seja direto, gentil, persuasivo e use respostas curtas em português do Brasil. Tente entender a necessidade do cliente.'
 
+/** Primeiro nome para humanizar a IA; ignora quando o nome é só o número de telefone. */
+function extractClientFirstNameForAi(
+  leadName: string | null | undefined,
+  phoneDigits: string | null | undefined,
+): string | null {
+  const name = (leadName ?? '').trim()
+  if (!name) return null
+  const phoneNorm = (phoneDigits ?? '').replace(/\D/g, '')
+  const nameDigitsOnly = name.replace(/\D/g, '')
+  if (phoneNorm && nameDigitsOnly === phoneNorm) return null
+  const rawDigits = phoneDigits ?? ''
+  if ((rawDigits && name === rawDigits.trim()) || (phoneNorm && name.replace(/\s/g, '') === phoneNorm)) {
+    return null
+  }
+
+  const first = (name.split(/\s+/)[0] ?? '').trim()
+  const cleaned = first
+    .normalize('NFC')
+    .replace(/[^\p{L}\p{N}'-]/gu, '')
+    .replace(/^['-]+|['-]+$/g, '')
+  return cleaned || null
+}
+
+/** Últimas mensagens já em pt-BR para o prompt (cronológicas: antigas → novas). */
+function formatConversationHistoryPortuguese(
+  rows: ReadonlyArray<{ sender_type: string; message_body: string | null }>,
+): string {
+  const lines: string[] = []
+  for (const m of rows) {
+    const t = (m.message_body ?? '').trim()
+    if (!t) continue
+    const role =
+      m.sender_type === 'cliente'
+        ? 'Cliente'
+        : m.sender_type === 'agencia' || m.sender_type === 'ia'
+          ? 'Você'
+          : `Remetente(${m.sender_type})`
+    lines.push(`${role}: ${t}`)
+  }
+  return lines.join('\n')
+}
+
 function buildDeepSeekSystemPrompt(params: {
   masterPrompt: string | null
   trainingTexts: string[]
+  clientFirstName?: string | null
+  recentConversationBlock?: string | null
 }): string {
   const master = (params.masterPrompt ?? '').trim() || FALLBACK_MASTER_PROMPT
   const materials = params.trainingTexts
@@ -87,6 +132,24 @@ function buildDeepSeekSystemPrompt(params: {
     const chunk = (m + '\n\n')
     out += chunk
   }
+
+  const first = (params.clientFirstName ?? '').trim()
+  if (first) {
+    out +=
+      `\n--- CONTEXTO DO CONTATO ---\n` +
+      `O nome do cliente com quem você está falando é ${first}. ` +
+      `Se esta for a primeira interação do dia ou o início de uma conversa, seja educado e chame-o pelo nome.\n`
+  }
+
+  const hist = (params.recentConversationBlock ?? '').trim()
+  if (hist) {
+    out +=
+      `\n--- HISTÓRICO RECENTE DA CONVERSA ---\n` +
+      `Trecho em ordem cronológica (do mais antigo ao mais recente). ` +
+      `"Cliente" é a pessoa atendida; "Você" é a empresa (humano ou você, o assistente).\n\n` +
+      `${hist}\n`
+  }
+
   if (out.length > MAX_CHARS) {
     out = out.slice(0, MAX_CHARS)
   }
@@ -1244,7 +1307,7 @@ serve(async (req) => {
       }
       const { data: leadAi, error: aiErr } = await supabase
         .from('leads')
-        .select('id, ai_enabled, funnel_locked_until')
+        .select('id, ai_enabled, funnel_locked_until, name, phone')
         .eq('id', crmLeadId)
         .eq('user_id', userId)
         .maybeSingle()
@@ -1271,25 +1334,37 @@ serve(async (req) => {
           } else if (!evolutionUrl || !evolutionApiKey) {
             console.warn('[IA] EVOLUTION_API_URL/KEY ausentes; não consigo responder.')
           } else {
-            const [{ data: ctx, error: ctxErr }, { data: mats, error: matsErr }] =
-              await Promise.all([
-                supabase
-                  .from('ai_company_context')
-                  .select('master_prompt')
-                  .eq('user_id', userId)
-                  .maybeSingle(),
-                supabase
-                  .from('ai_training_categories')
-                  .select('id')
-                  .eq('user_id', userId)
-                  .eq('is_active', true),
-              ])
+            const [
+              { data: ctx, error: ctxErr },
+              { data: mats, error: matsErr },
+              { data: histMessages, error: histErr },
+            ] = await Promise.all([
+              supabase
+                .from('ai_company_context')
+                .select('master_prompt')
+                .eq('user_id', userId)
+                .maybeSingle(),
+              supabase
+                .from('ai_training_categories')
+                .select('id')
+                .eq('user_id', userId)
+                .eq('is_active', true),
+              supabase
+                .from('chat_messages')
+                .select('sender_type, message_body')
+                .eq('lead_id', crmLeadId)
+                .order('created_at', { ascending: false })
+                .limit(20),
+            ])
 
             if (ctxErr) {
               console.error('[IA] Falha ao carregar master_prompt:', ctxErr.message)
             }
             if (matsErr) {
               console.error('[IA] Falha ao carregar categorias ativas:', matsErr.message)
+            }
+            if (histErr) {
+              console.error('[IA] Falha ao carregar histórico recente (chat_messages):', histErr.message)
             }
 
             const masterPrompt = (ctx as CompanyContextRow | null)?.master_prompt ?? null
@@ -1312,9 +1387,23 @@ serve(async (req) => {
               .map((r) => r.content ?? '')
               .filter((t) => Boolean(t && t.trim()))
 
+            const histAsc = [...(histMessages ?? [])].reverse()
+            const recentConversationBlock =
+              formatConversationHistoryPortuguese(
+                histAsc as { sender_type: string; message_body: string | null }[],
+              )
+
+            const leadNameRow = leadAi as LeadAiNameRow | null
+            const clientFirstName = extractClientFirstNameForAi(
+              leadNameRow?.name,
+              phoneDigits,
+            )
+
             const systemPrompt = buildDeepSeekSystemPrompt({
               masterPrompt,
               trainingTexts,
+              clientFirstName,
+              recentConversationBlock: recentConversationBlock || null,
             })
 
             const ai = await callDeepSeek({
