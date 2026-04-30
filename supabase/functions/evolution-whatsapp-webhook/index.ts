@@ -623,28 +623,52 @@ function scheduleLeadProfilePictureIfEmpty(
 ): void {
   const base = evolutionUrl.trim()
   const apiKey = evolutionApiKey.trim()
-  if (!base || !apiKey) return
+  if (!base || !apiKey) {
+    console.error('[profile-picture/bg] Evolution não configurada (variáveis EVOLUTION_API_URL / EVOLUTION_API_KEY)', {
+      evolutionUrlConfigured: Boolean(evolutionUrl?.trim()),
+      evolutionKeyConfigured: Boolean(evolutionApiKey?.trim()),
+      leadId,
+      instanceName,
+      requestJidPreview: requestJid?.slice(0, 48),
+    })
+    return
+  }
 
-  const run = async () => {
+  const run = async (): Promise<void> => {
     const { data, error } = await supabase
       .from('leads')
       .select('id, profile_picture_url')
       .eq('id', leadId)
       .eq('user_id', userId)
       .maybeSingle()
-    if (error || !data) return
+    if (error || !data) {
+      console.error('[profile-picture/bg] falha ao ler lead antes da foto', {
+        leadId,
+        userId,
+        supabaseMessage: error?.message,
+      })
+      return
+    }
     const existing = stringValue((data as { profile_picture_url?: unknown }).profile_picture_url)
     if (existing) return
 
-    const urlPic = await fetchEvolutionProfilePictureUrl(
-      base,
-      apiKey,
+    console.log('[profile-picture/bg] buscando foto na Evolution', {
       instanceName,
-      requestJid,
-    )
-    if (!urlPic) return
+      leadId,
+      requestJidPreview: requestJid.slice(0, 64),
+    })
 
-    await supabase
+    const urlPic = await fetchEvolutionProfilePictureUrl(base, apiKey, instanceName, requestJid)
+    if (!urlPic) {
+      console.error('[profile-picture/bg] Evolution não devolveu URL de foto válida', {
+        leadId,
+        instanceName,
+        requestJidPreview: requestJid.slice(0, 64),
+      })
+      return
+    }
+
+    const { error: updErr } = await supabase
       .from('leads')
       .update({
         profile_picture_url: urlPic.slice(0, 4000),
@@ -653,9 +677,24 @@ function scheduleLeadProfilePictureIfEmpty(
       .eq('id', leadId)
       .eq('user_id', userId)
       .is('profile_picture_url', null)
+
+    if (updErr) {
+      console.error('[profile-picture/bg] erro ao gravar profile_picture_url no lead', {
+        leadId,
+        message: updErr.message,
+      })
+      return
+    }
+    console.log('[profile-picture/bg] foto salva', { leadId })
   }
 
-  tryScheduleBackground(run())
+  const job = run().catch((err) => {
+    console.error('[profile-picture/bg] exceção não tratada no job', {
+      leadId,
+      error: err instanceof Error ? err.message : String(err),
+    })
+  })
+  tryScheduleBackground(job)
 }
 
 function buildLeadIndex(rows: LeadRow[]): LeadIndex {

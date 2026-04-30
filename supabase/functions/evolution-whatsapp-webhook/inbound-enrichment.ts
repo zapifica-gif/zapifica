@@ -106,9 +106,27 @@ function pickKeyFromEnvelope(envelope: Record<string, unknown>): Record<
   return nestedRecord(envelope, 'key') ?? null
 }
 
+function pickPictureUrlFromJson(data: Record<string, unknown> | null): string | null {
+  if (!data) return null
+  const nested = nestedRecord(data, 'data')
+  const response = nestedRecord(data, 'response')
+  const cand = firstString(
+    data.profilePictureUrl,
+    data.profile_picture_url,
+    data.picture,
+    nested?.profilePictureUrl,
+    nested?.profile_picture_url,
+    nested?.picture,
+    response?.profilePictureUrl,
+    response?.profile_picture_url,
+  )
+  if (cand && /^https?:\/\//i.test(cand.trim())) return cand.trim()
+  return null
+}
+
 /**
  * Busca URL pública da foto de perfil (contato ou grupo).
- * Tentativa em rotas compatíveis v1/v2 da Evolution API.
+ * Tenta várias rotas/bodies compatíveis com forks da Evolution (v1/v2).
  */
 export async function fetchEvolutionProfilePictureUrl(
   evolutionBaseUrl: string,
@@ -118,45 +136,107 @@ export async function fetchEvolutionProfilePictureUrl(
 ): Promise<string | null> {
   const base = evolutionBaseUrl.replace(/\/+$/, '')
   const key = evolutionApiKey.trim()
-  if (!base || !key || !numberOrJid.trim()) return null
+  const jidOrNum = numberOrJid.trim()
+  if (!base || !key || !jidOrNum) {
+    console.error('[Evolution profile picture] parâmetro ausente', {
+      hasBase: Boolean(base),
+      hasApiKey: Boolean(key),
+      hasJidOrNumber: Boolean(jidOrNum),
+      instanceName,
+    })
+    return null
+  }
 
+  const digitsOnly = jidOrNum.includes('@')
+    ? (jidOrNum.split('@')[0] ?? '').replace(/\D/g, '')
+    : jidOrNum.replace(/\D/g, '')
+
+  const bodies: Record<string, unknown>[] = [
+    { number: jidOrNum },
+    { remoteJid: jidOrNum },
+  ]
+  if (digitsOnly) {
+    bodies.push({ number: digitsOnly })
+    bodies.push({ phone: digitsOnly })
+    bodies.push({ phoneNumber: digitsOnly })
+    if (!jidOrNum.includes('@')) {
+      bodies.push({ number: `${digitsOnly}@s.whatsapp.net` })
+      bodies.push({ remoteJid: `${digitsOnly}@s.whatsapp.net` })
+    }
+  }
+
+  const encInst = encodeURIComponent(instanceName)
   const paths = [
-    `${base}/chat/fetchProfilePictureUrl/${encodeURIComponent(instanceName)}`,
-    `${base}/v1/chat/fetchProfilePictureUrl/${encodeURIComponent(instanceName)}`,
+    `${base}/chat/fetchProfilePictureUrl/${encInst}`,
+    `${base}/v1/chat/fetchProfilePictureUrl/${encInst}`,
+    `${base}/v2/chat/fetchProfilePictureUrl/${encInst}`,
   ]
 
+  let attempt = 0
+  let lastHttp: {
+    attempt: number
+    url: string
+    bodyPreview: string
+    httpStatus: number
+    responseSnippet: string
+    parsedOk: boolean
+  } | null = null
+  let lastNet: { attempt: number; url: string; message: string } | null = null
+
   for (const url of paths) {
-    try {
-      const res = await fetch(url, {
-        method: 'POST',
-        headers: {
+    for (const body of bodies) {
+      attempt += 1
+      const bodyPreview = JSON.stringify(body).slice(0, 240)
+      try {
+        const headers: Record<string, string> = {
           apikey: key,
           Accept: 'application/json',
           'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({ number: numberOrJid.trim() }),
-      })
-      const raw = await res.text()
-      let data: Record<string, unknown> | null = null
-      if (raw) {
-        try {
-          data = JSON.parse(raw) as Record<string, unknown>
-        } catch {
-          data = null
+        }
+        const res = await fetch(url, {
+          method: 'POST',
+          headers,
+          body: JSON.stringify(body),
+        })
+        const raw = await res.text()
+        let data: Record<string, unknown> | null = null
+        if (raw) {
+          try {
+            data = JSON.parse(raw) as Record<string, unknown>
+          } catch {
+            data = null
+          }
+        }
+        const pic = pickPictureUrlFromJson(data)
+        if (res.ok && pic) return pic
+        lastHttp = {
+          attempt,
+          url,
+          bodyPreview,
+          httpStatus: res.status,
+          responseSnippet: raw.slice(0, 800),
+          parsedOk: Boolean(data),
+        }
+      } catch (err) {
+        lastNet = {
+          attempt,
+          url,
+          message: err instanceof Error ? err.message : String(err),
         }
       }
-      if (!res.ok || !data) continue
-      const pic =
-        typeof data.profilePictureUrl === 'string'
-          ? data.profilePictureUrl
-          : typeof data.profile_picture_url === 'string'
-            ? data.profile_picture_url
-            : null
-      if (pic && /^https?:\/\//i.test(pic)) return pic
-    } catch {
-      /* próximo endpoint */
     }
   }
+
+  console.error('[Evolution profile picture] todas as tentativas falharam — verifique Evolution API compatível instância/versão/routes.', {
+    instanceName,
+    numberOrJidPreview: jidOrNum.slice(0, 64),
+    tries: attempt,
+    lastHttpFailure: lastHttp,
+    lastNetworkError: lastNet,
+    pathsTriedCount: paths.length,
+    bodiesTriedShape: bodies.map((b) => Object.keys(b)),
+  })
+
   return null
 }
 

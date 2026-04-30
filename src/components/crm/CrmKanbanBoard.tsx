@@ -12,11 +12,12 @@ import {
   PointerSensor,
   closestCorners,
   defaultDropAnimationSideEffects,
+  pointerWithin,
   useDroppable,
   useSensor,
   useSensors,
+  type CollisionDetection,
   type DragEndEvent,
-  type DragOverEvent,
   type DragStartEvent,
   type DropAnimation,
   type UniqueIdentifier,
@@ -29,7 +30,7 @@ import {
   verticalListSortingStrategy,
 } from '@dnd-kit/sortable'
 import { CSS } from '@dnd-kit/utilities'
-import { GripVertical, Phone, Users } from 'lucide-react'
+import { GripVertical, Pencil, Phone, Users } from 'lucide-react'
 import { toEvolutionDigits } from '../../lib/phoneBrazil'
 import { supabase } from '../../lib/supabase'
 import { ChatWindow } from './ChatWindow'
@@ -202,6 +203,78 @@ function findContainer(
   return undefined
 }
 
+/** Cópia rasa das listas de IDs por coluna (para aplicar resultado final no drop). */
+function cloneColumns(base: Record<ColumnId, string[]>): Record<ColumnId, string[]> {
+  return {
+    novo: [...base.novo],
+    em_atendimento: [...base.em_atendimento],
+    negociacao: [...base.negociacao],
+    fechado: [...base.fechado],
+  }
+}
+
+/**
+ * Calcula estado final após um drop usando o snapshot do início do arraste (`over`
+ * deve ser id da coluna ou id de um card). Funciona mesmo se `onDragOver` não
+ * tiver rodado ou tiver ficado stale.
+ */
+function finalizeKanbanDrag(
+  base: Record<ColumnId, string[]>,
+  leadId: string,
+  overId: string,
+): { columns: Record<ColumnId, string[]>; endColumn: ColumnId } | null {
+  let targetColumn: ColumnId | undefined = isColumnId(overId)
+    ? overId
+    : findContainer(base, overId)
+  if (!targetColumn) return null
+
+  const sourceColumn = findContainer(base, leadId)
+  if (!sourceColumn) return null
+
+  const next = cloneColumns(base)
+
+  if (sourceColumn === targetColumn) {
+    const items = [...next[targetColumn]]
+    const oldIndex = items.indexOf(leadId)
+    if (oldIndex < 0) return null
+
+    let newIndex: number
+    if (isColumnId(overId)) {
+      newIndex = items.length > 0 ? Math.max(items.length - 1, 0) : 0
+    } else {
+      newIndex = items.indexOf(overId)
+      if (newIndex < 0) newIndex = Math.max(items.length - 1, 0)
+    }
+
+    if (oldIndex !== newIndex) {
+      next[targetColumn] = arrayMove(items, oldIndex, newIndex)
+    }
+    return { columns: next, endColumn: targetColumn }
+  }
+
+  for (const col of COLUMN_ORDER) {
+    next[col] = next[col].filter((id) => id !== leadId)
+  }
+
+  const destItems = [...next[targetColumn]]
+  let insertIndex: number
+  if (isColumnId(overId)) {
+    insertIndex = destItems.length
+  } else {
+    insertIndex = destItems.indexOf(overId)
+    if (insertIndex < 0) insertIndex = destItems.length
+  }
+  destItems.splice(insertIndex, 0, leadId)
+  next[targetColumn] = destItems
+  return { columns: next, endColumn: targetColumn }
+}
+
+const kanbanCollisionDetection: CollisionDetection = (args) => {
+  const inside = pointerWithin(args)
+  if (inside.length) return inside
+  return closestCorners(args)
+}
+
 function revertLeadToColumn(
   prev: Record<ColumnId, string[]>,
   leadId: string,
@@ -369,6 +442,9 @@ export function CrmKanbanBoard() {
   const [modalOpen, setModalOpen] = useState(false)
   const [chatLead, setChatLead] = useState<Lead | null>(null)
   const [persistError, setPersistError] = useState<string | null>(null)
+  const [columnTitles, setColumnTitles] = useState<Record<ColumnId, string>>(
+    () => ({ ...COLUMN_TITLES }),
+  )
 
   const columnsRef = useRef(columns)
   const dragStartRef = useRef<DragStartInfo | null>(null)
@@ -433,12 +509,82 @@ export function CrmKanbanBoard() {
     [imp.targetUserId],
   )
 
+  const loadColumnTitles = useCallback(async () => {
+    const {
+      data: { user },
+    } = await supabase.auth.getUser()
+    if (!user) return
+    const effectiveUserId = imp.targetUserId ?? user.id
+
+    const { data, error } = await supabase
+      .from('crm_column_settings')
+      .select('status_key, title')
+      .eq('user_id', effectiveUserId)
+
+    if (error) return
+
+    setColumnTitles(() => {
+      const next = { ...COLUMN_TITLES }
+      for (const row of data ?? []) {
+        const sk =
+          typeof row.status_key === 'string' ? row.status_key.trim() : ''
+        const rawTitle =
+          typeof row.title === 'string' ? row.title.trim() : ''
+        if (sk && rawTitle && isColumnId(sk)) next[sk] = rawTitle
+      }
+      return next
+    })
+  }, [imp.targetUserId])
+
+  const saveColumnTitle = useCallback(
+    async (statusKey: ColumnId, nextTitle: string) => {
+      const trimmed = nextTitle.trim().slice(0, 120)
+      if (!trimmed) return
+
+      const {
+        data: { user },
+      } = await supabase.auth.getUser()
+      if (!user) {
+        setPersistError('Sessão inválida. Entre novamente para salvar o título da coluna.')
+        setTimeout(() => setPersistError(null), 5000)
+        return
+      }
+
+      const effectiveUserId = imp.targetUserId ?? user.id
+      const { error } = await supabase.from('crm_column_settings').upsert(
+        {
+          user_id: effectiveUserId,
+          status_key: statusKey,
+          title: trimmed,
+          sort_order: COLUMN_ORDER.indexOf(statusKey),
+        },
+        { onConflict: 'user_id,status_key' },
+      )
+
+      if (error) {
+        setPersistError('Não foi possível salvar o título da coluna.')
+        setTimeout(() => setPersistError(null), 5000)
+        return
+      }
+
+      setColumnTitles((prev) => ({ ...prev, [statusKey]: trimmed }))
+    },
+    [imp.targetUserId],
+  )
+
   useEffect(() => {
     const timer = window.setTimeout(() => {
       void fetchLeads()
     }, 0)
     return () => window.clearTimeout(timer)
   }, [fetchLeads])
+
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+      void loadColumnTitles()
+    }, 0)
+    return () => window.clearTimeout(timer)
+  }, [loadColumnTitles])
 
   useEffect(() => {
     let channel: ReturnType<typeof supabase.channel> | null = null
@@ -489,156 +635,81 @@ export function CrmKanbanBoard() {
     }
   }, [fetchLeads, imp.targetUserId])
 
-  const handleDragOver = useCallback((event: DragOverEvent) => {
-    const { active, over } = event
-    if (!over || active.id === over.id) return
+  const handleDragEnd = useCallback(
+    (event: DragEndEvent) => {
+      const { active, over } = event
+      setActiveId(null)
 
-    setColumns((prev) => {
-      const activeContainer = findContainer(prev, active.id)
-      const overContainer = findContainer(prev, over.id)
-
-      if (!activeContainer || !overContainer || activeContainer === overContainer) {
-        return prev
-      }
-
-      const activeItems = [...prev[activeContainer]]
-      const overItems = [...prev[overContainer]]
-      const activeIndex = activeItems.indexOf(String(active.id))
-      if (activeIndex === -1) return prev
-
-      let newIndex: number
-      if (COLUMN_ORDER.includes(String(over.id) as ColumnId)) {
-        newIndex = overItems.length
-      } else {
-        const overIndex = overItems.indexOf(String(over.id))
-        newIndex = overIndex >= 0 ? overIndex : overItems.length
-      }
-
-      const [moved] = activeItems.splice(activeIndex, 1)
-      overItems.splice(newIndex, 0, moved)
-
-      const next = {
-        ...prev,
-        [activeContainer]: activeItems,
-        [overContainer]: overItems,
-      }
-      columnsRef.current = next
-      return next
-    })
-  }, [])
-
-  const handleDragEnd = useCallback((event: DragEndEvent) => {
-    const { active, over } = event
-    setActiveId(null)
-
-    const dragStart = dragStartRef.current
-    dragStartRef.current = null
-
-    if (!over) {
-      if (columnsSnapshotRef.current) {
-        const snap = columnsSnapshotRef.current
-        columnsRef.current = snap
-        setColumns(snap)
-      }
+      const snapshot = columnsSnapshotRef.current
+      const dragStart = dragStartRef.current
+      dragStartRef.current = null
       columnsSnapshotRef.current = null
-      return
-    }
 
-    setColumns((prev) => {
-      const activeContainer = findContainer(prev, active.id)
-      const overContainer = findContainer(prev, over.id)
+      if (!snapshot) return
 
-      if (!activeContainer || !overContainer) {
-        columnsRef.current = prev
-        return prev
-      }
-
-      if (activeContainer === overContainer) {
-        const ordered = prev[activeContainer]
-        const oldIndex = ordered.indexOf(String(active.id))
-        if (oldIndex === -1) {
-          columnsRef.current = prev
-          return prev
-        }
-
-        let newIndex: number
-        if (COLUMN_ORDER.includes(String(over.id) as ColumnId)) {
-          newIndex = ordered.length - 1
-        } else {
-          newIndex = ordered.indexOf(String(over.id))
-        }
-
-        if (newIndex === -1 || oldIndex === newIndex) {
-          columnsRef.current = prev
-          return prev
-        }
-
-        const next = {
-          ...prev,
-          [activeContainer]: arrayMove(prev[activeContainer], oldIndex, newIndex),
-        }
-        columnsRef.current = next
-        return next
-      }
-
-      columnsRef.current = prev
-      return prev
-    })
-
-    columnsSnapshotRef.current = null
-
-    if (!dragStart) return
-
-    const endCol = findContainer(columnsRef.current, dragStart.leadId)
-    if (!endCol || dragStart.column === endCol) return
-
-    void (async () => {
-      const {
-        data: { user },
-      } = await supabase.auth.getUser()
-
-      if (!user) {
-        setPersistError('Sessão inválida. Entre novamente para salvar a coluna.')
-        setColumns((prev) => {
-          const next = revertLeadToColumn(
-            prev,
-            dragStart.leadId,
-            endCol,
-            dragStart.column,
-          )
-          columnsRef.current = next
-          return next
-        })
-        setTimeout(() => setPersistError(null), 5000)
+      if (!over) {
+        columnsRef.current = snapshot
+        setColumns(snapshot)
         return
       }
 
-      const effectiveUserId = imp.targetUserId ?? user.id
-      const { error } = await supabase
-        .from('leads')
-        .update({
-          status: endCol,
-          updated_at: new Date().toISOString(),
-        })
-        .eq('id', dragStart.leadId)
-        .eq('user_id', effectiveUserId)
+      const overId = String(over.id)
+      const result = finalizeKanbanDrag(snapshot, String(active.id), overId)
 
-      if (error) {
-        setPersistError('Não foi possível salvar a coluna. Desfazendo movimento.')
-        setColumns((prev) => {
-          const next = revertLeadToColumn(
-            prev,
-            dragStart.leadId,
-            endCol,
-            dragStart.column,
-          )
-          columnsRef.current = next
-          return next
-        })
-        setTimeout(() => setPersistError(null), 5000)
+      if (!result) {
+        columnsRef.current = snapshot
+        setColumns(snapshot)
+        return
       }
-    })()
-  }, [])
+
+      columnsRef.current = result.columns
+      setColumns(result.columns)
+
+      if (!dragStart || dragStart.column === result.endColumn) return
+
+      const endCol = result.endColumn
+      const leadIdMoved = dragStart.leadId
+      const originCol = dragStart.column
+
+      void (async () => {
+        const {
+          data: { user },
+        } = await supabase.auth.getUser()
+
+        if (!user) {
+          setPersistError('Sessão inválida. Entre novamente para salvar a coluna.')
+          setColumns((prev) => {
+            const next = revertLeadToColumn(prev, leadIdMoved, endCol, originCol)
+            columnsRef.current = next
+            return next
+          })
+          setTimeout(() => setPersistError(null), 5000)
+          return
+        }
+
+        const effectiveUserId = imp.targetUserId ?? user.id
+        const { error } = await supabase
+          .from('leads')
+          .update({
+            status: endCol,
+            updated_at: new Date().toISOString(),
+          })
+          .eq('id', leadIdMoved)
+          .eq('user_id', effectiveUserId)
+
+        if (error) {
+          setPersistError('Não foi possível salvar a coluna. Desfazendo movimento.')
+          setColumns((prev) => {
+            const next = revertLeadToColumn(prev, leadIdMoved, endCol, originCol)
+            columnsRef.current = next
+            return next
+          })
+          setTimeout(() => setPersistError(null), 5000)
+        }
+      })()
+    },
+    [imp.targetUserId],
+  )
 
   const handleDragStart = useCallback((event: DragStartEvent) => {
     setActiveId(event.active.id)
@@ -755,9 +826,8 @@ export function CrmKanbanBoard() {
 
       <DndContext
         sensors={sensors}
-        collisionDetection={closestCorners}
+        collisionDetection={kanbanCollisionDetection}
         onDragStart={handleDragStart}
-        onDragOver={handleDragOver}
         onDragEnd={handleDragEnd}
         onDragCancel={handleDragCancel}
       >
@@ -768,7 +838,8 @@ export function CrmKanbanBoard() {
               <KanbanColumn
                 key={colId}
                 id={colId}
-                title={COLUMN_TITLES[colId]}
+                title={columnTitles[colId]}
+                onSaveTitle={(t) => void saveColumnTitle(colId, t)}
                 headerAction={
                   colId === 'novo' ? (
                     <button
@@ -833,32 +904,92 @@ export function CrmKanbanBoard() {
 function KanbanColumn({
   id,
   title,
+  onSaveTitle,
   headerAction,
   children,
 }: {
   id: ColumnId
   title: string
+  onSaveTitle?: (next: string) => void
   headerAction?: ReactNode
   children: ReactNode
 }) {
-  const { setNodeRef } = useDroppable({ id })
+  const { setNodeRef, isOver } = useDroppable({ id })
+  const [editingTitle, setEditingTitle] = useState(false)
+  const [draftTitle, setDraftTitle] = useState(title)
+
+  useEffect(() => {
+    if (!editingTitle) setDraftTitle(title)
+  }, [title, editingTitle])
 
   return (
     <section
-      className="flex w-[min(100vw-2rem,280px)] shrink-0 flex-col rounded-2xl border border-zinc-200/80 bg-zinc-100/90 shadow-inner ring-1 ring-zinc-200/40"
+      ref={setNodeRef}
+      className={`flex w-[min(100vw-2rem,280px)] shrink-0 flex-col rounded-2xl border border-zinc-200/80 bg-zinc-100/90 shadow-inner ring-1 ring-zinc-200/40 transition-colors ${
+        isOver ? 'bg-brand-50/35 ring-brand-400/40' : ''
+      }`}
       aria-labelledby={`col-title-${id}`}
     >
-      <header className="flex items-center justify-between gap-2 border-b border-zinc-200/80 px-4 py-3">
-        <h2
-          id={`col-title-${id}`}
-          className="min-w-0 text-xs font-semibold uppercase tracking-wider text-zinc-500"
-        >
-          {title}
-        </h2>
-        {headerAction}
+      <header className="flex flex-wrap items-center gap-2 border-b border-zinc-200/80 px-4 py-3">
+        <div className="flex min-w-0 flex-1 items-center gap-1">
+          {editingTitle ? (
+            <input
+              id={`col-title-${id}`}
+              autoFocus
+              value={draftTitle}
+              maxLength={120}
+              aria-label={`Editar nome da coluna ${title}`}
+              className="w-full min-w-0 rounded-lg border border-zinc-300 bg-white px-2 py-1 text-xs font-semibold uppercase tracking-wider text-zinc-700 shadow-sm outline-none focus:border-brand-400 focus:ring-1 focus:ring-brand-400"
+              onChange={(e) => setDraftTitle(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') {
+                  e.preventDefault()
+                  e.currentTarget.blur()
+                }
+                if (e.key === 'Escape') {
+                  setDraftTitle(title)
+                  setEditingTitle(false)
+                }
+              }}
+              onBlur={() => {
+                setEditingTitle(false)
+                const t = draftTitle.trim()
+                if (!t) {
+                  setDraftTitle(title)
+                  return
+                }
+                if (t !== title) onSaveTitle?.(t)
+              }}
+            />
+          ) : (
+            <>
+              <h2
+                id={`col-title-${id}`}
+                className="min-w-0 flex-1 truncate text-xs font-semibold uppercase tracking-wider text-zinc-500"
+              >
+                {title}
+              </h2>
+              {onSaveTitle ? (
+                <button
+                  type="button"
+                  className="shrink-0 rounded-md p-1 text-zinc-400 opacity-70 transition hover:bg-zinc-200/80 hover:text-zinc-600 hover:opacity-100"
+                  aria-label="Renomear coluna"
+                  onClick={() => {
+                    setDraftTitle(title)
+                    setEditingTitle(true)
+                  }}
+                >
+                  <Pencil className="h-3.5 w-3.5" />
+                </button>
+              ) : null}
+            </>
+          )}
+        </div>
+        {headerAction ? (
+          <div className="shrink-0">{headerAction}</div>
+        ) : null}
       </header>
       <div
-        ref={setNodeRef}
         className="flex flex-1 flex-col gap-3 overflow-y-auto p-3"
         style={{ minHeight: '120px' }}
       >
