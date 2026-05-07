@@ -522,16 +522,22 @@ async function enqueueNextFunnelStepAfterSend(
   const nsOrd = Number((nextStep as { step_order?: number }).step_order ?? 0)
   const { data: stepBeyondQueued } = await supabase
     .from('zv_funnels')
-    .select('id')
+    .select('id, step_order')
     .eq('flow_id', zvFlowId)
     .gt('step_order', nsOrd)
+    .order('step_order', { ascending: true })
     .limit(1)
     .maybeSingle()
   const isLastEnqueued = stepBeyondQueued == null
+  const nextExistingOrder =
+    stepBeyondQueued != null
+      ? Number((stepBeyondQueued as { step_order?: number }).step_order ?? NaN)
+      : NaN
+  const nextPointer = Number.isFinite(nextExistingOrder) ? nextExistingOrder : nsOrd + 1
   await supabase
     .from('lead_campaign_progress')
     .update({
-      next_step_order: nsOrd + 1,
+      next_step_order: nextPointer,
       status: isLastEnqueued ? 'awaiting_last_send' : 'active',
     })
     .eq('id', String((prog2 as { id: string }).id))
