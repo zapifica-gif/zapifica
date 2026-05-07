@@ -175,6 +175,43 @@ function short(s: string | null | undefined, n = 120): string {
   return `${t.slice(0, n)}…`
 }
 
+/** Extrai code/message/hint/details/data do erro do Supabase para diagnóstico. */
+function extractDbError(err: unknown): {
+  code: string | null
+  message: string | null
+  hint: string | null
+  details: string | null
+  raw: string
+} {
+  if (!err) return { code: null, message: null, hint: null, details: null, raw: 'null' }
+  const e = err as Record<string, unknown>
+  const code = typeof e.code === 'string' ? e.code : null
+  const message = typeof e.message === 'string' ? e.message : null
+  const hint = typeof e.hint === 'string' ? e.hint : null
+  const details = typeof e.details === 'string' ? e.details : null
+  let raw: string
+  try {
+    raw = JSON.stringify(err)
+  } catch {
+    raw = String(err)
+  }
+  return { code, message, hint, details, raw }
+}
+
+/** Verifica se algum campo obrigatório do payload está vazio/undefined antes do insert. */
+function findMissingRequired(
+  obj: Record<string, unknown>,
+  keys: string[],
+): string[] {
+  const miss: string[] = []
+  for (const k of keys) {
+    const v = obj[k]
+    if (v === undefined || v === null) miss.push(k)
+    else if (typeof v === 'string' && v.trim() === '') miss.push(k)
+  }
+  return miss
+}
+
 /** Resposta do lead com progresso ativo: avança o fluxo (nunca reenvia isca). */
 async function handleActiveCampaignProgress(
   p: ZapVoiceInboundParams,
@@ -485,13 +522,35 @@ export async function processZapVoiceInbound(
     return { enqueued: false, reason: 'conteudo_placeholder' }
   }
 
+  const inboundCheck = findMissingRequired(
+    {
+      userId: p.userId,
+      leadId: p.leadId,
+      instanceName: p.instanceName,
+      phoneDigits: p.phoneDigits,
+    },
+    ['userId', 'leadId'],
+  )
+  if (inboundCheck.length > 0) {
+    console.error('[ZapVoice inbound] ERRO FATAL: parâmetros obrigatórios ausentes', {
+      missing: inboundCheck,
+      userId: p.userId,
+      leadId: p.leadId,
+      instanceName: p.instanceName,
+      phoneDigits: p.phoneDigits,
+    })
+    return { enqueued: false, reason: 'parametros_invalidos' }
+  }
+
   const messageNorm = normText(raw)
   console.log('[ZapVoice inbound] inbound recebido (texto normalizado)', {
     leadId: p.leadId,
+    userId: p.userId,
     instanceName: p.instanceName,
     phoneDigits: p.phoneDigits,
     messageRaw: short(raw, 160),
     messageNorm: short(messageNorm, 160),
+    note: 'webhook usa SUPABASE_SERVICE_ROLE_KEY (RLS bypass) — confirmado em index.ts createClient()',
   })
 
   // Ordena por created_at (sempre existe); updated_at pode faltar em bancos com drift até rodar migration.
@@ -704,7 +763,16 @@ export async function processZapVoiceInbound(
         .select('id, campaign_id, next_step_order, total_steps')
         .single()
       if (progIns.error) {
-        console.error('[ZapVoice inbound] progress insert (inbound orgânico)', progIns.error.message)
+        const dbErr = extractDbError(progIns.error)
+        console.error('[ZapVoice inbound] ERRO FATAL DB (insert lead_campaign_progress orgânico)', {
+          code: dbErr.code,
+          message: dbErr.message,
+          hint: dbErr.hint,
+          details: dbErr.details,
+          raw: dbErr.raw,
+          leadId: p.leadId,
+          campaignId: matched.id,
+        })
         const progErrLower = String(progIns.error.message ?? '').toLowerCase()
         if (progErrLower.includes('unique') || progErrLower.includes('duplicate')) {
           const { data: p2, error: p2Err } = await p.supabase
@@ -893,6 +961,51 @@ async function enqueueFunnelStepAndAdvance(p: {
     campMax: p.campMax,
   })
 
+  const insertPayload = {
+    user_id: p.userId,
+    lead_id: p.leadId,
+    zv_campaign_id: p.progress.campaign_id,
+    zv_funnel_step_id: p.step.id,
+    zv_funnel_step_order: Number.isFinite(ord) ? ord : null,
+    is_active: true,
+    recipient_type: 'personal' as const,
+    content_type: ct,
+    message_body: ct === 'text' ? (p.step.message ?? null) : (p.step.message ?? null),
+    media_url: mUrl,
+    scheduled_at: scheduledIso,
+    status: 'pending' as const,
+    recipient_phone: p.phoneDigits?.trim() || null,
+    event_id: null,
+    evolution_instance_name: p.instanceName?.trim() || null,
+    min_delay_seconds: delayPair.min,
+    max_delay_seconds: delayPair.max,
+  }
+
+  // Pré-flight: campos OBRIGATÓRIOS do schema. Se algum vier vazio, abortamos com log forense
+  // (em vez de deixar o PostgREST devolver 400 que pode ser confundido com timeout/rede).
+  const requiredKeys = ['user_id', 'lead_id', 'zv_campaign_id', 'zv_funnel_step_id', 'scheduled_at', 'content_type']
+  const missing = findMissingRequired(insertPayload as Record<string, unknown>, requiredKeys)
+  if (missing.length > 0) {
+    console.error('[ZapVoice inbound] ERRO FATAL DB (pré-flight): payload incompleto p/ scheduled_messages', {
+      missing,
+      leadId: p.leadId,
+      campaignId: p.progress.campaign_id,
+      zv_funnel_step_id: p.step.id,
+      ord,
+      ct,
+      hasMessageBody: Boolean(String(p.step.message ?? '').trim()),
+      hasMediaUrl: Boolean(mUrl),
+      delayPair,
+    })
+    await unlockLeadFunnelLock(p.supabase, p.userId, p.leadId, 'payload_incompleto')
+    return {
+      enqueued: false,
+      reason: 'payload_incompleto',
+      campaignId: p.progress.campaign_id,
+      suppressAi: false,
+    }
+  }
+
   console.log('[ZapVoice inbound] Insert preparado para scheduled_messages', {
     leadId: p.leadId,
     campaignId: p.progress.campaign_id,
@@ -903,40 +1016,67 @@ async function enqueueFunnelStepAndAdvance(p: {
     recipient_phone: p.phoneDigits?.trim() ? 'ok' : 'null',
     evolution_instance_name: p.instanceName?.trim() ? 'ok' : 'null',
     delayPair,
+    payloadKeys: Object.keys(insertPayload),
   })
 
-  const ins = await p.supabase.from('scheduled_messages').insert({
-    user_id: p.userId,
-    lead_id: p.leadId,
-    zv_campaign_id: p.progress.campaign_id,
-    zv_funnel_step_id: p.step.id,
-    zv_funnel_step_order: Number.isFinite(ord) ? ord : null,
-    is_active: true,
-    recipient_type: 'personal',
-    content_type: ct,
-    message_body: p.step.message ?? null,
-    media_url: mUrl,
-    scheduled_at: scheduledIso,
-    status: 'pending',
-    recipient_phone: p.phoneDigits?.trim() || null,
-    event_id: null,
-    evolution_instance_name: p.instanceName?.trim() || null,
-    min_delay_seconds: delayPair.min,
-    max_delay_seconds: delayPair.max,
-  })
-  if (ins.error) {
-    console.error(
-      '[ZapVoice inbound] enqueue scheduled_messages',
-      ins.error.code,
-      ins.error.message,
-      {
-        campaignId: p.progress.campaign_id,
+  // Insert isolado em try/catch para capturar QUALQUER falha (rede, timeout, RLS, etc.).
+  let insertedId: string | null = null
+  try {
+    const ins = await p.supabase
+      .from('scheduled_messages')
+      .insert(insertPayload)
+      .select('id')
+      .single()
+    if (ins.error) {
+      const dbErr = extractDbError(ins.error)
+      console.error('[ZapVoice inbound] ERRO FATAL DB (insert scheduled_messages)', {
+        code: dbErr.code,
+        message: dbErr.message,
+        hint: dbErr.hint,
+        details: dbErr.details,
+        raw: dbErr.raw,
         leadId: p.leadId,
+        campaignId: p.progress.campaign_id,
         zv_funnel_step_id: p.step.id,
+        ord,
+        ct,
         delayPair,
-      },
-    )
-    await unlockLeadFunnelLock(p.supabase, p.userId, p.leadId, 'insert_fila_falhou')
+      })
+      await unlockLeadFunnelLock(p.supabase, p.userId, p.leadId, 'insert_fila_falhou')
+      return {
+        enqueued: false,
+        reason: 'erro_fila',
+        campaignId: p.progress.campaign_id,
+        suppressAi: false,
+      }
+    }
+    insertedId = (ins.data as { id?: string } | null)?.id ?? null
+    if (!insertedId) {
+      console.error('[ZapVoice inbound] ERRO FATAL DB: insert sem id retornado', {
+        leadId: p.leadId,
+        campaignId: p.progress.campaign_id,
+      })
+      await unlockLeadFunnelLock(p.supabase, p.userId, p.leadId, 'insert_sem_id')
+      return {
+        enqueued: false,
+        reason: 'insert_sem_id',
+        campaignId: p.progress.campaign_id,
+        suppressAi: false,
+      }
+    }
+  } catch (caught) {
+    const dbErr = extractDbError(caught)
+    console.error('[ZapVoice inbound] ERRO FATAL DB (exceção no insert scheduled_messages)', {
+      code: dbErr.code,
+      message: dbErr.message,
+      hint: dbErr.hint,
+      details: dbErr.details,
+      raw: dbErr.raw,
+      leadId: p.leadId,
+      campaignId: p.progress.campaign_id,
+      zv_funnel_step_id: p.step.id,
+    })
+    await unlockLeadFunnelLock(p.supabase, p.userId, p.leadId, 'insert_excecao')
     return {
       enqueued: false,
       reason: 'erro_fila',
@@ -945,12 +1085,50 @@ async function enqueueFunnelStepAndAdvance(p: {
     }
   }
 
-  console.log('[ZapVoice inbound] Fila agendada com sucesso (insert OK)', {
-    leadId: p.leadId,
-    campaignId: p.progress.campaign_id,
-    zv_funnel_step_id: p.step.id,
-    step_order: Number.isFinite(ord) ? ord : null,
-  })
+  // Defesa em profundidade: relê a linha que acabou de ser criada para garantir que ela existe.
+  try {
+    const { data: relido, error: relidoErr } = await p.supabase
+      .from('scheduled_messages')
+      .select('id, status, scheduled_at, lead_id, zv_campaign_id, zv_funnel_step_id')
+      .eq('id', insertedId)
+      .maybeSingle()
+    if (relidoErr) {
+      const dbErr = extractDbError(relidoErr)
+      console.error('[ZapVoice inbound] ERRO FATAL DB: re-leitura pós-insert falhou', {
+        code: dbErr.code,
+        message: dbErr.message,
+        hint: dbErr.hint,
+        details: dbErr.details,
+        leadId: p.leadId,
+        campaignId: p.progress.campaign_id,
+        insertedId,
+      })
+    } else if (!relido) {
+      console.error('[ZapVoice inbound] ERRO FATAL DB: linha não encontrada após insert (sucesso fantasma)', {
+        leadId: p.leadId,
+        campaignId: p.progress.campaign_id,
+        insertedId,
+      })
+    } else {
+      console.log('[ZapVoice inbound] Fila agendada com sucesso (insert OK + re-lido)', {
+        leadId: p.leadId,
+        campaignId: p.progress.campaign_id,
+        insertedId,
+        status: (relido as { status?: string }).status,
+        scheduled_at: (relido as { scheduled_at?: string }).scheduled_at,
+      })
+    }
+  } catch (caught) {
+    const dbErr = extractDbError(caught)
+    console.error('[ZapVoice inbound] ERRO FATAL DB (exceção na re-leitura pós-insert)', {
+      code: dbErr.code,
+      message: dbErr.message,
+      hint: dbErr.hint,
+      details: dbErr.details,
+      raw: dbErr.raw,
+      insertedId,
+    })
+  }
 
   // Próxima etapa precisa ser a PRÓXIMA step_order existente (não "ord+1"), senão o fluxo trava com step_order não sequencial.
   const { data: campFlowRow, error: campFlowErr } = await p.supabase
@@ -1001,29 +1179,76 @@ async function enqueueFunnelStepAndAdvance(p: {
     next_step_order_aplicado: nextOrder,
     isLastEnqueued,
   })
-  const up = await p.supabase
-    .from('lead_campaign_progress')
-    .update({
-      next_step_order: nextOrder,
-      status: isLastEnqueued ? 'awaiting_last_send' : 'active',
-    })
-    .eq('id', p.progress.id)
-  if (up.error) {
-    console.error('[ZapVoice inbound] progress update APÓS insert na fila', up.error.message, {
+
+  try {
+    const up = await p.supabase
+      .from('lead_campaign_progress')
+      .update({
+        next_step_order: nextOrder,
+        status: isLastEnqueued ? 'awaiting_last_send' : 'active',
+      })
+      .eq('id', p.progress.id)
+    if (up.error) {
+      const dbErr = extractDbError(up.error)
+      console.error('[ZapVoice inbound] ERRO FATAL DB (update lead_campaign_progress)', {
+        code: dbErr.code,
+        message: dbErr.message,
+        hint: dbErr.hint,
+        details: dbErr.details,
+        raw: dbErr.raw,
+        progressId: p.progress.id,
+        leadId: p.leadId,
+        campaignId: p.progress.campaign_id,
+        nextOrder,
+        isLastEnqueued,
+      })
+      // Mantém retorno como sucesso pois a fila JÁ foi enfileirada — ponteiro fica desalinhado, e o worker logará.
+    }
+  } catch (caught) {
+    const dbErr = extractDbError(caught)
+    console.error('[ZapVoice inbound] ERRO FATAL DB (exceção no update lead_campaign_progress)', {
+      code: dbErr.code,
+      message: dbErr.message,
+      hint: dbErr.hint,
+      details: dbErr.details,
+      raw: dbErr.raw,
       progressId: p.progress.id,
-      nextOrder,
-      isLastEnqueued,
+      leadId: p.leadId,
+      campaignId: p.progress.campaign_id,
     })
   }
 
-  await p.supabase
-    .from('leads')
-    .update({
-      ai_paused_for_zv_dispatch: true,
-      funnel_locked_until: null,
+  try {
+    const upLead = await p.supabase
+      .from('leads')
+      .update({
+        ai_paused_for_zv_dispatch: true,
+        funnel_locked_until: null,
+      })
+      .eq('id', p.leadId)
+      .eq('user_id', p.userId)
+    if (upLead.error) {
+      const dbErr = extractDbError(upLead.error)
+      console.error('[ZapVoice inbound] ERRO FATAL DB (update leads ai_paused)', {
+        code: dbErr.code,
+        message: dbErr.message,
+        hint: dbErr.hint,
+        details: dbErr.details,
+        raw: dbErr.raw,
+        leadId: p.leadId,
+      })
+    }
+  } catch (caught) {
+    const dbErr = extractDbError(caught)
+    console.error('[ZapVoice inbound] ERRO FATAL DB (exceção no update leads)', {
+      code: dbErr.code,
+      message: dbErr.message,
+      hint: dbErr.hint,
+      details: dbErr.details,
+      raw: dbErr.raw,
+      leadId: p.leadId,
     })
-    .eq('id', p.leadId)
-    .eq('user_id', p.userId)
+  }
 
   console.log('[ZapVoice inbound] pós-fila: lead AI suprimida e progresso atualizado', {
     leadId: p.leadId,
