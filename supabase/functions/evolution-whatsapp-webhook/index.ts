@@ -893,11 +893,11 @@ async function resolveCanonicalLeadIdForPhone(
   const ids = dupes.map((r) => r.id)
   const { data: prog, error } = await supabase
     .from('lead_campaign_progress')
-    .select('lead_id, updated_at')
+    .select('lead_id, created_at')
     .eq('user_id', userId)
     .in('lead_id', ids)
     .in('status', ['active', 'awaiting_last_send'])
-    .order('updated_at', { ascending: false })
+    .order('created_at', { ascending: false })
     .limit(1)
   if (error) {
     console.warn('[evolution-whatsapp-webhook] resolve duplicata de lead', error.message)

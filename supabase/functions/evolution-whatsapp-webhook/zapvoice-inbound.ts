@@ -308,17 +308,19 @@ export async function processZapVoiceInbound(
 
   const messageNorm = normText(raw)
 
+  // Ordena por created_at (sempre existe); updated_at pode faltar em bancos com drift até rodar migration.
   const { data: progList, error: progErr } = await p.supabase
     .from('lead_campaign_progress')
-    .select('id, campaign_id, next_step_order, total_steps, status, updated_at')
+    .select('id, campaign_id, next_step_order, total_steps, status, created_at')
     .eq('user_id', p.userId)
     .eq('lead_id', p.leadId)
     .in('status', ['active', 'awaiting_last_send'])
-    .order('updated_at', { ascending: false })
+    .order('created_at', { ascending: false })
     .limit(25)
 
   if (progErr) {
     console.error('[ZapVoice inbound] progress read', progErr.message)
+    return { enqueued: false, reason: 'erro_progresso', suppressAi: true }
   }
 
   const progressed = (progList ?? []) as ProgressRow[]
@@ -367,6 +369,23 @@ export async function processZapVoiceInbound(
       console.error('[ZapVoice inbound] completions check', doneErr.message)
     } else if ((doneCount ?? 0) > 0) {
       return { enqueued: false, reason: 'ja_concluida', campaignId: matched.id, suppressAi: true }
+    }
+
+    // Progresso já existe para esta campanha, mas pode não estar na lista (corrida/consulta antiga): evita insert duplicado.
+    const { data: progSameCamp, error: sameCampErr } = await p.supabase
+      .from('lead_campaign_progress')
+      .select('id, campaign_id, next_step_order, total_steps, status')
+      .eq('user_id', p.userId)
+      .eq('lead_id', p.leadId)
+      .eq('campaign_id', matched.id)
+      .in('status', ['active', 'awaiting_last_send'])
+      .maybeSingle()
+    if (sameCampErr) {
+      console.error('[ZapVoice inbound] progress read (campanha alvo)', sameCampErr.message)
+      return { enqueued: false, reason: 'erro_progresso', campaignId: matched.id, suppressAi: true }
+    }
+    if (progSameCamp) {
+      return await handleActiveCampaignProgress(p, messageNorm, progSameCamp as ProgressRow)
     }
 
     // —— Inbound "orgânico": progresso ainda não existe p/ essa campanha (p.ex. gatilho sem ativação prévia) ——
@@ -443,18 +462,18 @@ export async function processZapVoiceInbound(
         .single()
       if (progIns.error) {
         console.error('[ZapVoice inbound] progress insert (inbound orgânico)', progIns.error.message)
-        if (String(progIns.error.message ?? '').toLowerCase().includes('unique')) {
-          const { data: p2 } = await p.supabase
+        const progErrLower = String(progIns.error.message ?? '').toLowerCase()
+        if (progErrLower.includes('unique') || progErrLower.includes('duplicate')) {
+          const { data: p2, error: p2Err } = await p.supabase
             .from('lead_campaign_progress')
-            .select('id, campaign_id, next_step_order, total_steps, status, updated_at')
+            .select('id, campaign_id, next_step_order, total_steps, status')
             .eq('user_id', p.userId)
             .eq('lead_id', p.leadId)
             .eq('campaign_id', matched.id)
             .in('status', ['active', 'awaiting_last_send'])
-            .order('updated_at', { ascending: false })
-            .limit(1)
-          if (p2?.[0]) {
-            return await handleActiveCampaignProgress(p, messageNorm, p2[0] as ProgressRow)
+            .maybeSingle()
+          if (!p2Err && p2) {
+            return await handleActiveCampaignProgress(p, messageNorm, p2 as ProgressRow)
           }
         }
         return {
