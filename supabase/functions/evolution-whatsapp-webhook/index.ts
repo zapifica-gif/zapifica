@@ -1391,7 +1391,9 @@ serve(async (req) => {
       }
       const { data: leadAi, error: aiErr } = await supabase
         .from('leads')
-        .select('id, ai_enabled, funnel_locked_until, name, phone, ai_paused_until')
+        .select(
+          'id, ai_enabled, funnel_locked_until, name, phone, ai_paused_until, ai_paused_for_zv_dispatch',
+        )
         .eq('id', crmLeadId)
         .eq('user_id', userId)
         .maybeSingle()
@@ -1400,6 +1402,35 @@ serve(async (req) => {
         console.error('[IA] Falha ao ler ai_enabled do lead:', aiErr.message)
       } else {
         const enabled = (leadAi as LeadAiRow | null)?.ai_enabled !== false
+        const zvDispatchPaused =
+          (leadAi as { ai_paused_for_zv_dispatch?: boolean | null } | null)
+            ?.ai_paused_for_zv_dispatch === true
+        if (zvDispatchPaused) {
+          console.log(
+            '[IA] Zap Voice em disparo para este lead — ignorando resposta automática.',
+            { leadId: crmLeadId },
+          )
+          skipped.push(`zv_dispatch_pause:${item.msgId}`)
+          continue
+        }
+
+        const { count: zvProgCt, error: zvProgErr } = await supabase
+          .from('lead_campaign_progress')
+          .select('id', { count: 'exact', head: true })
+          .eq('user_id', userId)
+          .eq('lead_id', crmLeadId)
+          .in('status', ['active', 'awaiting_last_send'])
+        if (
+          !zvProgErr &&
+          (zvProgCt ?? 0) > 0
+        ) {
+          console.log('[IA] Funil Zap Voice ativo neste lead — ignorando IA.', {
+            leadId: crmLeadId,
+          })
+          skipped.push(`zv_progress_active:${item.msgId}`)
+          continue
+        }
+
         const lockedUntil = (leadAi as LeadFunnelLockRow | null)?.funnel_locked_until ?? null
         if (lockedUntil) {
           const t = new Date(lockedUntil).getTime()

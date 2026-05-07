@@ -442,6 +442,49 @@ function mimeGuessFromFilename(name: string): string {
 type SupabaseService = ReturnType<typeof createClient>
 
 /**
+ * Libera a IA para o lead apenas se não houver mais Zap Voice pendente/processando
+ * nem progresso ativo (evita erro ao pausar um lead que ainda está em outra campanha).
+ */
+async function maybeReleaseLeadZvAiDispatchPause(
+  supabase: SupabaseService,
+  userId: string,
+  leadId: string,
+): Promise<void> {
+  const [{ count: pend, error: pe }, { count: progCt, error: pgE }] = await Promise.all([
+    supabase
+      .from('scheduled_messages')
+      .select('id', { count: 'exact', head: true })
+      .eq('user_id', userId)
+      .eq('lead_id', leadId)
+      .not('zv_campaign_id', 'is', null)
+      .in('status', ['pending', 'processing'])
+      .eq('is_active', true),
+    supabase
+      .from('lead_campaign_progress')
+      .select('id', { count: 'exact', head: true })
+      .eq('user_id', userId)
+      .eq('lead_id', leadId)
+      .in('status', ['active', 'awaiting_last_send']),
+  ])
+  if (pe || pgE) {
+    console.warn('[ZV-Pause] checagem release:', pe?.message ?? pgE?.message)
+    return
+  }
+  if ((pend ?? 0) !== 0 || (progCt ?? 0) !== 0) return
+  const { error: ue } = await supabase
+    .from('leads')
+    .update({
+      ai_paused_for_zv_dispatch: false,
+      funnel_locked_until: null,
+    })
+    .eq('id', leadId)
+    .eq('user_id', userId)
+  if (ue) {
+    console.warn('[ZV-Pause] falha ao liberar lead:', ue.message)
+  }
+}
+
+/**
  * Agenda a próxima etapa Zap Voice na fila — usada após envio OK ou falha tratada (não trava o funil).
  */
 async function enqueueZapVoiceNextScheduledMessage(
@@ -1151,19 +1194,11 @@ serve(async () => {
               }
             }
 
-            const { error: unlockErr } = await supabase
-              .from('leads')
-              .update({ funnel_locked_until: null })
-              .eq('id', msg.lead_id)
-              .eq('user_id', msg.user_id)
-            if (unlockErr) {
-              console.warn('[Agenda Suprema] Falha ao liberar funil no lead:', unlockErr.message)
-            } else {
-              console.log('[Agenda Suprema] Campanha finalizada — IA liberada', {
-                lead_id: msg.lead_id,
-                zv_campaign_id: msg.zv_campaign_id,
-              })
-            }
+            await maybeReleaseLeadZvAiDispatchPause(supabase, msg.user_id, msg.lead_id)
+            console.log('[Agenda Suprema] Campanha/funil Zap Voice OK — avaliado release da IA', {
+              lead_id: msg.lead_id,
+              zv_campaign_id: msg.zv_campaign_id,
+            })
           }
         }
       }
@@ -1239,16 +1274,8 @@ serve(async () => {
       failed += 1
       // Fluxo Zap Voice: erro no envio deixa o lead preso sem IA (funnel lock). Liberamos explicitamente.
       if (msg.lead_id && (msg.zv_campaign_id ?? msg.zv_funnel_step_id)) {
-        const { error: uLock } = await supabase
-          .from('leads')
-          .update({ funnel_locked_until: null })
-          .eq('id', msg.lead_id)
-          .eq('user_id', msg.user_id)
-        if (uLock) {
-          console.warn('[process-scheduled-messages] funnel unlock falhou:', uLock.message)
-        } else {
-          console.warn('[process-scheduled-messages] funnel unlock após erro (Zap Voice)', msg.lead_id)
-        }
+        await maybeReleaseLeadZvAiDispatchPause(supabase, msg.user_id, msg.lead_id)
+        console.warn('[process-scheduled-messages] ZV pause reavaliada após erro', msg.lead_id)
       }
     }
 

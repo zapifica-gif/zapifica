@@ -52,6 +52,8 @@ export type Lead = {
   lastActivityIso: string | null
   /** ISO de `ai_paused_until`; se ainda no futuro, IA não responde (atendimento manual). */
   aiPausedUntilIso: string | null
+  /** Quando true, a IA fica suprimida durante o disparo do Zap Voice para este lead. */
+  aiPausedForZvDispatch: boolean
 }
 
 type LeadRow = {
@@ -64,6 +66,7 @@ type LeadRow = {
   last_message_at: string | null
   updated_at: string
   ai_paused_until: string | null
+  ai_paused_for_zv_dispatch?: boolean | null
 }
 
 const COLUMN_ORDER: ColumnId[] = [
@@ -107,6 +110,7 @@ function rowToLead(row: LeadRow): Lead {
     isGroup: Boolean(row.is_group),
     lastActivityIso: row.last_message_at ?? row.updated_at ?? null,
     aiPausedUntilIso: row.ai_paused_until ?? null,
+    aiPausedForZvDispatch: row.ai_paused_for_zv_dispatch === true,
   }
 }
 
@@ -421,6 +425,15 @@ function LeadCardFace({
               >
                 <Users className="h-3 w-3" aria-hidden />
                 Grupo
+              </span>
+            ) : null}
+            {lead.aiPausedForZvDispatch ? (
+              <span
+                className="inline-flex shrink-0 items-center gap-1 rounded-full bg-orange-50 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-orange-900 ring-1 ring-orange-200/80 dark:bg-orange-950/30 dark:text-orange-200 dark:ring-orange-900/60"
+                title="IA pausada: Zap Voice está enviando o funil para este lead (evita briga de robôs)."
+              >
+                <span aria-hidden>🤖🔇</span>
+                IA · Funil
               </span>
             ) : null}
             {isLeadAiPaused(lead.aiPausedUntilIso) ? (

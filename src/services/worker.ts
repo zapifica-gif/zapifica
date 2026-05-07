@@ -657,7 +657,45 @@ async function resolveRecipientPhones(
   return { targets, error: null }
 }
 
-/** Mesmo bloco da Edge: sem pendentes → completion + liberar IA. */
+/** Libera IA do lead só se não há mais Zap Voice pendente/processando nem progresso ativo (qualquer campanha). */
+async function maybeReleaseLeadZvAiDispatchPause(
+  supabase: SupabaseClient,
+  userId: string,
+  leadId: string,
+): Promise<void> {
+  const [{ count: pend, error: pe }, { count: progCt, error: pgE }] = await Promise.all([
+    supabase
+      .from('scheduled_messages')
+      .select('id', { count: 'exact', head: true })
+      .eq('user_id', userId)
+      .eq('lead_id', leadId)
+      .not('zv_campaign_id', 'is', null)
+      .in('status', ['pending', 'processing'])
+      .eq('is_active', true),
+    supabase
+      .from('lead_campaign_progress')
+      .select('id', { count: 'exact', head: true })
+      .eq('user_id', userId)
+      .eq('lead_id', leadId)
+      .in('status', ['active', 'awaiting_last_send']),
+  ])
+  if (pe || pgE) {
+    console.warn('[worker][ZV-Pause]', pe?.message ?? pgE?.message)
+    return
+  }
+  if ((pend ?? 0) !== 0 || (progCt ?? 0) !== 0) return
+  const { error: ue } = await supabase
+    .from('leads')
+    .update({
+      ai_paused_for_zv_dispatch: false,
+      funnel_locked_until: null,
+    })
+    .eq('id', leadId)
+    .eq('user_id', userId)
+  if (ue) console.warn('[worker][ZV-Pause] release:', ue.message)
+}
+
+/** Mesmo bloco da Edge: sem pendentes na campanha → completion + reavalia trava IA do lead. */
 async function maybeFinalizeZapVoiceCampaignLead(
   supabase: SupabaseClient,
   row: ScheduledRow,
@@ -699,11 +737,7 @@ async function maybeFinalizeZapVoiceCampaignLead(
       if (prog && (prog as { id?: string }).id) {
         await supabase.from('lead_campaign_progress').delete().eq('id', (prog as { id: string }).id)
       }
-      await supabase
-        .from('leads')
-        .update({ funnel_locked_until: null })
-        .eq('id', row.lead_id)
-        .eq('user_id', row.user_id)
+      await maybeReleaseLeadZvAiDispatchPause(supabase, row.user_id, row.lead_id)
     }
   }
 }

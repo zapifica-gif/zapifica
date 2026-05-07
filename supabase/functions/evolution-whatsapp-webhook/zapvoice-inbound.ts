@@ -74,23 +74,57 @@ function funnelStepDelaySeconds(step: FunnelRow): number {
   return Number.isFinite(n) && n >= 0 ? n : 0
 }
 
-/** Se a Etapa 1 não entra em `scheduled_messages`, não deixamos o lead preso sem IA. */
-async function unlockLeadFunnelLock(
+/** Libera a IA do lead se não há mais Zap Voice pendente/processando nem progresso ativo. */
+async function maybeReleaseLeadZvAiDispatchPause(
   supabase: SupabaseClient,
   userId: string,
   leadId: string,
   context: string,
 ): Promise<void> {
+  const [{ count: pend, error: pe }, { count: progCt, error: pgE }] = await Promise.all([
+    supabase
+      .from('scheduled_messages')
+      .select('id', { count: 'exact', head: true })
+      .eq('user_id', userId)
+      .eq('lead_id', leadId)
+      .not('zv_campaign_id', 'is', null)
+      .in('status', ['pending', 'processing'])
+      .eq('is_active', true),
+    supabase
+      .from('lead_campaign_progress')
+      .select('id', { count: 'exact', head: true })
+      .eq('user_id', userId)
+      .eq('lead_id', leadId)
+      .in('status', ['active', 'awaiting_last_send']),
+  ])
+  if (pe || pgE) {
+    console.warn(`[ZapVoice inbound] release pause (${context}):`, pe?.message ?? pgE?.message)
+    return
+  }
+  if ((pend ?? 0) !== 0 || (progCt ?? 0) !== 0) return
   const { error } = await supabase
     .from('leads')
-    .update({ funnel_locked_until: null })
+    .update({
+      ai_paused_for_zv_dispatch: false,
+      funnel_locked_until: null,
+    })
     .eq('id', leadId)
     .eq('user_id', userId)
   if (error) {
     console.error(`[ZapVoice inbound] funnel unlock (${context}):`, error.message)
     return
   }
-  console.warn(`[ZapVoice inbound] funnel unlock (${context}) lead=${leadId}`)
+  console.warn(`[ZapVoice inbound] IA liberada (${context}) lead=${leadId}`)
+}
+
+/** Se a Etapa 1 não entra na fila, reavalia a trava Zap Voice por lead (não mantém estado obsoleto). */
+async function unlockLeadFunnelLock(
+  supabase: SupabaseClient,
+  userId: string,
+  leadId: string,
+  context: string,
+): Promise<void> {
+  await maybeReleaseLeadZvAiDispatchPause(supabase, userId, leadId, context)
 }
 
 type ProgressRow = {
@@ -392,7 +426,6 @@ export async function processZapVoiceInbound(
       return { enqueued: false, reason: 'erro_lead', campaignId: matched.id, suppressAi: true }
     }
 
-    const startMs = Date.now()
   const totalSteps = ordered.length
   const maxStepOrder = ordered.reduce((acc, s) => Math.max(acc, Number(s.step_order) || 0), 0)
   if (totalSteps > 0 && maxStepOrder > 0) {
@@ -464,12 +497,6 @@ export async function processZapVoiceInbound(
             suppressAi: enq1.suppressAi !== false,
           }
         }
-        const lockUntilIso = new Date(startMs + 6 * 60 * 60 * 1000).toISOString()
-        await p.supabase
-          .from('leads')
-          .update({ funnel_locked_until: lockUntilIso })
-          .eq('id', p.leadId)
-          .eq('user_id', p.userId)
         console.log(
           '[ZapVoice inbound] orgânico: progresso+etapa1 (sem isca; isca=apenas do painel)',
           {
@@ -597,10 +624,12 @@ async function enqueueFunnelStepAndAdvance(p: {
     console.error('[ZapVoice inbound] progress update', up.error.message)
   }
 
-  const lockUntilIso = new Date(nowMs + 6 * 60 * 60 * 1000).toISOString()
   await p.supabase
     .from('leads')
-    .update({ funnel_locked_until: lockUntilIso })
+    .update({
+      ai_paused_for_zv_dispatch: true,
+      funnel_locked_until: null,
+    })
     .eq('id', p.leadId)
     .eq('user_id', p.userId)
 

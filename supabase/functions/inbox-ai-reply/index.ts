@@ -75,6 +75,8 @@ type LeadRow = {
   phone: string | null
   name: string | null
   funnel_locked_until?: string | null
+  /** Trava Zap Voice por lead — sem janelas fixas de horas ligadas ao fim da campanha inteira */
+  ai_paused_for_zv_dispatch?: boolean | null
 }
 
 function extractClientFirstNameForAi(
@@ -327,7 +329,9 @@ async function runPipeline(
   // Identifica o lead primeiro (precisamos do user_id para checar campanhas).
   const { data: lead, error: leErr } = await supabase
     .from('leads')
-    .select('id, user_id, phone, name, funnel_locked_until')
+    .select(
+      'id, user_id, phone, name, funnel_locked_until, ai_paused_for_zv_dispatch',
+    )
     .eq('id', triggerRow.lead_id)
     .maybeSingle()
 
@@ -412,6 +416,14 @@ async function runPipeline(
   }
   if ((progCount ?? 0) > 0) {
     return { ok: true, ignored: 'hard_lock_progress_active', lead_id: triggerRow.lead_id }
+  }
+
+  if (leadData.ai_paused_for_zv_dispatch === true) {
+    return {
+      ok: true,
+      ignored: 'zv_dispatch_ai_paused_flag',
+      lead_id: triggerRow.lead_id,
+    }
   }
 
   // HARD LOCK: última mensagem com supressão (corrida com insert do webhook).

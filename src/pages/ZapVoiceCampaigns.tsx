@@ -1105,7 +1105,10 @@ export function ZapVoiceCampaignsPage() {
       if (ids.length === 0) return
       const { error: e2 } = await supabase
         .from('leads')
-        .update({ funnel_locked_until: null })
+        .update({
+          funnel_locked_until: null,
+          ai_paused_for_zv_dispatch: false,
+        })
         .eq('user_id', uid)
         .in('id', ids)
       if (e2) {
@@ -1392,10 +1395,12 @@ export function ZapVoiceCampaignsPage() {
             throw new Error(`Progresso da campanha: ${progErr.message}`)
           }
 
-          const lockUntilIso = new Date(startMs + 6 * 60 * 60 * 1000).toISOString()
           await supabase
             .from('leads')
-            .update({ funnel_locked_until: lockUntilIso })
+            .update({
+              ai_paused_for_zv_dispatch: true,
+              funnel_locked_until: null,
+            })
             .eq('id', lead.id)
             .eq('user_id', userId)
         }
