@@ -18,7 +18,8 @@ type ScheduledRow = {
   lead_id: string | null
   media_url: string | null
   is_active: boolean
-  recipient_type: 'personal' | 'segment'
+  /** Null em linhas antigas ou drift DB — tratar como `personal`. */
+  recipient_type: 'personal' | 'segment' | null
   content_type: ContentType
   message_body: string | null
   scheduled_at: string | null
@@ -59,6 +60,22 @@ function isScheduledMessageZapVoiceFunnelStep(msg: ScheduledRow): boolean {
       s != null &&
       String(s).trim() !== '',
   )
+}
+
+/**
+ * Se `recipient_type` vier null/inválido, nenhuma ramificação preenchia `phones`
+ * → disparo falhava com “sem telefone”.
+ */
+function effectiveRecipientType(msg: ScheduledRow): 'personal' | 'segment' {
+  return msg.recipient_type === 'segment' ? 'segment' : 'personal'
+}
+
+function digitsPreview(d: string | null): string {
+  const s = String(d ?? '')
+  if (!s) return '(vazio)'
+  if (s.includes('@')) return s.length <= 48 ? s : `${s.slice(0, 24)}…`
+  if (s.length <= 6) return '***'
+  return `***…${s.slice(-4)}`
 }
 
 function normalizeRecurrence(raw: string | null | undefined): RecurrenceRule {
@@ -124,6 +141,19 @@ function instanceNameFromUserId(userId: string): string {
   return `zapifica_${safe}`.slice(0, 80)
 }
 
+/** Mesma regra de `src/lib/phoneBrazil.ts` (DDD 8 dígitos + celular → injeta o 9). */
+function preferBrazilMobileNineDigit(fullDigits: string): string {
+  const d = fullDigits.replace(/\D/g, '')
+  if (!d.startsWith('55')) return d
+  if (d.length !== 12) return d
+  const ddd = d.slice(2, 4)
+  const rest8 = d.slice(4)
+  if (ddd.length !== 2 || rest8.length !== 8) return d
+  const first = rest8[0] ?? ''
+  if (!'6789'.includes(first)) return d
+  return `55${ddd}9${rest8}`
+}
+
 function toEvolutionDigits(raw: string | null | undefined): string | null {
   if (!raw) return null
   const t = raw.trim()
@@ -132,9 +162,13 @@ function toEvolutionDigits(raw: string | null | undefined): string | null {
   const core = t.includes('@') ? t.split('@')[0] ?? '' : t
   const digits = core.replace(/\D/g, '')
   if (!digits) return null
-  if (digits.startsWith('55') && digits.length >= 12) return digits
-  if (digits.length === 10 || digits.length === 11) return `55${digits}`
-  if (digits.length >= 12) return digits
+  if (digits.startsWith('55') && digits.length >= 12) {
+    return preferBrazilMobileNineDigit(digits)
+  }
+  if (digits.length === 10 || digits.length === 11) {
+    return preferBrazilMobileNineDigit(`55${digits}`)
+  }
+  if (digits.length >= 12) return preferBrazilMobileNineDigit(digits)
   return null
 }
 
@@ -744,7 +778,18 @@ serve(async () => {
         console.log('[Agenda Suprema] Disparando mensagem ID:', msg.id)
         const filaAvulsa = isScheduledMessageAgendaOuAvulsa(msg)
         if (filaAvulsa) {
-          console.log('[Agenda Suprema] Fila AVULSA (sem zv_campaign_id): só Evolution + marca sent/error — sem progresso/zv_funnels.')
+          console.log(
+            '[Agenda Suprema] Iniciando disparo de mensagem avulsa da Agenda (sem Zap Voice)',
+            {
+              sched_id: msg.id,
+              event_id: msg.event_id,
+              recipient_type_raw: msg.recipient_type ?? null,
+              recipient_type_eff: effectiveRecipientType(msg),
+              scheduled_at: msg.scheduled_at,
+              content_type: msg.content_type,
+              has_recipient_phone: Boolean(msg.recipient_phone?.trim()),
+            },
+          )
         } else {
           console.log('[Agenda Suprema] Fila Zap Voice (campanha): após envio pode atualizar progresso e encadear etapas.', {
             sched_id: msg.id,
@@ -783,7 +828,7 @@ serve(async () => {
           )
           if (p) phones = [p]
         }
-      } else if (msg.recipient_type === 'personal') {
+      } else if (effectiveRecipientType(msg) === 'personal') {
         const digits = toEvolutionDigits(msg.recipient_phone)
         if (!digits) {
           const { data: prof } = await supabase
@@ -803,7 +848,7 @@ serve(async () => {
           phones = [digits]
         }
       } else if (
-        msg.recipient_type === 'segment' &&
+        effectiveRecipientType(msg) === 'segment' &&
         msg.segment_lead_ids &&
         msg.segment_lead_ids.length > 0
       ) {
@@ -818,9 +863,29 @@ serve(async () => {
       }
 
       if (phones.length === 0) {
+        if (filaAvulsa) {
+          console.error(
+            '[Agenda Suprema] Mensagem AVULSA sem destinatários resolvíveis (recipient_phone/perfil/leads)',
+            {
+              sched_id: msg.id,
+              event_id: msg.event_id,
+              recipient_type_eff: effectiveRecipientType(msg),
+              recipient_phone_preview: digitsPreview(msg.recipient_phone),
+            },
+          )
+        }
         throw new Error(
           'Nenhum telefone válido para envio (DDI 55 + DDD + número, ou JID de grupo).',
         )
+      }
+
+      if (filaAvulsa) {
+        console.log('[Agenda Suprema AVULSA] Destinatários resolvidos; chamando Evolution API', {
+          sched_id: msg.id,
+          destinos: phones.length,
+          previews: phones.map(digitsPreview),
+          instance_preview: `${(msg.evolution_instance_name ?? '').slice(0, 32)}`,
+        })
       }
 
       const legacyInstance = msg.evolution_instance_name?.trim() ?? ''
@@ -1129,6 +1194,18 @@ serve(async () => {
           .eq('id', msg.id)
         if (upErr) {
           throw new Error(`Supabase: falha ao atualizar agendamento: ${upErr.message}`)
+        }
+
+        if (isScheduledMessageAgendaOuAvulsa(msg)) {
+          console.log(
+            '[Agenda Suprema] Mensagem avulsa disparada com sucesso (Evolution OK + scheduled_messages atualizado)',
+            {
+              sched_id: msg.id,
+              event_id: msg.event_id,
+              status_db: useRecurring ? 'pending (recorrência)' : 'sent',
+              evolution_message_id: lastEvolutionId,
+            },
+          )
         }
 
         if (msg.lead_id) {

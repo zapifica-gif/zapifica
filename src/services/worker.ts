@@ -1,4 +1,5 @@
 import { createClient, type SupabaseClient } from '@supabase/supabase-js'
+import { toEvolutionDigits } from '../lib/phoneBrazil'
 import type { EvolutionHttpConfig, EvolutionMediaType } from './evolution'
 import {
   sendAudioMessageWithConfig,
@@ -56,7 +57,7 @@ type ScheduledRow = {
   user_id: string
   lead_id: string | null
   media_url: string | null
-  recipient_type: 'personal' | 'segment'
+  recipient_type: 'personal' | 'segment' | null
   content_type: 'text' | 'audio' | 'image' | 'document' | 'video'
   message_body: string | null
   segment_lead_ids: string[] | null
@@ -86,6 +87,30 @@ function isScheduledMessageZapVoiceFunnelStepRow(row: ScheduledRow): boolean {
       s != null &&
       String(s).trim() !== '',
   )
+}
+
+function isScheduledMessageAgendaOuAvulsaRow(row: ScheduledRow): boolean {
+  const z = row.zv_campaign_id
+  return z == null || String(z).trim() === ''
+}
+
+function effectiveRecipientTypeRow(row: ScheduledRow): 'personal' | 'segment' {
+  return row.recipient_type === 'segment' ? 'segment' : 'personal'
+}
+
+/** Telefones sempre no formato Evolution (igual à Edge + `phoneBrazil.ts`). */
+function normalizeWorkerRecipients(rawTargets: string[]): string[] {
+  const out: string[] = []
+  const seen = new Set<string>()
+  for (const raw of rawTargets) {
+    const trimmed = raw.trim()
+    if (!trimmed) continue
+    const n = toEvolutionDigits(trimmed)
+    if (!n || seen.has(n)) continue
+    seen.add(n)
+    out.push(n)
+  }
+  return out
 }
 
 function normalizeRecurrence(raw: string | null | undefined): RecurrenceRule {
@@ -597,7 +622,14 @@ async function resolveRecipientPhones(
   if (row.lead_id) {
     const inline = row.recipient_phone?.trim()
     if (inline) {
-      return { targets: [inline], error: null }
+      const n = toEvolutionDigits(inline)
+      if (!n) {
+        return {
+          targets: [],
+          error: 'Telefone do lead (recipient_phone inline) inválido para Evolution.',
+        }
+      }
+      return { targets: [n], error: null }
     }
     const { data: lead, error } = await supabase
       .from('leads')
@@ -610,15 +642,29 @@ async function resolveRecipientPhones(
     }
     const p = (lead as { phone: string | null } | null)?.phone?.trim()
     if (p) {
-      return { targets: [p], error: null }
+      const n = toEvolutionDigits(p)
+      if (!n) {
+        return {
+          targets: [],
+          error: 'Telefone do lead inválido para Evolution.',
+        }
+      }
+      return { targets: [n], error: null }
     }
     return { targets: [], error: 'Lead sem telefone para o disparo agendado.' }
   }
 
-  if (row.recipient_type === 'personal') {
+  if (effectiveRecipientTypeRow(row) === 'personal') {
     const inline = row.recipient_phone?.trim()
     if (inline) {
-      return { targets: [inline], error: null }
+      const n = toEvolutionDigits(inline)
+      if (!n) {
+        return {
+          targets: [],
+          error: 'Telefone pessoal (inline) inválido para Evolution.',
+        }
+      }
+      return { targets: [n], error: null }
     }
 
     const fromProfile = await resolvePersonalPhoneFromProfile(
@@ -626,7 +672,14 @@ async function resolveRecipientPhones(
       row.user_id,
     )
     if (fromProfile?.trim()) {
-      return { targets: [fromProfile.trim()], error: null }
+      const n = toEvolutionDigits(fromProfile.trim())
+      if (!n) {
+        return {
+          targets: [],
+          error: 'Telefone do perfil inválido para Evolution.',
+        }
+      }
+      return { targets: [n], error: null }
     }
 
     const { data, error } = await supabase.auth.admin.getUserById(row.user_id)
@@ -644,7 +697,14 @@ async function resolveRecipientPhones(
           'Telefone não encontrado (recipient_phone vazio, profiles e auth sem número).',
       }
     }
-    return { targets: [raw], error: null }
+    const n = toEvolutionDigits(raw)
+    if (!n) {
+      return {
+        targets: [],
+        error: 'Telefone do auth/metadata inválido para Evolution.',
+      }
+    }
+    return { targets: [n], error: null }
   }
 
   const ids = row.segment_lead_ids ?? []
@@ -662,14 +722,17 @@ async function resolveRecipientPhones(
     return { targets: [], error: error.message }
   }
 
-  const targets = (leads ?? [])
+  const rawPhones = (leads ?? [])
     .map((l: { phone: string | null }) => (l.phone ?? '').trim())
     .filter(Boolean)
+
+  const targets = normalizeWorkerRecipients(rawPhones)
 
   if (targets.length === 0) {
     return {
       targets: [],
-      error: 'Nenhum telefone válido nos leads selecionados.',
+      error:
+        'Nenhum telefone válido nos leads selecionados (após normalização Evolution).',
     }
   }
 
@@ -957,6 +1020,18 @@ export async function checkAndSendScheduledMessages(
         console.log(`[worker] Delay antes do envio: ${delayMs}ms | msg=${row.id}`)
         await sleep(delayMs)
 
+        if (isScheduledMessageAgendaOuAvulsaRow(row)) {
+          console.log(
+            '[Agenda Suprema][worker] Iniciando disparo de mensagem avulsa da Agenda...',
+            {
+              sched_id: row.id,
+              lead_id: row.lead_id,
+              recipient_type_eff: effectiveRecipientTypeRow(row),
+              zv_campaign_id: row.zv_campaign_id ?? null,
+            },
+          )
+        }
+
         const { targets, error: resolveErr } = await resolveRecipientPhones(
           supabase,
           row,
@@ -972,6 +1047,13 @@ export async function checkAndSendScheduledMessages(
             .eq('id', row.id)
           processed += 1
           break inner
+        }
+
+        if (isScheduledMessageAgendaOuAvulsaRow(row)) {
+          console.log(
+            '[Agenda Suprema][worker] Destinatários resolvidos; chamando Evolution API',
+            { sched_id: row.id, dest_count: targets.length },
+          )
         }
 
         const sendResults: {
@@ -1005,7 +1087,7 @@ export async function checkAndSendScheduledMessages(
           const useRecurring =
             bump && nextAt && new Date(nextAt).getTime() > Date.now()
 
-          await supabase
+          const { error: upScheduledErr } = await supabase
             .from('scheduled_messages')
             .update(
               useRecurring
@@ -1024,6 +1106,42 @@ export async function checkAndSendScheduledMessages(
                   },
             )
             .eq('id', row.id)
+
+          if (upScheduledErr) {
+            console.error(
+              '[worker] Falha ao atualizar scheduled_messages após Evolution OK:',
+              upScheduledErr.message,
+              '| sched_id=',
+              row.id,
+            )
+            await supabase
+              .from('scheduled_messages')
+              .update({
+                status: 'error',
+                last_error: `Enviado na Evolution mas falhou persistência: ${upScheduledErr.message}`.slice(
+                  0,
+                  4000,
+                ),
+                updated_at: new Date().toISOString(),
+              })
+              .eq('id', row.id)
+            processed += 1
+            break inner
+          }
+
+          if (
+            !useRecurring &&
+            isScheduledMessageAgendaOuAvulsaRow(row)
+          ) {
+            console.log(
+              '[Agenda Suprema] Mensagem avulsa disparada com sucesso',
+              '(worker: Evolution OK + scheduled_messages → sent)',
+              {
+                sched_id: row.id,
+                evolution_message_id: ids.length ? ids.join(',') : null,
+              },
+            )
+          }
 
           if (row.lead_id) {
             const evoId = oks[0]?.messageId ?? (ids[0] ?? null)
