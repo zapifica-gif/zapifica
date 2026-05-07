@@ -51,6 +51,34 @@ export type FunnelMediaType = 'text' | 'image' | 'video' | 'audio' | 'document'
 
 export type ZvTriggerCondition = 'equals' | 'contains' | 'starts_with' | 'not_contains'
 
+function parseTriggerKeywordsCsv(raw: string | null | undefined): string[] {
+  const txt = String(raw ?? '')
+  return txt
+    .split(/[,\n;]+/g)
+    .map((s) => s.trim())
+    .filter(Boolean)
+}
+
+function normalizeTriggerKeywordForUniq(raw: string): string {
+  return raw.trim().toLowerCase().replace(/\s+/g, ' ')
+}
+
+function serializeTriggerKeywordsCsv(list: string[]): string | null {
+  const seen = new Set<string>()
+  const out: string[] = []
+  for (const raw of list) {
+    const t = raw.trim()
+    if (!t) continue
+    const key = normalizeTriggerKeywordForUniq(t)
+    if (!key || seen.has(key)) continue
+    seen.add(key)
+    out.push(t)
+  }
+  if (out.length === 0) return null
+  // Compat: salvamos em texto (CSV). Backend separa por vírgula.
+  return out.join(',')
+}
+
 type ZvFlow = {
   id: string
   user_id: string
@@ -459,7 +487,7 @@ export function ZapVoiceCampaignsPage() {
     'Olá {nome}! Vi seu contato e queria confirmar uma informação.',
   ])
   const [newTriggerCondition, setNewTriggerCondition] = useState<ZvTriggerCondition>('equals')
-  const [newTriggerKeyword, setNewTriggerKeyword] = useState('')
+  const [newTriggerKeywords, setNewTriggerKeywords] = useState<string[]>([])
   /** Fluxo existente (`zv_flows`) vinculado à nova campanha — nunca criar fluxo ao criar campanha. */
   const [newCampaignFlowId, setNewCampaignFlowId] = useState('')
   const [creating, setCreating] = useState(false)
@@ -824,7 +852,7 @@ export function ZapVoiceCampaignsPage() {
           isca_message: newIscaMessage.trim() || 'Olá {nome}, tudo bem?',
           isca_messages: newIscas.map((x) => x.trim()).filter(Boolean).slice(0, 5),
           trigger_condition: newTriggerCondition,
-          trigger_keyword: newTriggerKeyword.trim() || null,
+          trigger_keyword: serializeTriggerKeywordsCsv(newTriggerKeywords),
           status: 'draft' as CampaignStatus,
           min_delay_seconds: 2,
           max_delay_seconds: 15,
@@ -872,7 +900,7 @@ export function ZapVoiceCampaignsPage() {
         'Olá {nome}! Vi seu contato e queria confirmar uma informação.',
       ])
       setNewTriggerCondition('equals')
-      setNewTriggerKeyword('')
+      setNewTriggerKeywords([])
       setNewCampaignFlowId('')
       setSuccess(
         'Campanha criada em rascunho. Ajuste a isca e o gatilho aqui; as etapas ficam no fluxo que você escolheu (guia Fluxos).',
@@ -891,7 +919,7 @@ export function ZapVoiceCampaignsPage() {
     newIscaMessage,
     newIscas,
     newTriggerCondition,
-    newTriggerKeyword,
+    newTriggerKeywords,
     newCampaignFlowId,
     flows,
     userId,
@@ -2043,11 +2071,11 @@ export function ZapVoiceCampaignsPage() {
                 <label className="mb-1 block text-xs font-medium text-zinc-700">
                   Palavra-chave (gatilho)
                 </label>
-                <input
-                  value={newTriggerKeyword}
-                  onChange={(e) => setNewTriggerKeyword(e.target.value)}
-                  placeholder="Ex.: QUERO, SIM, CUPOM10"
-                  className="w-full rounded-lg border border-zinc-200 bg-white px-3 py-2 text-sm shadow-inner focus:border-brand-300 focus:outline-none focus:ring-2 focus:ring-brand-500/20"
+                <PhraseChipsInput
+                  value={newTriggerKeywords}
+                  onChange={setNewTriggerKeywords}
+                  placeholder="Digite um gatilho e aperte Enter (ex.: SIM)"
+                  help="Dica: digite um gatilho e aperte Enter para adicionar. Você pode incluir vários (ex.: 'sim', 'quero', 'cupom10'). Se o lead enviar QUALQUER UM deles, a campanha dispara."
                 />
                 <p className="mt-1 text-[11px] text-zinc-500">
                   Após a isca, o lead precisa enviar esta palavra (ou regra) para entrar no fluxo escolhido acima.
@@ -2579,26 +2607,22 @@ export function ZapVoiceCampaignsPage() {
                     <label className="mb-1 block text-xs font-medium text-zinc-700">
                       Gatilho (palavra-chave após a isca)
                     </label>
-                    <input
-                      value={selected.trigger_keyword ?? ''}
-                      onChange={(e) => {
-                        const v = e.target.value
-                        setCampaigns((prev) =>
-                          prev.map((c) =>
-                            c.id === selected.id ? { ...c, trigger_keyword: v || null } : c,
-                          ),
-                        )
-                      }}
-                      onBlur={(e) => {
-                        const t = e.target.value.trim() || null
-                        setCampaigns((prev) =>
-                          prev.map((c) => (c.id === selected.id ? { ...c, trigger_keyword: t } : c)),
-                        )
-                        void updateCampaign(selected.id, { trigger_keyword: t })
-                      }}
-                      placeholder="Ex.: QUERO, CUPOM, SIM"
-                      className="w-full max-w-md rounded-lg border border-zinc-200 bg-white px-3 py-2 text-sm shadow-inner focus:border-brand-300 focus:outline-none focus:ring-2 focus:ring-brand-500/20"
-                    />
+                    <div className="max-w-xl">
+                      <PhraseChipsInput
+                        value={parseTriggerKeywordsCsv(selected.trigger_keyword)}
+                        onChange={(next) => {
+                          const csv = serializeTriggerKeywordsCsv(next)
+                          setCampaigns((prev) =>
+                            prev.map((c) =>
+                              c.id === selected.id ? { ...c, trigger_keyword: csv } : c,
+                            ),
+                          )
+                          void updateCampaign(selected.id, { trigger_keyword: csv })
+                        }}
+                        placeholder="Digite um gatilho e aperte Enter (ex.: SIM)"
+                        help="Digite um gatilho e aperte Enter para adicionar. Você pode cadastrar vários; se o lead enviar qualquer um, dispara. O sistema normaliza (minúsculas/acentos/espaços) antes de comparar."
+                      />
+                    </div>
                     <p className="mt-1 text-[11px] text-zinc-500">
                       Depois que a <b>Mensagem inicial</b> (isca) for enviada, o lead precisa
                       responder com exatamente este texto (normalizado: minúsculas, sem espaços

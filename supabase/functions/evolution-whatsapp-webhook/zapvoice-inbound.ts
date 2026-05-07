@@ -72,7 +72,15 @@ function pairDelaySnapshotForQueue(params: {
 }
 
 /** Avalia a mensagem do lead contra a palavra-chave e a regra da campanha. */
-function triggerConditionSatisfied(
+function splitTriggerKeywordsRaw(keywordsRaw: string): string[] {
+  // Compatibilidade: suportamos "sim,quero,cupom" e também "sim\nquero" / "sim;quero".
+  return String(keywordsRaw ?? '')
+    .split(/[,\n;]+/g)
+    .map((s) => s.trim())
+    .filter(Boolean)
+}
+
+function triggerConditionSatisfiedSingle(
   condition: TriggerCondition,
   messageNorm: string,
   keywordRaw: string,
@@ -93,6 +101,28 @@ function triggerConditionSatisfied(
     default:
       return false
   }
+}
+
+/** Avalia a mensagem do lead contra MÚLTIPLOS gatilhos (CSV). */
+function triggerConditionSatisfiedAny(
+  condition: TriggerCondition,
+  messageNorm: string,
+  keywordsCsvRaw: string,
+): boolean {
+  const rawList = splitTriggerKeywordsRaw(keywordsCsvRaw)
+  const kws = rawList.map(normText).filter(Boolean)
+  if (kws.length === 0) return false
+
+  if (condition === 'not_contains') {
+    // "Não contém": verdadeiro apenas se NÃO contiver NENHUM dos gatilhos.
+    return kws.every((kw) => !messageNorm.includes(kw))
+  }
+
+  // equals / contains / starts_with: verdadeiro se bater QUALQUER gatilho.
+  for (const kw of kws) {
+    if (triggerConditionSatisfiedSingle(condition, messageNorm, kw)) return true
+  }
+  return false
 }
 
 function leadTagForCampaign(c: CampaignRow): string {
@@ -320,7 +350,7 @@ async function handleActiveCampaignProgress(
   if (progress.total_steps === 0) {
     const slotFluxoVazio = Number.isFinite(primeiraOrdem) ? primeiraOrdem : 1
     if (Number.isFinite(progressNext) && progressNext === slotFluxoVazio) {
-      if (triggerConditionSatisfied(cond, messageNorm, camp.trigger_keyword ?? '')) {
+      if (triggerConditionSatisfiedAny(cond, messageNorm, camp.trigger_keyword ?? '')) {
         console.log('[ZapVoice inbound] fluxo vazio: gatilho bateu; marcando conclusão', {
           leadId: p.leadId,
           campaignId: progress.campaign_id,
@@ -406,7 +436,7 @@ async function handleActiveCampaignProgress(
     // A partir desta etapa, todo o fluxo segue automaticamente pelo timer
     // (worker enfileira as próximas etapas).
     const step = primeiraEtapaRaw as FunnelRow
-    if (!triggerConditionSatisfied(cond, messageNorm, camp.trigger_keyword ?? '')) {
+    if (!triggerConditionSatisfiedAny(cond, messageNorm, camp.trigger_keyword ?? '')) {
       console.log('[ZapVoice inbound] early return: gatilho não bateu na etapa pós-isca', {
         leadId: p.leadId,
         campaignId: progress.campaign_id,
@@ -606,7 +636,7 @@ export async function processZapVoiceInbound(
     const row = campaignsList.find((c) => c.id === pr.campaign_id)
     if (!row) continue
     const cond = (row.trigger_condition ?? 'equals') as TriggerCondition
-    if (triggerConditionSatisfied(cond, messageNorm, row.trigger_keyword ?? '')) {
+    if (triggerConditionSatisfiedAny(cond, messageNorm, row.trigger_keyword ?? '')) {
       matched = row
       console.log('[ZapVoice inbound] gatilho casou com campanha do progresso ativo', {
         campaignId: row.id,
@@ -618,7 +648,7 @@ export async function processZapVoiceInbound(
   if (!matched) {
     for (const row of campaignsList) {
       const cond = (row.trigger_condition ?? 'equals') as TriggerCondition
-      if (triggerConditionSatisfied(cond, messageNorm, row.trigger_keyword ?? '')) {
+      if (triggerConditionSatisfiedAny(cond, messageNorm, row.trigger_keyword ?? '')) {
         matched = row
         console.log('[ZapVoice inbound] gatilho casou na listagem global de campanhas', {
           campaignId: row.id,
