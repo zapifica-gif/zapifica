@@ -891,13 +891,14 @@ async function resolveCanonicalLeadIdForPhone(
   if (dupes.length <= 1) return candidateId
 
   const ids = dupes.map((r) => r.id)
+  // Sem ORDER BY: alguns bancos com drift não tinham `created_at` e isso quebrava todo o webhook.
+  // Para escolher o lead canônico basta haver QUALQUER progresso ativo — pegamos o primeiro.
   const { data: prog, error } = await supabase
     .from('lead_campaign_progress')
-    .select('lead_id, created_at')
+    .select('lead_id')
     .eq('user_id', userId)
     .in('lead_id', ids)
     .in('status', ['active', 'awaiting_last_send'])
-    .order('created_at', { ascending: false })
     .limit(1)
   if (error) {
     console.warn('[evolution-whatsapp-webhook] resolve duplicata de lead', error.message)

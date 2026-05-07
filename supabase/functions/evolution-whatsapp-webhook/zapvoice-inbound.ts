@@ -553,18 +553,27 @@ export async function processZapVoiceInbound(
     note: 'webhook usa SUPABASE_SERVICE_ROLE_KEY (RLS bypass) — confirmado em index.ts createClient()',
   })
 
-  // Ordena por created_at (sempre existe); updated_at pode faltar em bancos com drift até rodar migration.
+  // Sem ORDER BY: o filtro por (user_id, lead_id, campaign_id) já basta — qualquer drift de schema
+  // (ex.: bancos sem `created_at`/`updated_at`) deixava o select inteiro falhar e o funil travava.
   const { data: progList, error: progErr } = await p.supabase
     .from('lead_campaign_progress')
-    .select('id, campaign_id, next_step_order, total_steps, status, created_at')
+    .select('id, campaign_id, next_step_order, total_steps, status')
     .eq('user_id', p.userId)
     .eq('lead_id', p.leadId)
     .in('status', ['active', 'awaiting_last_send'])
-    .order('created_at', { ascending: false })
     .limit(25)
 
   if (progErr) {
-    console.error('[ZapVoice inbound] progress read', progErr.message)
+    const dbErr = extractDbError(progErr)
+    console.error('[ZapVoice inbound] ERRO FATAL DB (select lead_campaign_progress)', {
+      code: dbErr.code,
+      message: dbErr.message,
+      hint: dbErr.hint,
+      details: dbErr.details,
+      raw: dbErr.raw,
+      leadId: p.leadId,
+      userId: p.userId,
+    })
     return { enqueued: false, reason: 'erro_progresso', suppressAi: true }
   }
 
