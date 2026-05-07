@@ -37,6 +37,30 @@ type ScheduledRow = {
 
 type RecurrenceRule = 'none' | 'daily' | 'weekly' | 'monthly' | 'yearly'
 
+/**
+ * Agenda Suprema, lembretes por evento, segmento manual, chat CRM — sem campanha Zap Voice.
+ * (`zv_campaign_id` é o discrimidor; inserts do funil sempre preenchem.)
+ */
+function isScheduledMessageAgendaOuAvulsa(msg: ScheduledRow): boolean {
+  const z = msg.zv_campaign_id
+  return z == null || String(z).trim() === ''
+}
+
+/**
+ * Etapa concreta do funil Zap Voice: exige lead + campanha + etapa para encadear `step_order` N+1.
+ */
+function isScheduledMessageZapVoiceFunnelStep(msg: ScheduledRow): boolean {
+  const c = msg.zv_campaign_id
+  const s = msg.zv_funnel_step_id
+  return Boolean(
+    msg.lead_id &&
+      c != null &&
+      String(c).trim() !== '' &&
+      s != null &&
+      String(s).trim() !== '',
+  )
+}
+
 function normalizeRecurrence(raw: string | null | undefined): RecurrenceRule {
   const s = (raw ?? 'none').trim().toLowerCase()
   if (s === 'daily' || s === 'weekly' || s === 'monthly' || s === 'yearly') return s
@@ -718,11 +742,21 @@ serve(async () => {
         let queuedInline: { id: string; gapMs: number } | null = null
 
         console.log('[Agenda Suprema] Disparando mensagem ID:', msg.id)
+        const filaAvulsa = isScheduledMessageAgendaOuAvulsa(msg)
+        if (filaAvulsa) {
+          console.log('[Agenda Suprema] Fila AVULSA (sem zv_campaign_id): só Evolution + marca sent/error — sem progresso/zv_funnels.')
+        } else {
+          console.log('[Agenda Suprema] Fila Zap Voice (campanha): após envio pode atualizar progresso e encadear etapas.', {
+            sched_id: msg.id,
+            zv_campaign_id: msg.zv_campaign_id,
+            zv_funnel_step_id: msg.zv_funnel_step_id,
+          })
+        }
 
         // Anti-ban (configurável): delay aleatório antes de cada disparo.
       // Etapas do Zap Voice (zv_funnel_step_id): não empilhar atrasos longos + presença
       let dispatchDelayMs = resolveDispatchDelayMs(msg)
-      if (msg.zv_funnel_step_id) {
+      if (isScheduledMessageZapVoiceFunnelStep(msg)) {
         dispatchDelayMs = Math.min(dispatchDelayMs, 2500)
       }
       console.log(`[Agenda Suprema] Delay antes do envio: ${dispatchDelayMs}ms`)
@@ -989,7 +1023,7 @@ serve(async () => {
         // Anti-ban / humanização: "digitando…" (texto/mídia) ou "gravando…" (áudio).
         const presence = presenceForPlan(plan)
         let presenceDelayMs = Math.floor(Math.random() * (5000 - 2000 + 1)) + 2000
-        if (msg.zv_funnel_step_id) {
+        if (isScheduledMessageZapVoiceFunnelStep(msg)) {
           presenceDelayMs = Math.floor(Math.random() * (1200 - 400 + 1)) + 400
         }
         await sendEvolutionPresence(
@@ -1144,11 +1178,12 @@ serve(async () => {
         failed += 1
       }
 
-      if (msg.lead_id && msg.zv_campaign_id && msg.zv_funnel_step_id) {
+      if (isScheduledMessageZapVoiceFunnelStep(msg)) {
         queuedInline = await enqueueZapVoiceNextScheduledMessage(supabase, msg)
       }
 
       // --- Zap Voice: sem pendentes nesta campanha+lead → conclui e libera IA ---
+      // (Nunca roda para Agenda avulsa: não há `zv_campaign_id`.)
       if (msg.lead_id && msg.zv_campaign_id) {
         const { data: prog, error: progErr } = await supabase
           .from('lead_campaign_progress')

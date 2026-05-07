@@ -360,6 +360,14 @@ export function NewEventModal({
         ? {
             event_id: eventoCriado.id,
             user_id: ownerId,
+            /** Agenda Suprema é avulsa — explícito para o worker não confundir com Zap Voice. */
+            lead_id: null as string | null,
+            zv_campaign_id: null as string | null,
+            zv_funnel_step_id: null as string | null,
+            zv_funnel_step_order: null as number | null,
+            min_delay_seconds: null as number | null,
+            max_delay_seconds: null as number | null,
+            recurrence: 'none' as const,
             is_active: true,
             recipient_type: recipientType,
             content_type: contentType,
@@ -377,6 +385,13 @@ export function NewEventModal({
         : {
             event_id: eventoCriado.id,
             user_id: ownerId,
+            lead_id: null as string | null,
+            zv_campaign_id: null as string | null,
+            zv_funnel_step_id: null as string | null,
+            zv_funnel_step_order: null as number | null,
+            min_delay_seconds: null as number | null,
+            max_delay_seconds: null as number | null,
+            recurrence: 'none' as const,
             is_active: false,
             recipient_type: 'personal' as const,
             content_type: 'text' as const,

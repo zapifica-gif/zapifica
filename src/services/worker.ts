@@ -75,6 +75,19 @@ type ScheduledRow = {
 
 type RecurrenceRule = 'none' | 'daily' | 'weekly' | 'monthly' | 'yearly'
 
+/** Etapa Zap Voice na fila: lead + campanha + etapa de funil (encadeamento N+1). */
+function isScheduledMessageZapVoiceFunnelStepRow(row: ScheduledRow): boolean {
+  const c = row.zv_campaign_id
+  const s = row.zv_funnel_step_id
+  return Boolean(
+    row.lead_id &&
+      c != null &&
+      String(c).trim() !== '' &&
+      s != null &&
+      String(s).trim() !== '',
+  )
+}
+
 function normalizeRecurrence(raw: string | null | undefined): RecurrenceRule {
   const s = (raw ?? 'none').trim().toLowerCase()
   if (s === 'daily' || s === 'weekly' || s === 'monthly' || s === 'yearly') return s
@@ -938,7 +951,7 @@ export async function checkAndSendScheduledMessages(
         let queuedInline: ZapVoiceQueuedNextInline | null = null
 
         let delayMs = resolveDispatchDelayMs(row)
-        if (row.zv_funnel_step_id) {
+        if (isScheduledMessageZapVoiceFunnelStepRow(row)) {
           delayMs = Math.min(delayMs, 2500)
         }
         console.log(`[worker] Delay antes do envio: ${delayMs}ms | msg=${row.id}`)
@@ -1042,7 +1055,7 @@ export async function checkAndSendScheduledMessages(
             }
           }
 
-          if (row.lead_id && row.zv_campaign_id) {
+          if (isScheduledMessageZapVoiceFunnelStepRow(row)) {
             queuedInline = await enqueueNextFunnelStepAfterSend(supabase, row)
           }
 
@@ -1132,7 +1145,7 @@ export async function checkAndSendScheduledMessages(
             })
             .eq('id', row.id)
 
-          if (row.lead_id && row.zv_campaign_id) {
+          if (isScheduledMessageZapVoiceFunnelStepRow(row)) {
             queuedInline = await enqueueNextFunnelStepAfterSend(supabase, row)
           }
 
