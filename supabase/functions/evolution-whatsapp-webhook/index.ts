@@ -332,10 +332,23 @@ function toEvolutionDigits(raw: string | null | undefined): string | null {
   const core = t.includes('@') ? t.split('@')[0] ?? '' : t
   const digits = core.replace(/\D/g, '')
   if (!digits) return null
-  if (digits.startsWith('55') && digits.length >= 12) return digits
-  if (digits.length === 10 || digits.length === 11) return `55${digits}`
-  if (digits.length >= 12) return digits
+  if (digits.startsWith('55') && digits.length >= 12) return preferBrazilMobileNineDigit(digits)
+  if (digits.length === 10 || digits.length === 11) return preferBrazilMobileNineDigit(`55${digits}`)
+  if (digits.length >= 12) return preferBrazilMobileNineDigit(digits)
   return null
+}
+
+/** Regra conservadora: injeta 9º dígito apenas quando o 1º dígito sugere celular (6/7/8/9). */
+function preferBrazilMobileNineDigit(fullDigits: string): string {
+  const d = fullDigits.replace(/\D/g, '')
+  if (!d.startsWith('55')) return d
+  if (d.length !== 12) return d
+  const ddd = d.slice(2, 4)
+  const rest8 = d.slice(4)
+  if (ddd.length !== 2 || rest8.length !== 8) return d
+  const first = rest8[0] ?? ''
+  if (!'6789'.includes(first)) return d
+  return `55${ddd}9${rest8}`
 }
 
 /** Após DDI 55: alterna 9º dígito típico de celular BR (DDD + 9 + 8 vs DDD + 8). */
@@ -905,7 +918,8 @@ async function ensureLeadId(
   const jidKey = normalizeGroupJid(fullDigits)
   const isGroup = jidKey.includes('@g.us')
 
-  const existing = findLeadId(idx, isGroup ? jidKey : fullDigits)
+  const normalized = isGroup ? jidKey : preferBrazilMobileNineDigit(fullDigits)
+  const existing = findLeadId(idx, normalized)
   if (existing) return { id: existing, created: false, error: null }
 
   const displayName = isGroup
@@ -915,14 +929,18 @@ async function ensureLeadId(
 
   const { data, error } = await supabase
     .from('leads')
-    .insert({
-      user_id: userId,
-      name: displayName,
-      phone: isGroup ? jidKey : fullDigits,
-      status: 'novo',
-      source: 'inbound_whatsapp',
-      is_group: isGroup,
-    })
+    .upsert(
+      {
+        user_id: userId,
+        name: displayName,
+        phone: normalized,
+        status: 'novo',
+        source: 'inbound_whatsapp',
+        is_group: isGroup,
+        updated_at: new Date().toISOString(),
+      },
+      { onConflict: 'user_id,phone_key' },
+    )
     .select('id, phone, name, profile_picture_url')
     .single()
 
@@ -932,9 +950,9 @@ async function ensureLeadId(
     if (isGroup) {
       idx.byGroupJid.set(jidKey, row.id)
     } else {
-      for (const k of canonicalBrazilPhoneKeys(fullDigits)) idx.byFull.set(k, row.id)
-      const tset = tailVariantsForBrazilFull(fullDigits)
-      const nf = nationalTail(fullDigits)
+      for (const k of canonicalBrazilPhoneKeys(normalized)) idx.byFull.set(k, row.id)
+      const tset = tailVariantsForBrazilFull(normalized)
+      const nf = nationalTail(normalized)
       if (nf) tset.add(nf)
       for (const tail of tset) idx.byTail.set(tail, row.id)
     }
@@ -952,7 +970,7 @@ async function ensureLeadId(
     idx.byTail = refreshed.byTail
     idx.byGroupJid = refreshed.byGroupJid
     idx.rows = refreshed.rows
-    const again = findLeadId(idx, isGroup ? jidKey : fullDigits)
+    const again = findLeadId(idx, normalized)
     if (again) return { id: again, created: false, error: null }
   }
 

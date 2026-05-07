@@ -344,25 +344,31 @@ export function ContactsBasePanel({ userId, onContactsChanged, onError, onSucces
       const company_name = addCompany.trim().slice(0, 240) || null
       const city = addCity.trim().slice(0, 160) || null
       const address_line = addAddress.trim().slice(0, 500) || null
-      const { error } = await supabase.from('leads').insert({
-        user_id: userId,
-        name,
-        phone: phoneDigits,
-        status: 'novo',
-        ai_enabled: true,
-        source: null,
-        tag,
-        email,
-        job_title,
-        company_name,
-        city,
-        address_line,
-      })
+      const { error } = await supabase
+        .from('leads')
+        .upsert(
+          {
+            user_id: userId,
+            name,
+            phone: phoneDigits,
+            status: 'novo',
+            ai_enabled: true,
+            source: null,
+            tag,
+            email,
+            job_title,
+            company_name,
+            city,
+            address_line,
+            updated_at: new Date().toISOString(),
+          },
+          { onConflict: 'user_id,phone_key' },
+        )
       if (error) {
         onError(`Contato: ${error.message}`)
         return
       }
-      onSuccess('Contato criado.')
+      onSuccess('Contato criado/atualizado.')
       setAddOpen(false)
       setAddName('')
       setAddPhone('')
@@ -576,18 +582,13 @@ export function ContactsBasePanel({ userId, onContactsChanged, onError, onSucces
 
   async function duplicateLead(l: LeadRow) {
     const nm = `${l.name.trim()} (cópia)`.slice(0, 200)
-    const digits = phoneDigitsForLead(l.phone)
-    if (!digits) {
-      onError(
-        'Este contato precisa de um telefone válido (DDI 55) para duplicar. Clique em editar e ajuste o número.',
-      )
-      return
-    }
     try {
+      // Duplicar com o MESMO telefone passa a ser proibido (anti-clonagem por phone_key).
+      // Criamos um “rascunho” sem telefone para o usuário ajustar.
       const { error: insE } = await supabase.from('leads').insert({
         user_id: userId,
         name: nm,
-        phone: digits,
+        phone: null,
         status: 'novo',
         ai_enabled: true,
         source: l.source ?? null,
@@ -603,7 +604,7 @@ export function ContactsBasePanel({ userId, onContactsChanged, onError, onSucces
         onError(`Não foi possível duplicar: ${insE.message}`)
         return
       }
-      onSuccess(`Contato duplicado: “${nm}”.`)
+      onSuccess(`Contato duplicado como rascunho: “${nm}” (sem telefone).`)
       onContactsChanged()
       void load()
     } catch (err) {
@@ -1005,7 +1006,9 @@ export function ContactsBasePanel({ userId, onContactsChanged, onError, onSucces
 
       const ch = 150
       for (let i = 0; i < toInsert.length; i += ch) {
-        const { error: insE } = await supabase.from('leads').insert(toInsert.slice(i, i + ch))
+        const { error: insE } = await supabase
+          .from('leads')
+          .upsert(toInsert.slice(i, i + ch), { onConflict: 'user_id,phone_key' })
         if (insE) {
           onError(`Erro ao criar registros: ${insE.message}`)
           return
