@@ -668,6 +668,49 @@ export async function processZapVoiceInbound(
       trigger_condition: matched.trigger_condition,
       trigger_keyword: short(matched.trigger_keyword, 80),
     })
+
+    // CRÍTICO: pausa IMEDIATA da IA assim que o gatilho casou (antes de qualquer query de progresso/funil).
+    // Isso fecha a janela de corrida com o `inbox-ai-reply` mesmo no caso "Inbound Orgânico de Ads"
+    // (lead inédito do Instagram). Se algum passo abaixo falhar, `unlockLeadFunnelLock` libera a IA.
+    try {
+      const upPause = await p.supabase
+        .from('leads')
+        .update({
+          ai_paused_for_zv_dispatch: true,
+          funnel_locked_until: null,
+        })
+        .eq('id', p.leadId)
+        .eq('user_id', p.userId)
+      if (upPause.error) {
+        const dbErr = extractDbError(upPause.error)
+        console.error('[ZapVoice inbound] ERRO FATAL DB (pausa imediata da IA pós-match)', {
+          code: dbErr.code,
+          message: dbErr.message,
+          hint: dbErr.hint,
+          details: dbErr.details,
+          raw: dbErr.raw,
+          leadId: p.leadId,
+          campaignId: matched.id,
+        })
+      } else {
+        console.log('[ZapVoice inbound] IA PAUSADA imediatamente pós-match (ai_paused_for_zv_dispatch=true)', {
+          leadId: p.leadId,
+          campaignId: matched.id,
+        })
+      }
+    } catch (caught) {
+      const dbErr = extractDbError(caught)
+      console.error('[ZapVoice inbound] ERRO FATAL DB (exceção na pausa imediata da IA pós-match)', {
+        code: dbErr.code,
+        message: dbErr.message,
+        hint: dbErr.hint,
+        details: dbErr.details,
+        raw: dbErr.raw,
+        leadId: p.leadId,
+        campaignId: matched.id,
+      })
+    }
+
     const progForMatched = progressed.find((x) => x.campaign_id === matched.id)
     if (progForMatched) {
       console.log(
@@ -715,9 +758,18 @@ export async function processZapVoiceInbound(
       return await handleActiveCampaignProgress(p, messageNorm, progSameCamp as ProgressRow)
     }
 
-    // —— Inbound "orgânico": progresso ainda não existe p/ essa campanha (p.ex. gatilho sem ativação prévia) ——
+    // —— Inbound "orgânico" (ex.: lead novo vindo de Meta Ads/Instagram): progresso ainda não existe p/ essa campanha ——
     // NÃO enfileirar isca Message aqui; isca só sobe pelo `activateCampaign` no painel.
     // Aqui: cria progresso + 1ª etapa do fluxo, conforme gatilho bateu nesta mensagem.
+    console.log('[ZapVoice inbound] INBOUND ORGÂNICO DETECTADO (lead inédito ou sem progresso prévio para esta campanha)', {
+      leadId: p.leadId,
+      campaignId: matched.id,
+      flowId: matched.flow_id,
+      messageNorm: short(messageNorm, 160),
+      trigger_condition: matched.trigger_condition,
+      trigger_keyword: short(matched.trigger_keyword, 80),
+    })
+
     const { data: stepsRaw, error: sErr } = await p.supabase
       .from('zv_funnels')
       .select(
@@ -727,8 +779,17 @@ export async function processZapVoiceInbound(
       .order('step_order', { ascending: true })
 
     if (sErr) {
-      console.error('[ZapVoice inbound] funil', sErr.message)
-      return { enqueued: false, reason: 'erro_funil', campaignId: matched.id, suppressAi: true }
+      const dbErr = extractDbError(sErr)
+      console.error('[ZapVoice inbound] ERRO FATAL DB (orgânico: select funil)', {
+        code: dbErr.code,
+        message: dbErr.message,
+        hint: dbErr.hint,
+        details: dbErr.details,
+        leadId: p.leadId,
+        campaignId: matched.id,
+      })
+      await unlockLeadFunnelLock(p.supabase, p.userId, p.leadId, 'organico_select_funil_falhou')
+      return { enqueued: false, reason: 'erro_funil', campaignId: matched.id, suppressAi: false }
     }
 
     const ordered = [...(stepsRaw ?? [])] as FunnelRow[]
@@ -748,11 +809,12 @@ export async function processZapVoiceInbound(
           matched.id,
           s.step_order,
         )
+        await unlockLeadFunnelLock(p.supabase, p.userId, p.leadId, 'organico_etapa_midia_incompleta')
         return {
           enqueued: false,
           reason: 'etapa_midia_incompleta',
           campaignId: matched.id,
-          suppressAi: true,
+          suppressAi: false,
         }
       }
     }
@@ -760,11 +822,12 @@ export async function processZapVoiceInbound(
     if (ordered.length > 0) {
       const t = ordered[0]!
       if (t.media_type === 'text' && !t.message.trim()) {
+        await unlockLeadFunnelLock(p.supabase, p.userId, p.leadId, 'organico_etapa1_texto_vazia')
         return {
           enqueued: false,
           reason: 'etapa1_texto_vazia',
           campaignId: matched.id,
-          suppressAi: true,
+          suppressAi: false,
         }
       }
     }
@@ -776,8 +839,17 @@ export async function processZapVoiceInbound(
       .eq('id', p.leadId)
       .eq('user_id', p.userId)
     if (upErr) {
-      console.error('[ZapVoice inbound] update lead', upErr.message)
-      return { enqueued: false, reason: 'erro_lead', campaignId: matched.id, suppressAi: true }
+      const dbErr = extractDbError(upErr)
+      console.error('[ZapVoice inbound] ERRO FATAL DB (orgânico: update lead.tag)', {
+        code: dbErr.code,
+        message: dbErr.message,
+        hint: dbErr.hint,
+        details: dbErr.details,
+        leadId: p.leadId,
+        campaignId: matched.id,
+      })
+      await unlockLeadFunnelLock(p.supabase, p.userId, p.leadId, 'organico_update_lead_tag_falhou')
+      return { enqueued: false, reason: 'erro_lead', campaignId: matched.id, suppressAi: false }
     }
 
   const totalSteps = ordered.length
@@ -826,11 +898,12 @@ export async function processZapVoiceInbound(
             return await handleActiveCampaignProgress(p, messageNorm, p2 as ProgressRow)
           }
         }
+        await unlockLeadFunnelLock(p.supabase, p.userId, p.leadId, 'organico_insert_progress_falhou')
         return {
           enqueued: false,
           reason: 'erro_progresso',
           campaignId: matched.id,
-          suppressAi: true,
+          suppressAi: false,
         }
       }
       if (progIns.data) {
@@ -867,25 +940,32 @@ export async function processZapVoiceInbound(
         })
         if (!enq1.enqueued) {
           console.warn('[ZapVoice inbound] orgânico: etapa 1 não enfileirada', enq1.reason)
+          // O `enqueueFunnelStepAndAdvance` já chama `unlockLeadFunnelLock` em seus próprios erros,
+          // mas garantimos uma camada extra aqui caso o caminho de erro não tenha passado por lá.
+          await unlockLeadFunnelLock(p.supabase, p.userId, p.leadId, 'organico_enqueue_etapa1_falhou')
           return {
             enqueued: false,
             reason: enq1.reason ?? 'erro_fila',
             campaignId: matched.id,
-            suppressAi: enq1.suppressAi !== false,
+            suppressAi: false,
           }
         }
         console.log(
-          '[ZapVoice inbound] orgânico: progresso+etapa1 (sem isca; isca=apenas do painel)',
+          '[ZapVoice inbound] INBOUND ORGÂNICO concluído: progresso criado + Etapa 1 enfileirada + IA suprimida',
           {
             campaignId: matched.id,
             leadId: p.leadId,
+            progressId: pr.id,
+            step_order_inicial: pr.next_step_order,
+            total_steps: pr.total_steps,
           },
         )
         return { enqueued: true, campaignId: matched.id, suppressAi: true }
       }
     }
 
-    return { enqueued: false, reason: 'sem_etapas', campaignId: matched.id, suppressAi: true }
+    await unlockLeadFunnelLock(p.supabase, p.userId, p.leadId, 'organico_sem_etapas')
+    return { enqueued: false, reason: 'sem_etapas', campaignId: matched.id, suppressAi: false }
   }
 
   // 2) Nenhum gatilho de campanha bateu nesta mensagem.
