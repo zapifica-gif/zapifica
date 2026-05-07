@@ -927,20 +927,22 @@ async function ensureLeadId(
     : (pushName && pushName.slice(0, 80)) ||
       `Novo Lead ${prettifyPhone(fullDigits)}`
 
+  // IMPORTANTE:
+  // Não usar `upsert(..., { onConflict: 'user_id,phone_key' })` aqui como único caminho,
+  // porque `phone_key` é gerado (generated) e o PostgREST pode não inferir corretamente
+  // o alvo de conflito dependendo de como o índice/constraint foi criado.
+  // Estratégia robusta: tenta INSERT e, em violação de unique, refaz o index e resolve o lead existente.
   const { data, error } = await supabase
     .from('leads')
-    .upsert(
-      {
-        user_id: userId,
-        name: displayName,
-        phone: normalized,
-        status: 'novo',
-        source: 'inbound_whatsapp',
-        is_group: isGroup,
-        updated_at: new Date().toISOString(),
-      },
-      { onConflict: 'user_id,phone_key' },
-    )
+    .insert({
+      user_id: userId,
+      name: displayName,
+      phone: normalized,
+      status: 'novo',
+      source: 'inbound_whatsapp',
+      is_group: isGroup,
+      updated_at: new Date().toISOString(),
+    })
     .select('id, phone, name, profile_picture_url')
     .single()
 
@@ -959,6 +961,10 @@ async function ensureLeadId(
     return { id: row.id, created: true, error: null }
   }
 
+  // Corrida/duplicata: se o banco já tem esse telefone (mesmo tenant), reindexa e resolve.
+  const code = String((error as { code?: unknown } | null)?.code ?? '')
+  const isUnique = code === '23505' || String(error?.message ?? '').toLowerCase().includes('duplicate')
+
   const retry = await supabase
     .from('leads')
     .select('id, phone, name, profile_picture_url')
@@ -974,7 +980,13 @@ async function ensureLeadId(
     if (again) return { id: again, created: false, error: null }
   }
 
-  return { id: null, created: false, error: error?.message ?? 'insert lead falhou' }
+  return {
+    id: null,
+    created: false,
+    error: isUnique
+      ? 'Conflito de duplicidade ao criar lead; não consegui resolver o registro existente.'
+      : error?.message ?? 'insert lead falhou',
+  }
 }
 
 serve(async (req) => {
