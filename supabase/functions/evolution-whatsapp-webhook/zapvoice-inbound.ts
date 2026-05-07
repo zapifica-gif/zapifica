@@ -30,11 +30,45 @@ type CampaignRow = {
   created_at: string
 }
 
+/** Normaliza texto para gatilhos: minúsculas, colapsa espaços, remove acentos (ex.: "café" ≈ "cafe"). */
 function normText(s: string): string {
   return s
+    .normalize('NFD')
+    .replace(/\p{M}/gu, '')
     .toLowerCase()
     .replace(/\s+/g, ' ')
     .trim()
+}
+
+/**
+ * Snapshot de delay para scheduled_messages: o CHECK exige par min+max ou ambos nulos.
+ * Evita insert falhar silenciosamente quando só um dos lados veio na etapa/campanha.
+ */
+function pairDelaySnapshotForQueue(params: {
+  step: FunnelRow
+  campMin: number | null | undefined
+  campMax: number | null | undefined
+}): { min: number | null; max: number | null } {
+  const sn = params.step
+  const rawMin = sn.min_delay_seconds
+  const rawMax = sn.max_delay_seconds
+  let minS: number | null =
+    typeof rawMin === 'number' && Number.isFinite(rawMin)
+      ? Math.max(0, rawMin)
+      : typeof params.campMin === 'number' && Number.isFinite(params.campMin)
+        ? Math.max(0, params.campMin)
+        : null
+  let maxS: number | null =
+    typeof rawMax === 'number' && Number.isFinite(rawMax)
+      ? Math.max(0, rawMax)
+      : typeof params.campMax === 'number' && Number.isFinite(params.campMax)
+        ? Math.max(0, params.campMax)
+        : null
+  if (minS != null && maxS == null) maxS = minS
+  if (maxS != null && minS == null) minS = maxS
+  if (minS != null && maxS != null && maxS < minS) maxS = minS
+  if (minS != null && maxS != null && maxS > 3600) maxS = 3600
+  return { min: minS, max: maxS }
 }
 
 /** Avalia a mensagem do lead contra a palavra-chave e a regra da campanha. */
@@ -262,6 +296,16 @@ async function handleActiveCampaignProgress(
     }
   }
 
+  // Diagnóstico: ponteiro `next_step_order` diferente da 1ª etapa → o ramo “gatilho pós-isca” não aplica.
+  if (progress.status === 'active' && progressNext !== primeiraOrdem) {
+    console.warn('[ZapVoice inbound] next_step_order não alinha com 1ª etapa do fluxo', {
+      campaignId: progress.campaign_id,
+      leadId: p.leadId,
+      progressNext,
+      primeiraOrdem,
+    })
+  }
+
   // Lead já está dentro do fluxo (etapa 2+): NÃO avançamos por mensagem do lead.
   // O worker (process-scheduled-messages) cuida do timer e enfileira as próximas
   // etapas automaticamente. Aqui só garantimos que a IA permaneça suprimida.
@@ -339,12 +383,39 @@ export async function processZapVoiceInbound(
     return { enqueued: false, reason: 'erro_listagem', suppressAi: true }
   }
 
+  const campaignsList = (campaigns ?? []) as CampaignRow[]
+
+  /**
+   * Ordem de decisão (evita travar com 2+ campanhas ativas usando o mesmo gatilho):
+   * 1) Se o lead já tem `lead_campaign_progress` ativo, só avaliamos o gatilho
+   *    nas campanhas que correspondem a esse progresso (isca → resposta certa).
+   * 2) Senão, a primeira campanha ativa cujo gatilho casa (comportamento orgânico).
+   */
   let matched: CampaignRow | null = null
-  for (const row of (campaigns ?? []) as CampaignRow[]) {
+  for (const pr of progressed) {
+    const row = campaignsList.find((c) => c.id === pr.campaign_id)
+    if (!row) continue
     const cond = (row.trigger_condition ?? 'equals') as TriggerCondition
     if (triggerConditionSatisfied(cond, messageNorm, row.trigger_keyword ?? '')) {
       matched = row
+      console.log('[ZapVoice inbound] gatilho casou com campanha do progresso ativo', {
+        campaignId: row.id,
+        leadId: p.leadId,
+      })
       break
+    }
+  }
+  if (!matched) {
+    for (const row of campaignsList) {
+      const cond = (row.trigger_condition ?? 'equals') as TriggerCondition
+      if (triggerConditionSatisfied(cond, messageNorm, row.trigger_keyword ?? '')) {
+        matched = row
+        console.log('[ZapVoice inbound] gatilho casou na listagem global de campanhas', {
+          campaignId: row.id,
+          leadId: p.leadId,
+        })
+        break
+      }
     }
   }
 
@@ -594,6 +665,11 @@ async function enqueueFunnelStepAndAdvance(p: {
   }
 
   const ord = Number(p.step.step_order)
+  const delayPair = pairDelaySnapshotForQueue({
+    step: p.step,
+    campMin: p.campMin,
+    campMax: p.campMax,
+  })
   const ins = await p.supabase.from('scheduled_messages').insert({
     user_id: p.userId,
     lead_id: p.leadId,
@@ -610,17 +686,21 @@ async function enqueueFunnelStepAndAdvance(p: {
     recipient_phone: p.phoneDigits?.trim() || null,
     event_id: null,
     evolution_instance_name: p.instanceName?.trim() || null,
-    min_delay_seconds:
-      typeof p.step.min_delay_seconds === 'number'
-        ? p.step.min_delay_seconds
-        : p.campMin ?? null,
-    max_delay_seconds:
-      typeof p.step.max_delay_seconds === 'number'
-        ? p.step.max_delay_seconds
-        : p.campMax ?? null,
+    min_delay_seconds: delayPair.min,
+    max_delay_seconds: delayPair.max,
   })
   if (ins.error) {
-    console.error('[ZapVoice inbound] enqueue scheduled_messages', ins.error.code, ins.error.message)
+    console.error(
+      '[ZapVoice inbound] enqueue scheduled_messages',
+      ins.error.code,
+      ins.error.message,
+      {
+        campaignId: p.progress.campaign_id,
+        leadId: p.leadId,
+        zv_funnel_step_id: p.step.id,
+        delayPair,
+      },
+    )
     await unlockLeadFunnelLock(p.supabase, p.userId, p.leadId, 'insert_fila_falhou')
     return {
       enqueued: false,
@@ -640,7 +720,11 @@ async function enqueueFunnelStepAndAdvance(p: {
     })
     .eq('id', p.progress.id)
   if (up.error) {
-    console.error('[ZapVoice inbound] progress update', up.error.message)
+    console.error('[ZapVoice inbound] progress update APÓS insert na fila', up.error.message, {
+      progressId: p.progress.id,
+      nextOrder,
+      isLastEnqueued,
+    })
   }
 
   await p.supabase
