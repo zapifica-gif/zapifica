@@ -69,6 +69,9 @@ const GOLDEN_RULE_NATURAL_NAME = `REGRA DE OURO: Aja como um humano natural. NUN
 
 const MS_24H = 24 * 60 * 60 * 1000
 
+const DEEPSEEK_MODEL = (Deno.env.get('DEEPSEEK_MODEL')?.trim() || 'deepseek-reasoner')
+const DEEPSEEK_TIMEOUT_MS = 110_000
+
 /** timestamptz (Postgres/PostgREST) → comparação com Date.now() sem falsos negativos de parse. */
 function isAiPausedUntilActive(aiPausedUntil: unknown): boolean {
   if (aiPausedUntil == null) return false
@@ -145,7 +148,17 @@ function buildDeepSeekSystemPrompt(params: {
   // Defesa contra prompt infinito (token/contexto do modelo). Mantém o pedido do usuário,
   // mas impõe um teto seguro em caracteres.
   const MAX_CHARS = 12000
-  let out = `${base}\n${GOLDEN_RULE_NATURAL_NAME}\n`
+  let out =
+    `${base}\n` +
+    `REGRAS IMPORTANTES (ZERO ALUCINAÇÃO):\n` +
+    `- Baseie-se APENAS no texto do master prompt, na base de conhecimento e no histórico fornecidos.\n` +
+    `- NUNCA invente dados, preços, prazos, garantias, nomes de planos, números ou qualquer detalhe não presente no contexto.\n` +
+    `- Se faltar informação, diga claramente o que está faltando e proponha assumir com um humano.\n\n` +
+    `Como responder:\n` +
+    `- Seja direto, específico e persuasivo, em português do Brasil.\n` +
+    `- Faça 1–2 perguntas objetivas quando necessário.\n` +
+    `- Feche com uma CTA simples.\n\n` +
+    `${GOLDEN_RULE_NATURAL_NAME}\n`
   for (const m of materials) {
     if (out.length >= MAX_CHARS) break
     const chunk = (m + '\n\n')
@@ -192,15 +205,18 @@ async function callDeepSeek(params: {
     return { ok: false, text: null, error: 'DEEPSEEK_API_KEY não configurada.' }
   }
 
+  const controller = new AbortController()
+  const t = setTimeout(() => controller.abort(), DEEPSEEK_TIMEOUT_MS)
   try {
     const res = await fetch('https://api.deepseek.com/v1/chat/completions', {
       method: 'POST',
+      signal: controller.signal,
       headers: {
         Authorization: `Bearer ${key}`,
         'Content-Type': 'application/json',
       },
       body: JSON.stringify({
-        model: 'deepseek-chat',
+        model: DEEPSEEK_MODEL,
         messages: [
           {
             role: 'system',
@@ -238,7 +254,12 @@ async function callDeepSeek(params: {
     return { ok: true, text, error: null }
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e)
+    if (String(msg).includes('aborted') || String(msg).includes('AbortError')) {
+      return { ok: false, text: null, error: 'DeepSeek: timeout' }
+    }
     return { ok: false, text: null, error: msg || 'Falha ao chamar DeepSeek.' }
+  } finally {
+    clearTimeout(t)
   }
 }
 
