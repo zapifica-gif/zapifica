@@ -150,6 +150,12 @@ function buildDeepSeekSystemPrompt(params: {
   const MAX_CHARS = 12000
   let out =
     `${base}\n` +
+    `REGRAS EXTREMAMENTE RIGOROSAS DE TAMANHO (WHATSAPP):\n` +
+    `- ATENÇÃO: o canal é WhatsApp. Suas respostas devem ser EXTREMAMENTE curtas, diretas, leves e conversacionais.\n` +
+    `- REGRA DE OURO: responda usando NO MÁXIMO 1 ou 2 frases curtas (máximo de 1 a 2 linhas reais no celular). Vá direto ao ponto.\n` +
+    `- PROIBIDO: é estritamente proibido enviar múltiplos parágrafos, listas longas, blocos de texto ou formatação complexa.\n` +
+    `- PROIBIDO: nunca faça mais de UMA pergunta na mesma mensagem.\n` +
+    `- Aja de forma natural, entregando UMA informação por vez, como um humano faria no WhatsApp, induzindo uma conversa fluida de bate e volta.\n\n` +
     `REGRAS IMPORTANTES (ZERO ALUCINAÇÃO):\n` +
     `- Baseie-se APENAS no texto do master prompt, na base de conhecimento e no histórico fornecidos.\n` +
     `- NUNCA invente dados, preços, prazos, garantias, nomes de planos, números ou qualquer detalhe não presente no contexto.\n` +
