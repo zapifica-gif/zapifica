@@ -165,10 +165,24 @@ export function NewEventModal({
     reinicializarCamposDoModal()
 
     void (async () => {
-      const { data } = await supabase
+      const {
+        data: { user },
+        error: userErr,
+      } = await supabase.auth.getUser()
+      if (userErr || !user) {
+        setLeads([])
+        return
+      }
+      const { data, error: leadsErr } = await supabase
         .from('leads')
         .select('id, name, phone')
+        .eq('user_id', user.id)
         .order('name', { ascending: true })
+      if (leadsErr) {
+        console.warn('[Agenda] leads (modal):', leadsErr.message)
+        setLeads([])
+        return
+      }
       setLeads((data ?? []) as LeadOption[])
     })()
   }, [open, initialDate, initialHour, reinicializarCamposDoModal])

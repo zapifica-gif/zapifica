@@ -179,12 +179,10 @@ export function SuperAdminPage() {
         setCompanyByUser(map)
       }
 
-      // biblioteca global (carrega leve por padrão)
-      const { data: ld, error: ldErr } = await supabase
-        .from('leads')
-        .select('id, user_id, name, phone, source, tag, created_at')
-        .order('created_at', { ascending: false })
-        .limit(200)
+      // Biblioteca global: só via RPC (RLS da tabela `leads` não expõe outros tenants).
+      const { data: ld, error: ldErr } = await supabase.rpc('superadmin_list_leads', {
+        p_limit: 200,
+      })
       if (ldErr) {
         if (!cancelled) setError(ldErr.message)
         if (!cancelled) setLoading(false)
