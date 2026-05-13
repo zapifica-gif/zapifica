@@ -29,6 +29,8 @@ import {
   findNameColumn,
   findPhoneColumn,
   findTagColumn,
+  isExcelSpreadsheetFilename,
+  parseExcelBufferToSameFormatAsCsv,
   parseSimpleCsv,
   phoneDigitsForLead,
   allCanonicalPhoneKeys,
@@ -832,8 +834,25 @@ export function ContactsBasePanel({ userId, onContactsChanged, onError, onSucces
     setCsvBusy(true)
     setImportProgress(null)
     try {
-      const text = await file.text()
-      const { headers, rows } = parseSimpleCsv(text)
+      const lower = file.name.toLowerCase()
+      const looksExcel = isExcelSpreadsheetFilename(file.name)
+      const looksCsv =
+        lower.endsWith('.csv') ||
+        file.type === 'text/csv' ||
+        file.type === 'application/csv'
+
+      let headers: string[]
+      let rows: Record<string, string>[]
+      if (looksExcel) {
+        const buf = await file.arrayBuffer()
+        ;({ headers, rows } = parseExcelBufferToSameFormatAsCsv(buf))
+      } else if (looksCsv) {
+        const text = await file.text()
+        ;({ headers, rows } = parseSimpleCsv(text))
+      } else {
+        onError('Envie um arquivo .csv, .xlsx ou .xls com as colunas do modelo.')
+        return
+      }
       const pCol = findPhoneColumn(headers)
       const nCol = findNameColumn(headers)
       const eCol = findEmailColumn(headers)
@@ -1016,7 +1035,7 @@ export function ContactsBasePanel({ userId, onContactsChanged, onError, onSucces
       }
 
       onSuccess(
-        `CSV aplicado à base (${byPhone.size} número(s)): ${toUpdate.length} atualizado(s), ${toInsert.length} novo(s). Novos sem tag no arquivo recebem “${defaultTag}”; em atualizações, tag vazia preserva a atual.`,
+        `Planilha aplicada à base (${byPhone.size} número(s)): ${toUpdate.length} atualizado(s), ${toInsert.length} novo(s). Novos sem tag no arquivo recebem “${defaultTag}”; em atualizações, tag vazia preserva a atual.`,
       )
       setCsvOpen(false)
       onContactsChanged()
@@ -1210,15 +1229,16 @@ export function ContactsBasePanel({ userId, onContactsChanged, onError, onSucces
           aria-modal="true"
         >
           <div className="w-full max-w-md rounded-2xl border border-zinc-200 bg-white p-6 shadow-2xl">
-            <h4 className="text-base font-semibold text-zinc-900">Importar CSV</h4>
+            <h4 className="text-base font-semibold text-zinc-900">Importar planilha</h4>
             <p className="mt-1 text-sm text-zinc-600">
-              Colunas do modelo:{' '}
+              Aceitamos <strong>.csv</strong>, <strong>.xlsx</strong> e <strong>.xls</strong> (Excel:
+              usamos a <strong>primeira aba</strong>). Colunas do modelo:{' '}
               <code className="text-xs">
                 nome, telefone, email, cargo, empresa, cidade, endereco, tag
               </code>
-              . Obrigatório: <strong>nome</strong> e <strong>telefone</strong>. Linhas com o mesmo
-              telefone (considerando o 9º dígito BR) são <strong>mescladas</strong> com o cadastro
-              existente.
+              . Obrigatório: coluna de <strong>telefone</strong> reconhecida pelo sistema. Linhas com o
+              mesmo telefone (considerando o 9º dígito BR) são <strong>mescladas</strong> com o
+              cadastro existente.
             </p>
             <button
               type="button"
@@ -1233,13 +1253,13 @@ export function ContactsBasePanel({ userId, onContactsChanged, onError, onSucces
                 <Loader2 className="h-8 w-8 animate-spin text-brand-600" aria-hidden />
               ) : (
                 <>
-                  <span className="font-medium text-zinc-800">Arraste o CSV ou clique</span>
-                  <span className="mt-1 text-xs">Telefones serão normalizados com DDI 55</span>
+                  <span className="font-medium text-zinc-800">Arraste o arquivo ou clique</span>
+                  <span className="mt-1 text-xs">CSV ou Excel · telefones normalizados com DDI 55</span>
                 </>
               )}
               <input
                 type="file"
-                accept=".csv,text/csv"
+                accept=".csv,.xlsx,.xls,text/csv,application/vnd.ms-excel,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
                 className="sr-only"
                 onChange={handleCsvFile}
                 disabled={csvBusy}
@@ -1538,7 +1558,7 @@ export function ContactsBasePanel({ userId, onContactsChanged, onError, onSucces
                 Excluir lista inteira (por etiqueta)
               </p>
               <p className="mt-1 text-xs text-zinc-600">
-                Cada importação CSV recebe uma etiqueta do tipo{' '}
+                Cada importação por arquivo recebe uma etiqueta do tipo{' '}
                 <span className="font-mono text-[11px]">Importação Manual - DD/MM/AAAA</span>. Escolha a
                 mesma etiqueta para apagar só aquela lista, ou qualquer etiqueta exata igual em todos os
                 contatos.

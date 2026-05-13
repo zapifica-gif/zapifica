@@ -4,6 +4,8 @@
  * Telefone normalizado (DDI 55); merge por telefone com variantes BR (com/sem 9º dígito).
  */
 
+import * as XLSX from 'xlsx'
+
 export function normalizeCsvHeader(raw: string): string {
   return raw.replace(/["\r\n\uFEFF]/g, '').trim().toLowerCase()
 }
@@ -87,6 +89,28 @@ export function parseSimpleCsv(
     rows.push(obj)
   }
   return { headers, rows }
+}
+
+/**
+ * Lê a primeira aba de um arquivo Excel (.xlsx / .xls) e devolve o mesmo formato de
+ * {@link parseSimpleCsv}: cabeçalhos normalizados e linhas como `Record<string, string>`.
+ * Usa exportação para CSV internamente para reaproveitar aspas, vírgulas e BOM.
+ */
+export function parseExcelBufferToSameFormatAsCsv(
+  buffer: ArrayBuffer,
+): { headers: string[]; rows: Record<string, string>[] } {
+  const wb = XLSX.read(buffer, { type: 'array', cellDates: true })
+  const sheetName = wb.SheetNames[0]
+  if (!sheetName) return { headers: [], rows: [] }
+  const sheet = wb.Sheets[sheetName]
+  if (!sheet) return { headers: [], rows: [] }
+  const csvText = XLSX.utils.sheet_to_csv(sheet)
+  return parseSimpleCsv(csvText)
+}
+
+export function isExcelSpreadsheetFilename(name: string): boolean {
+  const n = name.toLowerCase()
+  return n.endsWith('.xlsx') || n.endsWith('.xls')
 }
 
 export function findPhoneColumn(headers: string[]): string | null {
