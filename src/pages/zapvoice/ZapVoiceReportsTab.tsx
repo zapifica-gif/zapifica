@@ -3,15 +3,17 @@ import {
   Bar,
   BarChart,
   CartesianGrid,
+  Cell,
   ResponsiveContainer,
   Tooltip,
   XAxis,
   YAxis,
 } from 'recharts'
-import { FileSpreadsheet, FileText, Loader2 } from 'lucide-react'
+import { AlertTriangle, FileSpreadsheet, FileText, Loader2, Users, Workflow } from 'lucide-react'
 import { supabase } from '../../lib/supabase'
 import * as XLSX from 'xlsx'
 import { jsPDF } from 'jspdf'
+import { StatCard } from '../../components/StatCard'
 
 type CampaignLite = { id: string; name: string }
 
@@ -26,6 +28,8 @@ type RowStat = {
   status: string | null
   last_error: string | null
 }
+
+const BAR_COLORS = ['#4285f4', '#34a853', '#ea4335'] as const
 
 export function ZapVoiceReportsTab({ userId, campaigns }: Props) {
   const [campaignId, setCampaignId] = useState<string>('')
@@ -118,7 +122,7 @@ export function ZapVoiceReportsTab({ userId, campaigns }: Props) {
   }
 
   return (
-    <div className="space-y-5 rounded-2xl border border-zinc-200/90 bg-white p-6 shadow-sm ring-1 ring-zinc-100/80">
+    <div className="space-y-5 rounded-2xl border border-zinc-200/90 bg-white p-6 shadow-md shadow-zinc-900/5 ring-1 ring-zinc-100/80">
       <div>
         <h3 className="text-lg font-semibold text-zinc-900">Relatórios de campanha</h3>
         <p className="mt-1 text-sm text-zinc-600">
@@ -131,7 +135,7 @@ export function ZapVoiceReportsTab({ userId, campaigns }: Props) {
           <select
             value={campaignId}
             onChange={(e) => setCampaignId(e.target.value)}
-            className="w-full rounded-lg border border-zinc-200 bg-white px-3 py-2 text-sm"
+            className="w-full rounded-lg border border-zinc-200 bg-white px-3 py-2 text-sm outline-none transition focus:border-google-blue/35 focus-visible:ring-2 focus-visible:ring-google-blue focus-visible:ring-offset-2"
           >
             <option value="">Selecione…</option>
             {campaigns.map((c) => (
@@ -145,7 +149,7 @@ export function ZapVoiceReportsTab({ userId, campaigns }: Props) {
           type="button"
           onClick={() => void load()}
           disabled={!campaignId || loading}
-          className="inline-flex items-center gap-1.5 rounded-lg border border-zinc-200 bg-zinc-50 px-3 py-2 text-xs font-medium text-zinc-800 hover:bg-zinc-100 disabled:opacity-50"
+          className="inline-flex items-center gap-1.5 rounded-lg border border-zinc-200 bg-zinc-50 px-3 py-2 text-xs font-medium text-zinc-800 transition hover:bg-zinc-100 disabled:opacity-50"
         >
           {loading ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : null}
           Atualizar
@@ -154,7 +158,7 @@ export function ZapVoiceReportsTab({ userId, campaigns }: Props) {
           type="button"
           onClick={exportCsv}
           disabled={!campaignId}
-          className="inline-flex items-center gap-1.5 rounded-lg bg-emerald-600 px-3 py-2 text-xs font-semibold text-white hover:bg-emerald-700 disabled:opacity-50"
+          className="inline-flex items-center gap-1.5 rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-2 text-xs font-semibold text-emerald-900 transition hover:bg-emerald-100 disabled:opacity-50"
         >
           <FileSpreadsheet className="h-3.5 w-3.5" />
           Exportar XLSX
@@ -163,7 +167,7 @@ export function ZapVoiceReportsTab({ userId, campaigns }: Props) {
           type="button"
           onClick={exportPdf}
           disabled={!campaignId}
-          className="inline-flex items-center gap-1.5 rounded-lg bg-zinc-800 px-3 py-2 text-xs font-semibold text-white hover:bg-zinc-900 disabled:opacity-50"
+          className="inline-flex items-center gap-1.5 rounded-lg border border-zinc-300 bg-zinc-900 px-3 py-2 text-xs font-semibold text-white transition hover:bg-zinc-800 disabled:opacity-50"
         >
           <FileText className="h-3.5 w-3.5" />
           Exportar PDF
@@ -171,20 +175,30 @@ export function ZapVoiceReportsTab({ userId, campaigns }: Props) {
       </div>
 
       {campaignId && !loading ? (
-        <div className="grid gap-4 sm:grid-cols-3">
-          <div className="rounded-xl border border-zinc-200 bg-zinc-50/60 p-4">
-            <p className="text-[11px] font-semibold uppercase text-zinc-500">Leads alcançados</p>
-            <p className="mt-1 text-2xl font-bold tabular-nums text-zinc-900">{leads}</p>
-          </div>
-          <div className="rounded-xl border border-zinc-200 bg-zinc-50/60 p-4">
-            <p className="text-[11px] font-semibold uppercase text-zinc-500">Fluxo acionado</p>
-            <p className="mt-1 text-2xl font-bold tabular-nums text-zinc-900">{triggers}</p>
-            <p className="mt-0.5 text-[10px] text-zinc-500">Registros em lead_campaign_progress</p>
-          </div>
-          <div className="rounded-xl border border-rose-200 bg-rose-50/60 p-4">
-            <p className="text-[11px] font-semibold uppercase text-rose-700">Falhas (fila)</p>
-            <p className="mt-1 text-2xl font-bold tabular-nums text-rose-900">{fails}</p>
-          </div>
+        <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+          <StatCard
+            title="Leads alcançados"
+            value={String(leads)}
+            subtitle="Contatos únicos com mensagem agendada nesta campanha."
+            icon={Users}
+            accent="blue"
+          />
+          <StatCard
+            title="Fluxo acionado"
+            value={String(triggers)}
+            subtitle="Registros em lead_campaign_progress."
+            icon={Workflow}
+            accent="green"
+          />
+          <StatCard
+            title="Falhas na fila"
+            value={String(fails)}
+            subtitle="Envios com status de erro na scheduled_messages."
+            icon={AlertTriangle}
+            accent="red"
+            trend={fails > 0 ? 'Revise mídia, horário e conexão WhatsApp.' : 'Nenhuma falha registrada.'}
+            trendPositive={fails === 0}
+          />
         </div>
       ) : null}
 
@@ -199,7 +213,11 @@ export function ZapVoiceReportsTab({ userId, campaigns }: Props) {
                 contentStyle={{ borderRadius: 8, border: '1px solid #e4e4e7' }}
                 labelStyle={{ color: '#18181b' }}
               />
-              <Bar dataKey="value" fill="rgb(106,0,184)" radius={[4, 4, 0, 0]} name="Quantidade" />
+              <Bar dataKey="value" radius={[6, 6, 0, 0]} name="Quantidade">
+                {chartData.map((_, i) => (
+                  <Cell key={i} fill={BAR_COLORS[i % BAR_COLORS.length]} />
+                ))}
+              </Bar>
             </BarChart>
           </ResponsiveContainer>
         </div>

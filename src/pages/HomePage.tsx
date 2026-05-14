@@ -243,6 +243,7 @@ export function HomePage() {
             value={loading ? '—' : String(counts?.leads ?? 0)}
             subtitle="Total do seu workspace"
             icon={Users}
+            accent="blue"
             trend={
               loading
                 ? 'Carregando…'
@@ -254,6 +255,7 @@ export function HomePage() {
             value={loading ? '—' : String(counts?.messages ?? 0)}
             subtitle="scheduled_messages do seu usuário"
             icon={MessageSquare}
+            accent="green"
             trend={loading ? 'Carregando…' : 'Inclui campanhas e agendamentos do CRM.'}
           />
           <StatCard
@@ -261,6 +263,7 @@ export function HomePage() {
             value={loading ? '—' : String(counts?.activeCampaigns ?? 0)}
             subtitle="Zap Voice rodando agora"
             icon={TrendingUp}
+            accent="yellow"
             trend={loading ? 'Carregando…' : 'Status: active'}
           />
         </div>

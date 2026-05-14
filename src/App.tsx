@@ -7,6 +7,7 @@ import { AiTrainingPage } from './pages/AiTraining'
 import { CrmPage } from './pages/CrmPage'
 import { HomePage } from './pages/HomePage'
 import { LoginPage } from './pages/LoginPage'
+import { UpdatePasswordPage } from './pages/UpdatePasswordPage'
 import { SettingsPage } from './pages/SettingsPage'
 import { ZapVoiceCampaignsPage } from './pages/ZapVoiceCampaigns'
 import { LeadExtractorPage } from './pages/LeadExtractor'
@@ -99,10 +100,26 @@ function AuthLoadingScreen() {
   )
 }
 
+function hashIndicatesRecovery(): boolean {
+  if (typeof window === 'undefined') return false
+  const raw = `${window.location.hash}${window.location.search}`
+  return (
+    raw.includes('type=recovery') ||
+    raw.includes('type%3Drecovery') ||
+    /[?&#]type=recovery\b/.test(raw)
+  )
+}
+
 export default function App() {
   const [session, setSession] = useState<Session | null>(null)
   const [authReady, setAuthReady] = useState(false)
   const [activeNav, setActiveNav] = useState<DashboardNavId>('home')
+  const [passwordRecovery, setPasswordRecovery] = useState(hashIndicatesRecovery)
+
+  const clearRecoveryUrl = () => {
+    if (typeof window === 'undefined') return
+    window.history.replaceState(null, '', `${window.location.pathname}${window.location.search}`)
+  }
 
   useEffect(() => {
     let cancelled = false
@@ -110,14 +127,23 @@ export default function App() {
     void supabase.auth.getSession().then(({ data: { session: s } }) => {
       if (!cancelled) {
         setSession(s)
+        if (s && hashIndicatesRecovery()) {
+          setPasswordRecovery(true)
+        }
         setAuthReady(true)
       }
     })
 
     const {
       data: { subscription },
-    } = supabase.auth.onAuthStateChange((_event, s) => {
+    } = supabase.auth.onAuthStateChange((event, s) => {
       if (!cancelled) {
+        if (event === 'PASSWORD_RECOVERY') {
+          setPasswordRecovery(true)
+        }
+        if (event === 'SIGNED_OUT') {
+          setPasswordRecovery(false)
+        }
         setSession(s)
         if (!s) {
           setActiveNav('home')
@@ -137,6 +163,17 @@ export default function App() {
 
   if (!session) {
     return <LoginPage />
+  }
+
+  if (passwordRecovery) {
+    return (
+      <UpdatePasswordPage
+        onCompleted={() => {
+          setPasswordRecovery(false)
+          clearRecoveryUrl()
+        }}
+      />
+    )
   }
 
   return (

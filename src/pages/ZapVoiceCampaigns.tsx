@@ -38,6 +38,7 @@ import {
 } from 'lucide-react'
 import { supabase } from '../lib/supabase'
 import { ContactsBasePanel } from '../components/zapvoice/ContactsBasePanel'
+import { StatCard } from '../components/StatCard'
 import { ZapVoiceReportsTab } from './zapvoice/ZapVoiceReportsTab'
 
 // ---------------------------------------------------------------------------
@@ -524,6 +525,25 @@ export function ZapVoiceCampaignsPage() {
     () => campaigns.filter((c) => c.status === 'completed'),
     [campaigns],
   )
+
+  const historyOverview = useMemo(() => {
+    let leadSum = 0
+    let withFirstDispatch = 0
+    for (const c of completedCampaigns) {
+      const st = historyStats[c.id]
+      leadSum += st?.leadCount ?? 0
+      if (st?.firstAt) withFirstDispatch += 1
+    }
+    const n = completedCampaigns.length
+    const avgLeads =
+      n > 0 ? Math.round((leadSum / n) * 10) / 10 : 0
+    return {
+      completedCount: n,
+      leadSum,
+      withFirstDispatch,
+      avgLeads,
+    }
+  }, [completedCampaigns, historyStats])
 
   // -------------------------------------------------------------------------
   // Loaders
@@ -2911,52 +2931,85 @@ export function ZapVoiceCampaignsPage() {
       ) : null}
 
       {mainTab === 'historico' ? (
-        <div className="overflow-hidden rounded-2xl border border-zinc-200/90 bg-white shadow-sm ring-1 ring-zinc-100/80">
-          {completedCampaigns.length === 0 ? (
-            <p className="px-5 py-12 text-center text-sm text-zinc-500">
-              Ainda não há campanhas concluídas. Quando marcar uma campanha como
-              concluída, ela aparece aqui com a data do primeiro disparo e a base
-              alcançada.
-            </p>
-          ) : (
-            <div className="overflow-x-auto">
-              <table className="w-full min-w-[640px] border-collapse text-left text-sm">
-                <thead>
-                  <tr className="border-b border-zinc-200 bg-zinc-50/90 text-[11px] font-semibold uppercase tracking-wider text-zinc-500">
-                    <th className="px-4 py-3">Campanha</th>
-                    <th className="px-4 py-3">Público (tags)</th>
-                    <th className="px-4 py-3">1º disparo (agendado)</th>
-                    <th className="px-4 py-3">Leads</th>
-                    <th className="px-4 py-3">Concluída em</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-zinc-100">
-                  {completedCampaigns.map((c) => {
-                    const st = historyStats[c.id]
-                    return (
-                      <tr key={c.id} className="bg-white hover:bg-zinc-50/50">
-                        <td className="px-4 py-3 font-medium text-zinc-900">{c.name}</td>
-                        <td className="max-w-[220px] px-4 py-3 text-zinc-600">
-                          {c.audience_tags && c.audience_tags.length > 0
-                            ? c.audience_tags.join(' · ')
-                            : '—'}
-                        </td>
-                        <td className="whitespace-nowrap px-4 py-3 text-zinc-600 tabular-nums">
-                          {st?.firstAt ? formatDateBr(st.firstAt) : '—'}
-                        </td>
-                        <td className="px-4 py-3 text-zinc-800 tabular-nums">
-                          {st ? st.leadCount : '—'}
-                        </td>
-                        <td className="whitespace-nowrap px-4 py-3 text-zinc-500 tabular-nums">
-                          {formatDateBr(c.updated_at)}
-                        </td>
-                      </tr>
-                    )
-                  })}
-                </tbody>
-              </table>
+        <div className="space-y-5">
+          {completedCampaigns.length > 0 ? (
+            <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
+              <StatCard
+                title="Campanhas no histórico"
+                value={String(historyOverview.completedCount)}
+                subtitle="Concluídas — visão consolidada."
+                icon={CheckCircle2}
+                accent="yellow"
+                trend="Detalhes linha a linha na tabela abaixo."
+              />
+              <StatCard
+                title="Leads alcançados (soma)"
+                value={String(historyOverview.leadSum)}
+                subtitle="Soma dos contatos únicos por campanha (agendamentos vinculados)."
+                icon={Users}
+                accent="green"
+              />
+              <StatCard
+                title="Média de leads / campanha"
+                value={historyOverview.completedCount > 0 ? String(historyOverview.avgLeads) : '—'}
+                subtitle="Média dos contatos únicos alcançados por campanha concluída."
+                icon={Megaphone}
+                accent="blue"
+                trend={
+                  historyOverview.completedCount > 0
+                    ? `${historyOverview.withFirstDispatch} campanhas com 1º disparo na fila`
+                    : undefined
+                }
+              />
             </div>
-          )}
+          ) : null}
+          <div className="overflow-hidden rounded-2xl border border-zinc-200/90 bg-white shadow-sm ring-1 ring-zinc-100/80">
+            {completedCampaigns.length === 0 ? (
+              <p className="px-5 py-12 text-center text-sm text-zinc-500">
+                Ainda não há campanhas concluídas. Quando marcar uma campanha como
+                concluída, ela aparece aqui com a data do primeiro disparo e a base
+                alcançada.
+              </p>
+            ) : (
+              <div className="overflow-x-auto">
+                <table className="w-full min-w-[640px] border-collapse text-left text-sm">
+                  <thead>
+                    <tr className="border-b border-zinc-200 bg-zinc-50/90 text-[11px] font-semibold uppercase tracking-wider text-zinc-500">
+                      <th className="px-4 py-3">Campanha</th>
+                      <th className="px-4 py-3">Público (tags)</th>
+                      <th className="px-4 py-3">1º disparo (agendado)</th>
+                      <th className="px-4 py-3">Leads</th>
+                      <th className="px-4 py-3">Concluída em</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-zinc-100">
+                    {completedCampaigns.map((c) => {
+                      const st = historyStats[c.id]
+                      return (
+                        <tr key={c.id} className="bg-white hover:bg-zinc-50/50">
+                          <td className="px-4 py-3 font-medium text-zinc-900">{c.name}</td>
+                          <td className="max-w-[220px] px-4 py-3 text-zinc-600">
+                            {c.audience_tags && c.audience_tags.length > 0
+                              ? c.audience_tags.join(' · ')
+                              : '—'}
+                          </td>
+                          <td className="whitespace-nowrap px-4 py-3 text-zinc-600 tabular-nums">
+                            {st?.firstAt ? formatDateBr(st.firstAt) : '—'}
+                          </td>
+                          <td className="px-4 py-3 text-zinc-800 tabular-nums">
+                            {st ? st.leadCount : '—'}
+                          </td>
+                          <td className="whitespace-nowrap px-4 py-3 text-zinc-500 tabular-nums">
+                            {formatDateBr(c.updated_at)}
+                          </td>
+                        </tr>
+                      )
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
         </div>
       ) : null}
       </div>
