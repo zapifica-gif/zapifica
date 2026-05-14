@@ -1,0 +1,7 @@
+# REGRAS DE SEGURANÇA E ARQUITETURA DO ZAPIFICA
+
+1. ISOLAMENTO DE TENANT (MULTI-TENANCY):
+O Zapifica é um SaaS multi-tenant. É ABSOLUTAMENTE PROIBIDO gerar funções RPC ou queries com `SECURITY DEFINER` e `SET row_security = off` sem incluir imediatamente uma validação manual de tenant rígida (ex: `auth.uid() = p_user_id`). Qualquer alteração em funções de leitura de leads ou chat deve ser duplamente checada para garantir que um cliente não consiga ler dados de outro.
+
+2. FLUXO DE BANCO DE DADOS:
+O RLS (Row Level Security) padrão é a nossa principal linha de defesa. Sempre priorize o uso de `SECURITY INVOKER` nas funções para que o RLS aja nativamente, a menos que o bypass seja estritamente necessário para gatilhos do sistema (Edge Functions).

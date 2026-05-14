@@ -8,8 +8,10 @@
 // Ordem com o ZapVoice (defesa em profundidade contra race condition):
 //   1) HARD BLOCK síncrono: se o texto casa com gatilho de campanha ativa
 //      do tenant, aborta antes do delay/LLM (return 'campaign_trigger_reserved').
+//      Prioridade de negócio: funil/campanha > override `ai_enabled` no CRM.
 //   2) Delay aleatório de 5–6 s: dá ao webhook do funil tempo para gravar progresso.
-//   3) HARD LOCK: se há lead_campaign_progress ativo, aborta.
+//   3) HARD LOCK: progresso ativo, ai_paused_for_zv_dispatch, fila ZV pendente
+//      ou última mensagem com ai_suppressed — sempre respeitados (idem).
 //
 // Secrets obrigatórios:
 //   * DEEPSEEK_API_KEY
@@ -97,6 +99,57 @@ type LeadRow = {
   funnel_locked_until?: string | null
   /** Trava Zap Voice por lead — sem janelas fixas de horas ligadas ao fim da campanha inteira */
   ai_paused_for_zv_dispatch?: boolean | null
+  /** false = modo humano explícito; null/undefined/true = IA permitida (painel "IA Ligada"). */
+  ai_enabled?: boolean | null
+}
+
+/** Mesma regra do evolution-whatsapp-webhook: só conta progresso cuja campanha pai está `active`. */
+async function countLeadZvProgressBlockingAiInbox(
+  supabase: SupabaseClient,
+  userId: string,
+  leadId: string,
+): Promise<number> {
+  const { data: rows, error } = await supabase
+    .from('lead_campaign_progress')
+    .select('campaign_id')
+    .eq('lead_id', leadId)
+    .eq('user_id', userId)
+    .in('status', ['active', 'awaiting_last_send'])
+  if (error || !rows?.length) return 0
+  const ids = [...new Set(rows.map((r) => (r as { campaign_id: string }).campaign_id))]
+  const { data: camps, error: cErr } = await supabase
+    .from('zv_campaigns')
+    .select('id')
+    .eq('user_id', userId)
+    .eq('status', 'active')
+    .in('id', ids)
+  if (cErr) {
+    console.warn('[inbox-ai-reply] count progress + campanha ativa:', cErr.message)
+    return rows.length
+  }
+  const active = new Set((camps ?? []).map((c) => (c as { id: string }).id))
+  return rows.filter((r) => active.has((r as { campaign_id: string }).campaign_id)).length
+}
+
+/** Mesma regra que `zapvoice-inbound`: mensagens ZV pendentes/processando bloqueiam IA genérica. */
+async function countPendingZvScheduledForLead(
+  supabase: SupabaseClient,
+  userId: string,
+  leadId: string,
+): Promise<number> {
+  const { count, error } = await supabase
+    .from('scheduled_messages')
+    .select('id', { count: 'exact', head: true })
+    .eq('user_id', userId)
+    .eq('lead_id', leadId)
+    .not('zv_campaign_id', 'is', null)
+    .in('status', ['pending', 'processing'])
+    .eq('is_active', true)
+  if (error) {
+    console.warn('[inbox-ai-reply] contagem fila ZV:', error.message)
+    return 0
+  }
+  return count ?? 0
 }
 
 function extractClientFirstNameForAi(
@@ -140,14 +193,24 @@ function formatConversationHistoryPortuguese(
 
 type TriggerCondition = 'equals' | 'contains' | 'starts_with' | 'not_contains'
 
+/** Alinhado a `zapvoice-inbound.ts` (acentos, espaços). */
 function normText(s: string): string {
   return s
+    .normalize('NFD')
+    .replace(/\p{M}/gu, '')
     .toLowerCase()
     .replace(/\s+/g, ' ')
     .trim()
 }
 
-function triggerConditionSatisfied(
+function splitTriggerKeywordsRaw(keywordsRaw: string): string[] {
+  return String(keywordsRaw ?? '')
+    .split(/[,\n;]+/g)
+    .map((t) => t.trim())
+    .filter(Boolean)
+}
+
+function triggerConditionSatisfiedSingle(
   condition: TriggerCondition,
   messageNorm: string,
   keywordRaw: string,
@@ -168,6 +231,25 @@ function triggerConditionSatisfied(
     default:
       return false
   }
+}
+
+function triggerConditionSatisfiedAny(
+  condition: TriggerCondition,
+  messageNorm: string,
+  keywordsCsvRaw: string,
+): boolean {
+  const rawList = splitTriggerKeywordsRaw(keywordsCsvRaw)
+  const kws = rawList.map(normText).filter(Boolean)
+  if (kws.length === 0) return false
+
+  if (condition === 'not_contains') {
+    return kws.every((kw) => !messageNorm.includes(kw))
+  }
+
+  for (const kw of kws) {
+    if (triggerConditionSatisfiedSingle(condition, messageNorm, kw)) return true
+  }
+  return false
 }
 
 /** Espera o webhook do Evolution/ZapVoice gravar progresso antes da IA consultar o banco (evita corrida). */
@@ -358,7 +440,7 @@ async function runPipeline(
   const { data: lead, error: leErr } = await supabase
     .from('leads')
     .select(
-      'id, user_id, phone, name, funnel_locked_until, ai_paused_for_zv_dispatch',
+      'id, user_id, phone, name, funnel_locked_until, ai_paused_for_zv_dispatch, ai_enabled',
     )
     .eq('id', triggerRow.lead_id)
     .maybeSingle()
@@ -403,9 +485,9 @@ async function runPipeline(
   }
 
   // ───────────────────────────────────────────────────────────────────────
-  // HARD BLOCK 1 (síncrono, antes do delay e do LLM):
-  // Se o texto bate com o gatilho de QUALQUER campanha ativa do tenant,
-  // a mensagem pertence ao funil. A IA aborta sem gastar 5,5 s nem tokens.
+  // HARD BLOCK 1 (síncrono): gatilho de campanha ativa reserva a mensagem ao funil.
+  // Prioridade absoluta sobre `ai_enabled`: o painel não pode “furar” campanha/fluxo.
+  // (Mesma semântica de palavras-chave que `zapvoice-inbound.ts`.)
   // ───────────────────────────────────────────────────────────────────────
   if (triggerRow.content_type === 'text') {
     const raw = (triggerRow.message_body ?? '').trim()
@@ -425,8 +507,8 @@ async function runPipeline(
       for (const row of campRows ?? []) {
         const cond = ((row as { trigger_condition?: string }).trigger_condition ??
           'equals') as TriggerCondition
-        const kw = (row as { trigger_keyword?: string | null }).trigger_keyword ?? ''
-        if (triggerConditionSatisfied(cond, messageNorm, kw)) {
+        const kwCsv = (row as { trigger_keyword?: string | null }).trigger_keyword ?? ''
+        if (triggerConditionSatisfiedAny(cond, messageNorm, kwCsv)) {
           return {
             ok: true,
             ignored: 'campaign_trigger_reserved',
@@ -441,21 +523,32 @@ async function runPipeline(
   // Delay anti-corrida: dá ao webhook do funil tempo para gravar progresso/lock.
   await sleep(inboxIaEntryDelayMs())
 
-  // HARD LOCK 2: progresso ZapVoice (active ou aguardando último envio).
-  const { count: progCount, error: progErr } = await supabase
-    .from('lead_campaign_progress')
-    .select('id', { count: 'exact', head: true })
-    .eq('lead_id', triggerRow.lead_id)
+  // HARD LOCK 2: progresso ZV, pausa por disparo, fila pendente, última linha suprimida.
+  // Sempre aplica (independente de `ai_enabled`). Releitura pós-delay pega `ai_paused_for_zv_dispatch`.
+  const { data: leadAfterDelay, error: leadAdErr } = await supabase
+    .from('leads')
+    .select('funnel_locked_until, ai_paused_for_zv_dispatch, ai_enabled')
+    .eq('id', triggerRow.lead_id)
     .eq('user_id', leadData.user_id)
-    .in('status', ['active', 'awaiting_last_send'])
-  if (progErr) {
-    return { error: `progress: ${progErr.message}` }
+    .maybeSingle()
+  if (leadAdErr) {
+    return { error: `lead_after_delay: ${leadAdErr.message}` }
   }
-  if ((progCount ?? 0) > 0) {
+  const leadZv = leadAfterDelay as LeadRow | null
+  if (!leadZv) {
+    return { error: 'lead_after_delay: lead não encontrado' }
+  }
+
+  const progBlock = await countLeadZvProgressBlockingAiInbox(
+    supabase,
+    leadData.user_id,
+    triggerRow.lead_id,
+  )
+  if (progBlock > 0) {
     return { ok: true, ignored: 'hard_lock_progress_active', lead_id: triggerRow.lead_id }
   }
 
-  if (leadData.ai_paused_for_zv_dispatch === true) {
+  if (leadZv.ai_paused_for_zv_dispatch === true) {
     return {
       ok: true,
       ignored: 'zv_dispatch_ai_paused_flag',
@@ -463,10 +556,19 @@ async function runPipeline(
     }
   }
 
-  // HARD LOCK: última mensagem com supressão (corrida com insert do webhook).
+  const pendZv = await countPendingZvScheduledForLead(supabase, leadData.user_id, triggerRow.lead_id)
+  if (pendZv > 0) {
+    return {
+      ok: true,
+      ignored: 'zv_scheduled_queue_pending',
+      lead_id: triggerRow.lead_id,
+      pending_zv: pendZv,
+    }
+  }
+
   const { data: lastMsg, error: lastErr } = await supabase
     .from('chat_messages')
-    .select('ai_suppressed, created_at')
+    .select('id, ai_suppressed, created_at')
     .eq('lead_id', triggerRow.lead_id)
     .order('created_at', { ascending: false })
     .limit(1)
@@ -474,10 +576,12 @@ async function runPipeline(
   if (lastErr) {
     return { error: `last_msg: ${lastErr.message}` }
   }
-  if ((lastMsg as { ai_suppressed?: boolean | null } | null)?.ai_suppressed === true) {
+  const last = lastMsg as { id?: string; ai_suppressed?: boolean | null } | null
+  if (last?.ai_suppressed === true) {
     return { ok: true, ignored: 'hard_lock_last_message_suppressed', lead_id: triggerRow.lead_id }
   }
-  const lockedUntilIso = (leadData.funnel_locked_until ?? null)?.trim?.() ?? null
+
+  const lockedUntilIso = (leadZv.funnel_locked_until ?? null)?.trim?.() ?? null
   if (lockedUntilIso) {
     const t = new Date(lockedUntilIso).getTime()
     if (!Number.isNaN(t) && Date.now() < t) {
@@ -565,17 +669,67 @@ async function runPipeline(
 
   const { data: pausePreLlm, error: pausePreErr } = await supabase
     .from('leads')
-    .select('ai_paused_until')
+    .select(
+      'ai_paused_until, ai_paused_for_zv_dispatch, ai_enabled, funnel_locked_until',
+    )
     .eq('id', triggerRow.lead_id)
     .eq('user_id', leadData.user_id)
     .maybeSingle()
   if (pausePreErr) {
     return { error: `ai_pause_pre_llm: ${pausePreErr.message}` }
   }
-  if (isAiPausedUntilActive((pausePreLlm as { ai_paused_until?: unknown } | null)?.ai_paused_until)) {
+  const pre = pausePreLlm as {
+    ai_paused_until?: unknown
+    ai_paused_for_zv_dispatch?: boolean | null
+    ai_enabled?: boolean | null
+    funnel_locked_until?: string | null
+  } | null
+  if (isAiPausedUntilActive(pre?.ai_paused_until)) {
     return {
       ok: true,
       ignored: 'ai_paused_human_handoff',
+      lead_id: triggerRow.lead_id,
+    }
+  }
+  if (pre?.ai_paused_for_zv_dispatch === true) {
+    return {
+      ok: true,
+      ignored: 'zv_dispatch_ai_paused_flag_pre_llm',
+      lead_id: triggerRow.lead_id,
+    }
+  }
+  const [progPre, pendPre] = await Promise.all([
+    countLeadZvProgressBlockingAiInbox(supabase, leadData.user_id, triggerRow.lead_id),
+    countPendingZvScheduledForLead(supabase, leadData.user_id, triggerRow.lead_id),
+  ])
+  if (progPre > 0) {
+    return { ok: true, ignored: 'hard_lock_progress_active_pre_llm', lead_id: triggerRow.lead_id }
+  }
+  if (pendPre > 0) {
+    return {
+      ok: true,
+      ignored: 'zv_scheduled_queue_pending_pre_llm',
+      lead_id: triggerRow.lead_id,
+      pending_zv: pendPre,
+    }
+  }
+  const lockPre = (pre?.funnel_locked_until ?? '').trim()
+  if (lockPre) {
+    const t = new Date(lockPre).getTime()
+    if (!Number.isNaN(t) && Date.now() < t) {
+      return {
+        ok: true,
+        ignored: 'lead_in_funnel_pre_llm',
+        lead_id: triggerRow.lead_id,
+        funnel_locked_until: lockPre,
+      }
+    }
+  }
+
+  if (pre?.ai_enabled === false) {
+    return {
+      ok: true,
+      ignored: 'ai_disabled_explicit',
       lead_id: triggerRow.lead_id,
     }
   }

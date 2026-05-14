@@ -138,6 +138,44 @@ function funnelStepDelaySeconds(step: FunnelRow): number {
   return Number.isFinite(n) && n >= 0 ? n : 0
 }
 
+/**
+ * Conta progresso de funil que ainda deve bloquear a IA: linhas em `lead_campaign_progress`
+ * com status de funil ativo **e** campanha pai em `zv_campaigns` com `status = 'active'`.
+ * Progresso ligado a campanha `paused`/`completed`/`draft` não entra (evita `fluxo_em_andamento` fantasma).
+ */
+export async function countLeadZvProgressBlockingAi(
+  supabase: SupabaseClient,
+  userId: string,
+  leadId: string,
+): Promise<{ count: number; error: { message: string } | null }> {
+  const { data: rows, error } = await supabase
+    .from('lead_campaign_progress')
+    .select('campaign_id')
+    .eq('user_id', userId)
+    .eq('lead_id', leadId)
+    .in('status', ['active', 'awaiting_last_send'])
+  if (error) {
+    return { count: 0, error: { message: error.message } }
+  }
+  const list = rows ?? []
+  if (list.length === 0) return { count: 0, error: null }
+  const ids = [...new Set(list.map((r) => String((r as { campaign_id: string }).campaign_id)))]
+  const { data: camps, error: cErr } = await supabase
+    .from('zv_campaigns')
+    .select('id')
+    .eq('user_id', userId)
+    .eq('status', 'active')
+    .in('id', ids)
+  if (cErr) {
+    console.warn('[ZapVoice inbound] countLeadZvProgressBlockingAi: zv_campaigns', cErr.message)
+    // Falha fechada: assume o pior (todas as linhas contam) para não liberar IA por erro transitório.
+    return { count: list.length, error: null }
+  }
+  const active = new Set((camps ?? []).map((c) => (c as { id: string }).id))
+  const count = list.filter((r) => active.has((r as { campaign_id: string }).campaign_id)).length
+  return { count, error: null }
+}
+
 /** Libera a IA do lead se não há mais Zap Voice pendente/processando nem progresso ativo. */
 async function maybeReleaseLeadZvAiDispatchPause(
   supabase: SupabaseClient,
@@ -145,7 +183,7 @@ async function maybeReleaseLeadZvAiDispatchPause(
   leadId: string,
   context: string,
 ): Promise<void> {
-  const [{ count: pend, error: pe }, { count: progCt, error: pgE }] = await Promise.all([
+  const [{ count: pend, error: pe }, progBlocking] = await Promise.all([
     supabase
       .from('scheduled_messages')
       .select('id', { count: 'exact', head: true })
@@ -154,18 +192,15 @@ async function maybeReleaseLeadZvAiDispatchPause(
       .not('zv_campaign_id', 'is', null)
       .in('status', ['pending', 'processing'])
       .eq('is_active', true),
-    supabase
-      .from('lead_campaign_progress')
-      .select('id', { count: 'exact', head: true })
-      .eq('user_id', userId)
-      .eq('lead_id', leadId)
-      .in('status', ['active', 'awaiting_last_send']),
+    countLeadZvProgressBlockingAi(supabase, userId, leadId),
   ])
+  const progCt = progBlocking.count
+  const pgE = progBlocking.error
   if (pe || pgE) {
     console.warn(`[ZapVoice inbound] release pause (${context}):`, pe?.message ?? pgE?.message)
     return
   }
-  if ((pend ?? 0) !== 0 || (progCt ?? 0) !== 0) return
+  if ((pend ?? 0) !== 0 || progCt !== 0) return
   const { error } = await supabase
     .from('leads')
     .update({
@@ -196,7 +231,7 @@ type ProgressRow = {
   campaign_id: string
   next_step_order: number
   total_steps: number
-  status: 'active' | 'awaiting_last_send'
+  status: 'active' | 'awaiting_last_send' | 'completed'
 }
 
 function short(s: string | null | undefined, n = 120): string {
@@ -263,11 +298,36 @@ function findMissingRequired(
   return miss
 }
 
+export type ZapVoiceInboundResult = {
+  enqueued: boolean
+  campaignId?: string
+  reason?: string
+  suppressAi?: boolean
+}
+
+export type ZapVoiceInboundParams = {
+  supabase: SupabaseClient
+  userId: string
+  instanceName: string
+  leadId: string
+  phoneDigits: string
+  leadName: string
+  messageText: string
+  contentType: 'text' | 'audio' | 'image' | 'document'
+  /**
+   * Quando `true`, relaxa supressão de IA só em caminhos de erro **sem** prioridade de fala do funil
+   * (ex.: falha de DB ao listar campanhas). O webhook deve passar `false` para não colidir com
+   * `inbox-ai-reply`: o toggle "IA ligada" no CRM não pode sobrepor campanha/fila ZV.
+   */
+  allowAiDespiteZv?: boolean
+}
+
 /** Resposta do lead com progresso ativo: avança o fluxo (nunca reenvia isca). */
 async function handleActiveCampaignProgress(
   p: ZapVoiceInboundParams,
   messageNorm: string,
   progress: ProgressRow,
+  suppressCampaignAi = true,
 ): Promise<ZapVoiceInboundResult> {
   console.log('[ZapVoice inbound] pós-gatilho: entrando no handleActiveCampaignProgress', {
     leadId: p.leadId,
@@ -288,7 +348,7 @@ async function handleActiveCampaignProgress(
       enqueued: false,
       reason: 'aguardando_ultima',
       campaignId: progress.campaign_id,
-      suppressAi: true,
+      suppressAi: suppressCampaignAi,
     }
   }
 
@@ -321,7 +381,12 @@ async function handleActiveCampaignProgress(
       campaignId: progress.campaign_id,
       campId: camp?.id ?? null,
     })
-    return { enqueued: false, reason: 'campanha_sem_fluxo', campaignId: progress.campaign_id, suppressAi: true }
+    return {
+      enqueued: false,
+      reason: 'campanha_sem_fluxo',
+      campaignId: progress.campaign_id,
+      suppressAi: suppressCampaignAi,
+    }
   }
 
   const cond = (camp.trigger_condition ?? 'equals') as TriggerCondition
@@ -344,7 +409,7 @@ async function handleActiveCampaignProgress(
       enqueued: false,
       reason: 'fluxo_tenant_incompativel',
       campaignId: progress.campaign_id,
-      suppressAi: true,
+      suppressAi: suppressCampaignAi,
     }
   }
 
@@ -365,7 +430,7 @@ async function handleActiveCampaignProgress(
       enqueued: false,
       reason: 'erro_proximo_passo',
       campaignId: progress.campaign_id,
-      suppressAi: true,
+      suppressAi: suppressCampaignAi,
     }
   }
 
@@ -405,7 +470,12 @@ async function handleActiveCampaignProgress(
         leadId: p.leadId,
         campaignId: progress.campaign_id,
       })
-      return { enqueued: false, reason: 'fluxo_vazio', campaignId: progress.campaign_id, suppressAi: true }
+      return {
+        enqueued: false,
+        reason: 'fluxo_vazio',
+        campaignId: progress.campaign_id,
+        suppressAi: suppressCampaignAi,
+      }
     }
   }
 
@@ -490,7 +560,7 @@ async function handleActiveCampaignProgress(
         enqueued: false,
         reason: 'gatilho_nao_bateu',
         campaignId: progress.campaign_id,
-        suppressAi: true,
+        suppressAi: suppressCampaignAi,
       }
     }
 
@@ -527,7 +597,7 @@ async function handleActiveCampaignProgress(
       enqueued: false,
       reason: 'sem_proximo_passo',
       campaignId: progress.campaign_id,
-      suppressAi: true,
+      suppressAi: suppressCampaignAi,
     }
   }
 
@@ -554,26 +624,8 @@ async function handleActiveCampaignProgress(
     enqueued: false,
     reason: 'fluxo_timer_via_agenda',
     campaignId: progress.campaign_id,
-    suppressAi: true,
+    suppressAi: suppressCampaignAi,
   }
-}
-
-export type ZapVoiceInboundResult = {
-  enqueued: boolean
-  campaignId?: string
-  reason?: string
-  suppressAi?: boolean
-}
-
-export type ZapVoiceInboundParams = {
-  supabase: SupabaseClient
-  userId: string
-  instanceName: string
-  leadId: string
-  phoneDigits: string
-  leadName: string
-  messageText: string
-  contentType: 'text' | 'audio' | 'image' | 'document'
 }
 
 export async function processZapVoiceInbound(
@@ -611,6 +663,9 @@ export async function processZapVoiceInbound(
     return { enqueued: false, reason: 'parametros_invalidos' }
   }
 
+  /** Sem prioridade de fala do funil: `allowAiDespiteZv === true` evita suprimir IA em erros de leitura. */
+  const legacyNoAiBypass = (): boolean => p.allowAiDespiteZv !== true
+
   const messageNorm = normText(raw)
   console.log('[ZapVoice inbound] inbound recebido (texto normalizado)', {
     leadId: p.leadId,
@@ -643,10 +698,46 @@ export async function processZapVoiceInbound(
       leadId: p.leadId,
       userId: p.userId,
     })
-    return { enqueued: false, reason: 'erro_progresso', suppressAi: true }
+    return { enqueued: false, reason: 'erro_progresso', suppressAi: legacyNoAiBypass() }
   }
 
-  const progressed = (progList ?? []) as ProgressRow[]
+  const rawProgressed = (progList ?? []) as ProgressRow[]
+  const progCampaignIds = [...new Set(rawProgressed.map((r) => r.campaign_id))]
+  let progressed: ProgressRow[] = rawProgressed
+  if (progCampaignIds.length > 0) {
+    const { data: activeParents, error: parErr } = await p.supabase
+      .from('zv_campaigns')
+      .select('id')
+      .eq('user_id', p.userId)
+      .eq('status', 'active')
+      .in('id', progCampaignIds)
+    if (parErr) {
+      console.warn('[ZapVoice inbound] filtro campanha ativa (progresso):', parErr.message)
+    } else {
+      const allowed = new Set((activeParents ?? []).map((r) => (r as { id: string }).id))
+      progressed = rawProgressed.filter((r) => allowed.has(r.campaign_id))
+      const dropped = rawProgressed.filter((r) => !allowed.has(r.campaign_id)).map((r) => r.campaign_id)
+      if (dropped.length > 0) {
+        console.warn(
+          '[ZapVoice inbound] progresso ignorado na decisão Zap Voice (campanha pai não está active)',
+          { leadId: p.leadId, campaignIds: dropped },
+        )
+      }
+    }
+  }
+
+  const { count: pendZvCt, error: pendZvErr } = await p.supabase
+    .from('scheduled_messages')
+    .select('id', { count: 'exact', head: true })
+    .eq('user_id', p.userId)
+    .eq('lead_id', p.leadId)
+    .not('zv_campaign_id', 'is', null)
+    .in('status', ['pending', 'processing'])
+    .eq('is_active', true)
+  if (pendZvErr) {
+    console.warn('[ZapVoice inbound] contagem fila ZV (scheduled_messages):', pendZvErr.message)
+  }
+  const pendingZvOutbound = !pendZvErr && (pendZvCt ?? 0) > 0
 
   const { data: campaigns, error: cErr } = await p.supabase
     .from('zv_campaigns')
@@ -659,7 +750,7 @@ export async function processZapVoiceInbound(
 
   if (cErr) {
     console.error('[ZapVoice inbound] list campaigns', cErr.message)
-    return { enqueued: false, reason: 'erro_listagem', suppressAi: true }
+    return { enqueued: false, reason: 'erro_listagem', suppressAi: legacyNoAiBypass() }
   }
 
   const campaignsList = (campaigns ?? []) as CampaignRow[]
@@ -698,6 +789,18 @@ export async function processZapVoiceInbound(
     }
   }
 
+  /**
+   * Prioridade de fala do funil nesta interação (sobreponde bypass de IA ligada):
+   * - gatilho casou em campanha ativa, ou
+   * - progresso real em campanha ativa, ou
+   * - há disparo Zap Voice pendente/processando para o lead.
+   */
+  const funnelSpeakPriority =
+    matched != null || progressed.length > 0 || pendingZvOutbound
+
+  const blockIaThisInbound = (logicWantsSuppress: boolean): boolean =>
+    funnelSpeakPriority || (!p.allowAiDespiteZv && logicWantsSuppress)
+
   // 1) Gatilho de campanha bateu → prioriza SEMPRE o progresso dessa campanha (evita prog de outro funil “roubar” a mensagem).
   if (matched) {
     console.log('[ZapVoice inbound] GATILHO RECONHECIDO: campanha selecionada', {
@@ -708,9 +811,8 @@ export async function processZapVoiceInbound(
       trigger_keyword: short(matched.trigger_keyword, 80),
     })
 
-    // CRÍTICO: pausa IMEDIATA da IA assim que o gatilho casou (antes de qualquer query de progresso/funil).
-    // Isso fecha a janela de corrida com o `inbox-ai-reply` mesmo no caso "Inbound Orgânico de Ads"
-    // (lead inédito do Instagram). Se algum passo abaixo falhar, `unlockLeadFunnelLock` libera a IA.
+    // CRÍTICO: pausa IMEDIATA da IA assim que o gatilho casou (corrida com inbox-ai-reply).
+    // Funil tem prioridade: sempre aplica, inclusive com "IA Ligada" no CRM.
     try {
       const upPause = await p.supabase
         .from('leads')
@@ -756,7 +858,7 @@ export async function processZapVoiceInbound(
         '[ZapVoice inbound] gatilho + progresso da mesma campanha; segue zv_funnels (não isca)',
         matched.id,
       )
-      return await handleActiveCampaignProgress(p, messageNorm, progForMatched)
+      return await handleActiveCampaignProgress(p, messageNorm, progForMatched, blockIaThisInbound(true))
     }
 
     const { count: doneCount, error: doneErr } = await p.supabase
@@ -772,7 +874,7 @@ export async function processZapVoiceInbound(
         leadId: p.leadId,
         campaignId: matched.id,
       })
-      return { enqueued: false, reason: 'ja_concluida', campaignId: matched.id, suppressAi: true }
+      return { enqueued: false, reason: 'ja_concluida', campaignId: matched.id, suppressAi: blockIaThisInbound(true) }
     }
 
     // Progresso já existe para esta campanha, mas pode não estar na lista (corrida/consulta antiga): evita insert duplicado.
@@ -786,7 +888,7 @@ export async function processZapVoiceInbound(
       .maybeSingle()
     if (sameCampErr) {
       console.error('[ZapVoice inbound] progress read (campanha alvo)', sameCampErr.message)
-      return { enqueued: false, reason: 'erro_progresso', campaignId: matched.id, suppressAi: true }
+      return { enqueued: false, reason: 'erro_progresso', campaignId: matched.id, suppressAi: blockIaThisInbound(true) }
     }
     if (progSameCamp) {
       console.log('[ZapVoice inbound] pós-gatilho: progresso encontrado por corrida; seguindo fluxo', {
@@ -794,7 +896,7 @@ export async function processZapVoiceInbound(
         campaignId: matched.id,
         progressId: (progSameCamp as { id?: string }).id ?? null,
       })
-      return await handleActiveCampaignProgress(p, messageNorm, progSameCamp as ProgressRow)
+      return await handleActiveCampaignProgress(p, messageNorm, progSameCamp as ProgressRow, blockIaThisInbound(true))
     }
 
     // —— Inbound "orgânico" (ex.: lead novo vindo de Meta Ads/Instagram): progresso ainda não existe p/ essa campanha ——
@@ -820,7 +922,7 @@ export async function processZapVoiceInbound(
         enqueued: false,
         reason: 'fluxo_tenant_incompativel',
         campaignId: matched.id,
-        suppressAi: false,
+        suppressAi: blockIaThisInbound(true),
       }
     }
 
@@ -843,7 +945,7 @@ export async function processZapVoiceInbound(
         campaignId: matched.id,
       })
       await unlockLeadFunnelLock(p.supabase, p.userId, p.leadId, 'organico_select_funil_falhou')
-      return { enqueued: false, reason: 'erro_funil', campaignId: matched.id, suppressAi: false }
+      return { enqueued: false, reason: 'erro_funil', campaignId: matched.id, suppressAi: blockIaThisInbound(true) }
     }
 
     const ordered = [...(stepsRaw ?? [])] as FunnelRow[]
@@ -868,7 +970,7 @@ export async function processZapVoiceInbound(
           enqueued: false,
           reason: 'etapa_midia_incompleta',
           campaignId: matched.id,
-          suppressAi: false,
+          suppressAi: blockIaThisInbound(true),
         }
       }
     }
@@ -881,7 +983,7 @@ export async function processZapVoiceInbound(
           enqueued: false,
           reason: 'etapa1_texto_vazia',
           campaignId: matched.id,
-          suppressAi: false,
+          suppressAi: blockIaThisInbound(true),
         }
       }
     }
@@ -903,7 +1005,7 @@ export async function processZapVoiceInbound(
         campaignId: matched.id,
       })
       await unlockLeadFunnelLock(p.supabase, p.userId, p.leadId, 'organico_update_lead_tag_falhou')
-      return { enqueued: false, reason: 'erro_lead', campaignId: matched.id, suppressAi: false }
+      return { enqueued: false, reason: 'erro_lead', campaignId: matched.id, suppressAi: blockIaThisInbound(true) }
     }
 
   const totalSteps = ordered.length
@@ -949,7 +1051,7 @@ export async function processZapVoiceInbound(
             .in('status', ['active', 'awaiting_last_send'])
             .maybeSingle()
           if (!p2Err && p2) {
-            return await handleActiveCampaignProgress(p, messageNorm, p2 as ProgressRow)
+            return await handleActiveCampaignProgress(p, messageNorm, p2 as ProgressRow, blockIaThisInbound(true))
           }
         }
         await unlockLeadFunnelLock(p.supabase, p.userId, p.leadId, 'organico_insert_progress_falhou')
@@ -957,7 +1059,7 @@ export async function processZapVoiceInbound(
           enqueued: false,
           reason: 'erro_progresso',
           campaignId: matched.id,
-          suppressAi: false,
+          suppressAi: blockIaThisInbound(true),
         }
       }
       if (progIns.data) {
@@ -1001,7 +1103,7 @@ export async function processZapVoiceInbound(
             enqueued: false,
             reason: enq1.reason ?? 'erro_fila',
             campaignId: matched.id,
-            suppressAi: false,
+            suppressAi: blockIaThisInbound(true),
           }
         }
         console.log(
@@ -1014,12 +1116,12 @@ export async function processZapVoiceInbound(
             total_steps: pr.total_steps,
           },
         )
-        return { enqueued: true, campaignId: matched.id, suppressAi: true }
+        return { enqueued: true, campaignId: matched.id, suppressAi: blockIaThisInbound(true) }
       }
     }
 
     await unlockLeadFunnelLock(p.supabase, p.userId, p.leadId, 'organico_sem_etapas')
-    return { enqueued: false, reason: 'sem_etapas', campaignId: matched.id, suppressAi: false }
+    return { enqueued: false, reason: 'sem_etapas', campaignId: matched.id, suppressAi: blockIaThisInbound(true) }
   }
 
   // 2) Nenhum gatilho de campanha bateu nesta mensagem.
@@ -1030,7 +1132,7 @@ export async function processZapVoiceInbound(
       enqueued: false,
       reason: 'fluxo_em_andamento',
       campaignId: progressed[0]!.campaign_id,
-      suppressAi: true,
+      suppressAi: blockIaThisInbound(true),
     }
   }
 
@@ -1437,5 +1539,10 @@ async function enqueueFunnelStepAndAdvance(p: {
     campaignId: p.progress.campaign_id,
     progressId: p.progress.id,
   })
-  return { enqueued: true, campaignId: p.progress.campaign_id, reason: 'avancou', suppressAi: true }
+  return {
+    enqueued: true,
+    campaignId: p.progress.campaign_id,
+    reason: 'avancou',
+    suppressAi: true,
+  }
 }

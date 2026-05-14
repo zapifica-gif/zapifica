@@ -1312,12 +1312,16 @@ serve(async () => {
         if (cntErr) {
           console.warn('[Agenda Suprema] Falha ao checar fim do funil:', cntErr.message)
         } else if ((count ?? 0) === 0) {
-          const isAwaiting =
-            prog && typeof (prog as any).status === 'string'
-              ? String((prog as any).status) === 'awaiting_last_send'
-              : false
+          const st = prog && typeof (prog as { status?: unknown }).status === 'string'
+            ? String((prog as { status: string }).status)
+            : ''
+          const isAwaiting = st === 'awaiting_last_send'
+          const sentFunnelStep = isScheduledMessageZapVoiceFunnelStep(msg)
+          const noFollowUpQueued = queuedInline === null
+          const funnelJustFinished =
+            Boolean(prog) && sentFunnelStep && noFollowUpQueued && (isAwaiting || st === 'active')
 
-          if (!prog || isAwaiting) {
+          if (!prog || isAwaiting || funnelJustFinished) {
             const { error: compErr } = await supabase
               .from('lead_campaign_completions')
               .insert({
@@ -1328,19 +1332,22 @@ serve(async () => {
             if (compErr && compErr.code !== '23505') {
               console.warn('[Agenda Suprema] Falha ao gravar completion:', compErr.message)
             }
-            if (prog && (prog as any).id) {
-              const { error: delErr } = await supabase
+            if (prog && (prog as { id?: string }).id) {
+              const { error: finErr } = await supabase
                 .from('lead_campaign_progress')
-                .delete()
-                .eq('id', (prog as any).id)
+                .update({
+                  status: 'completed',
+                  updated_at: new Date().toISOString(),
+                })
+                .eq('id', (prog as { id: string }).id)
                 .eq('user_id', msg.user_id)
-              if (delErr) {
-                console.warn('[Agenda Suprema] Falha ao remover progress:', delErr.message)
+              if (finErr) {
+                console.warn('[Agenda Suprema] Falha ao marcar progress completed:', finErr.message)
               }
             }
 
             await maybeReleaseLeadZvAiDispatchPause(supabase, msg.user_id, msg.lead_id)
-            console.log('[Agenda Suprema] Campanha/funil Zap Voice OK — avaliado release da IA', {
+            console.log('[Agenda Suprema] Campanha/funil Zap Voice OK — progress completed + IA reavaliada', {
               lead_id: msg.lead_id,
               zv_campaign_id: msg.zv_campaign_id,
             })

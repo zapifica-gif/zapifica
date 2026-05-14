@@ -7,7 +7,7 @@
 
 import { serve } from 'https://deno.land/std@0.168.0/http/server.ts'
 import { createClient, SupabaseClient } from 'https://esm.sh/@supabase/supabase-js@2'
-import { processZapVoiceInbound } from './zapvoice-inbound.ts'
+import { processZapVoiceInbound, countLeadZvProgressBlockingAi } from './zapvoice-inbound.ts'
 import {
   extractQuotedTextFromMessage,
   fetchBase64FromEvolutionApi,
@@ -1389,6 +1389,8 @@ serve(async (req) => {
         index.rows.find((r) => r.id === crmLeadId)?.name ??
         item.pushName ??
         'Cliente'
+      // Funil/campanha têm prioridade sobre o toggle "IA ligada" do CRM:
+      // nunca passar allowAiDespiteZv=true (evita suppressAi falso em corrida com inbox-ai-reply).
       const zv = await processZapVoiceInbound({
         supabase,
         userId,
@@ -1398,6 +1400,7 @@ serve(async (req) => {
         leadName: leadDisplayName,
         messageText: zvText,
         contentType: 'text',
+        allowAiDespiteZv: false,
       })
       zvSuppress = zv.suppressAi === true
       zvReason = zv.reason ?? null
@@ -1509,20 +1512,34 @@ serve(async (req) => {
           continue
         }
 
-        const { count: zvProgCt, error: zvProgErr } = await supabase
-          .from('lead_campaign_progress')
-          .select('id', { count: 'exact', head: true })
-          .eq('user_id', userId)
-          .eq('lead_id', crmLeadId)
-          .in('status', ['active', 'awaiting_last_send'])
-        if (
-          !zvProgErr &&
-          (zvProgCt ?? 0) > 0
-        ) {
+        const zvProg = await countLeadZvProgressBlockingAi(supabase, userId, crmLeadId)
+        if (!zvProg.error && zvProg.count > 0) {
           console.log('[IA] Funil Zap Voice ativo neste lead — ignorando IA.', {
             leadId: crmLeadId,
           })
           skipped.push(`zv_progress_active:${item.msgId}`)
+          continue
+        }
+        if (zvProg.error) {
+          console.warn('[IA] Contagem progresso Zap Voice:', zvProg.error.message)
+        }
+
+        const { count: pendZvCt, error: pendZvErr } = await supabase
+          .from('scheduled_messages')
+          .select('id', { count: 'exact', head: true })
+          .eq('user_id', userId)
+          .eq('lead_id', crmLeadId)
+          .not('zv_campaign_id', 'is', null)
+          .in('status', ['pending', 'processing'])
+          .eq('is_active', true)
+        if (pendZvErr) {
+          console.warn('[IA] Contagem fila ZV pendente:', pendZvErr.message)
+        } else if ((pendZvCt ?? 0) > 0) {
+          console.log('[IA] Disparo Zap Voice na fila — ignorando IA genérica.', {
+            leadId: crmLeadId,
+            pending: pendZvCt,
+          })
+          skipped.push(`zv_queue_pending:${item.msgId}`)
           continue
         }
 
@@ -1639,20 +1656,56 @@ serve(async (req) => {
               includeClientNameHint,
             })
 
-            const { data: pauseRecheck, error: pauseReErr } = await supabase
+            const { data: gateRecheck, error: gateReErr } = await supabase
               .from('leads')
-              .select('ai_paused_until')
+              .select('ai_paused_until, ai_paused_for_zv_dispatch')
               .eq('id', crmLeadId)
               .eq('user_id', userId)
               .maybeSingle()
-            if (pauseReErr) {
-              console.error('[IA] Falha ao releer ai_paused_until antes do DeepSeek:', pauseReErr.message)
-            } else if (isAiPausedUntilActive(pauseRecheck?.ai_paused_until)) {
-              console.log(
-                '[IA] Human handoff (recheck antes do LLM) — ignorando resposta automática.',
-                { leadId: crmLeadId },
-              )
-              skipped.push(`ai_paused_human_handoff_recheck:${item.msgId}`)
+            if (gateReErr) {
+              console.error('[IA] Falha ao releer travas antes do DeepSeek:', gateReErr.message)
+            } else {
+              if (isAiPausedUntilActive(gateRecheck?.ai_paused_until)) {
+                console.log(
+                  '[IA] Human handoff (recheck antes do LLM) — ignorando resposta automática.',
+                  { leadId: crmLeadId },
+                )
+                skipped.push(`ai_paused_human_handoff_recheck:${item.msgId}`)
+                continue
+              }
+              if (gateRecheck?.ai_paused_for_zv_dispatch === true) {
+                console.log(
+                  '[IA] Zap Voice (recheck antes do LLM) — ignorando resposta automática.',
+                  { leadId: crmLeadId },
+                )
+                skipped.push(`zv_dispatch_pause_recheck:${item.msgId}`)
+                continue
+              }
+            }
+
+            const [zvProgRec, pendZvRec] = await Promise.all([
+              countLeadZvProgressBlockingAi(supabase, userId, crmLeadId),
+              supabase
+                .from('scheduled_messages')
+                .select('id', { count: 'exact', head: true })
+                .eq('user_id', userId)
+                .eq('lead_id', crmLeadId)
+                .not('zv_campaign_id', 'is', null)
+                .in('status', ['pending', 'processing'])
+                .eq('is_active', true),
+            ])
+            if (!zvProgRec.error && zvProgRec.count > 0) {
+              console.log('[IA] Funil ZV ativo (recheck pré-LLM) — abortando.', { leadId: crmLeadId })
+              skipped.push(`zv_progress_active_recheck:${item.msgId}`)
+              continue
+            }
+            const pz = pendZvRec.count ?? 0
+            if (!pendZvRec.error && pz > 0) {
+              console.log('[IA] Fila ZV pendente (recheck pré-LLM) — abortando.', {
+                leadId: crmLeadId,
+                pending: pz,
+              })
+              skipped.push(`zv_queue_pending_recheck:${item.msgId}`)
               continue
             }
 

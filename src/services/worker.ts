@@ -795,10 +795,11 @@ async function maybeReleaseLeadZvAiDispatchPause(
   if (ue) console.warn('[worker][ZV-Pause] release:', ue.message)
 }
 
-/** Mesmo bloco da Edge: sem pendentes na campanha → completion + reavalia trava IA do lead. */
+/** Mesmo bloco da Edge: sem pendentes na campanha → completion + progress completed + IA. */
 async function maybeFinalizeZapVoiceCampaignLead(
   supabase: SupabaseClient,
   row: ScheduledRow,
+  opts?: { funnelNextQueued?: boolean },
 ): Promise<void> {
   if (!row.lead_id || !row.zv_campaign_id) return
 
@@ -821,11 +822,17 @@ async function maybeFinalizeZapVoiceCampaignLead(
     .eq('is_active', true)
 
   if ((count ?? 0) === 0) {
-    const isAwaiting =
+    const st =
       prog && typeof (prog as { status?: unknown }).status === 'string'
-        ? String((prog as { status: unknown }).status) === 'awaiting_last_send'
-        : false
-    if (!prog || isAwaiting) {
+        ? String((prog as { status: unknown }).status)
+        : ''
+    const isAwaiting = st === 'awaiting_last_send'
+    const sentFunnel = isScheduledMessageZapVoiceFunnelStepRow(row)
+    const noFollowUp = opts?.funnelNextQueued !== true
+    const funnelJustFinished =
+      Boolean(prog) && sentFunnel && noFollowUp && (isAwaiting || st === 'active')
+
+    if (!prog || isAwaiting || funnelJustFinished) {
       const { error: compErr } = await supabase.from('lead_campaign_completions').insert({
         user_id: row.user_id,
         lead_id: row.lead_id,
@@ -835,11 +842,17 @@ async function maybeFinalizeZapVoiceCampaignLead(
         console.warn('[worker] completion insert:', compErr.message)
       }
       if (prog && (prog as { id?: string }).id) {
-        await supabase
+        const { error: finErr } = await supabase
           .from('lead_campaign_progress')
-          .delete()
+          .update({
+            status: 'completed',
+            updated_at: new Date().toISOString(),
+          })
           .eq('id', (prog as { id: string }).id)
           .eq('user_id', row.user_id)
+        if (finErr) {
+          console.warn('[worker] progress completed:', finErr.message)
+        }
       }
       await maybeReleaseLeadZvAiDispatchPause(supabase, row.user_id, row.lead_id)
     }
@@ -1204,7 +1217,9 @@ export async function checkAndSendScheduledMessages(
             queuedInline = await enqueueNextFunnelStepAfterSend(supabase, row)
           }
 
-          await maybeFinalizeZapVoiceCampaignLead(supabase, row)
+          await maybeFinalizeZapVoiceCampaignLead(supabase, row, {
+            funnelNextQueued: queuedInline !== null,
+          })
 
           processed += 1
 
@@ -1298,7 +1313,9 @@ export async function checkAndSendScheduledMessages(
             queuedInline = await enqueueNextFunnelStepAfterSend(supabase, row)
           }
 
-          await maybeFinalizeZapVoiceCampaignLead(supabase, row)
+          await maybeFinalizeZapVoiceCampaignLead(supabase, row, {
+            funnelNextQueued: queuedInline !== null,
+          })
 
           processed += 1
 

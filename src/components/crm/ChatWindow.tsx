@@ -366,15 +366,19 @@ export function ChatWindow({ open, onClose, lead, boardTenantUserIdRef }: ChatWi
           const cid = (prog[0] as any).campaign_id as string
           const { data: camp } = await supabase
             .from('zv_campaigns')
-            .select('name')
+            .select('name, status')
             .eq('id', cid)
             .eq('user_id', uid)
             .maybeSingle()
           if (cancelled) return
-          const nm = (camp as any)?.name ? String((camp as any).name) : null
-          setCampaignLabel(nm ? `Campanha: ${nm}` : 'Campanha: (não encontrada)')
-          setCampaignLoading(false)
-          return
+          const st = (camp as { status?: string } | null)?.status
+          if (st === 'active') {
+            const nm = (camp as any)?.name ? String((camp as any).name) : null
+            setCampaignLabel(nm ? `Campanha: ${nm}` : 'Campanha: (não encontrada)')
+            setCampaignLoading(false)
+            return
+          }
+          // Progresso residual com campanha pausa/concluída: não exibir como ativa; segue para histórico.
         }
 
         const { data: comps, error: cErr } = await supabase
