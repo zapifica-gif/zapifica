@@ -1,5 +1,28 @@
 @import 'tailwindcss';
 
+/* Entrada suave de painéis (abas / áreas principais) */
+@keyframes zap-panel-in {
+  from {
+    opacity: 0;
+    transform: translateY(1rem);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes zap-modal-in {
+  from {
+    opacity: 0;
+    transform: translateY(0.75rem) scale(0.98);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
 @theme {
   --font-sans: 'Inter', ui-sans-serif, system-ui, sans-serif;
   /* Marca Zapifica */
@@ -14,6 +37,23 @@
   --color-zapifica-950: #0c0e14;
   --color-zapifica-900: #12151c;
   --color-zapifica-800: #1a1f2a;
+  /* Paleta Google (navegação / foco) */
+  --color-google-blue: #4285f4;
+  --color-google-red: #ea4335;
+  --color-google-yellow: #fbbc05;
+  --color-google-green: #34a853;
+  --animate-panel-in: zap-panel-in 0.5s cubic-bezier(0.22, 1, 0.36, 1) both;
+  --animate-modal-in: zap-modal-in 0.45s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+@utility btn-primary-magnetic {
+  @apply inline-flex items-center justify-center gap-2 rounded-xl bg-gradient-to-r from-brand-600 via-brand-600 to-brand-green px-4 py-3 text-sm font-bold text-white shadow-lg shadow-brand-600/25 transition-all duration-300 ease-out;
+  @apply hover:-translate-y-0.5 hover:shadow-xl hover:shadow-brand-600/30 hover:from-brand-500 hover:via-brand-500 hover:to-brand-green-dark active:translate-y-0;
+}
+
+@utility btn-primary-magnetic-sm {
+  @apply inline-flex items-center justify-center gap-2 rounded-xl bg-gradient-to-r from-brand-600 to-brand-green px-3 py-2.5 text-xs font-bold text-white shadow-md shadow-brand-600/20 transition-all duration-300 ease-out;
+  @apply hover:-translate-y-0.5 hover:shadow-lg hover:shadow-brand-600/25 hover:from-brand-500 hover:to-brand-green active:translate-y-0;
 }
 
 @layer base {
@@ -27,5 +67,26 @@
 
   #root {
     @apply min-h-dvh w-full max-w-none border-0 text-left;
+  }
+
+  /* Foco estilo Google em campos de texto (não afeta checkbox/radio/file/hidden) */
+  :where(
+      input:not([type='checkbox']):not([type='radio']):not([type='file']):not(
+          [type='hidden']
+        ):not([type='range']):not([type='color'])
+    ),
+  textarea,
+  select {
+    @apply transition-shadow duration-200;
+  }
+
+  :where(
+      input:not([type='checkbox']):not([type='radio']):not([type='file']):not(
+          [type='hidden']
+        ):not([type='range']):not([type='color'])
+    ):focus-visible,
+  textarea:focus-visible,
+  select:focus-visible {
+    @apply ring-2 ring-google-blue ring-offset-2 ring-offset-white outline-none;
   }
 }

@@ -310,7 +310,7 @@ function finalizeKanbanDrag(
   leadId: string,
   overId: string,
 ): { columns: Record<ColumnId, string[]>; endColumn: ColumnId } | null {
-  let targetColumn: ColumnId | undefined = isColumnId(overId)
+  const targetColumn: ColumnId | undefined = isColumnId(overId)
     ? overId
     : findContainer(base, overId)
   if (!targetColumn) return null
@@ -933,7 +933,7 @@ export function CrmKanbanBoard() {
         <button
           type="button"
           onClick={() => void fetchLeads()}
-          className="rounded-xl bg-zinc-900 px-4 py-2.5 text-sm font-medium text-white transition hover:bg-zinc-800"
+          className="rounded-xl bg-gradient-to-r from-zinc-900 to-zinc-800 px-4 py-2.5 text-sm font-medium text-white shadow-md transition-all duration-300 hover:-translate-y-0.5 hover:shadow-lg hover:from-zinc-800 hover:to-zinc-700"
         >
           Tentar novamente
         </button>
@@ -978,7 +978,7 @@ export function CrmKanbanBoard() {
                     <button
                       type="button"
                       onClick={() => setModalOpen(true)}
-                      className="inline-flex shrink-0 items-center rounded-lg border border-zinc-200/90 bg-white px-2.5 py-1 text-xs font-semibold tabular-nums text-zinc-600 shadow-sm transition hover:border-brand-200 hover:text-brand-700"
+                      className="btn-primary-magnetic-sm shrink-0"
                     >
                       + Novo Lead
                     </button>

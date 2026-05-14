@@ -193,8 +193,8 @@ export function HomePage() {
   )
 
   return (
-    <div className="space-y-8">
-      <section className="rounded-2xl border border-zinc-200/80 bg-gradient-to-br from-white via-white to-brand-50/80 p-6 shadow-sm lg:p-8">
+    <div className="animate-panel-in space-y-8">
+      <section className="rounded-2xl border border-zinc-200/80 bg-gradient-to-br from-white via-white to-brand-50/80 p-6 shadow-md shadow-zinc-900/5 ring-1 ring-zinc-100/80 lg:p-8">
         <div className="flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between">
           <div>
             <p className="text-sm font-medium text-brand-600">Painel de controle</p>
@@ -267,7 +267,7 @@ export function HomePage() {
       </section>
 
       <section className="grid gap-4 lg:grid-cols-2">
-        <div className="rounded-2xl border border-zinc-200/80 bg-white p-6 shadow-sm">
+        <div className="rounded-2xl border border-zinc-200/80 bg-white p-6 shadow-md shadow-zinc-900/5 ring-1 ring-zinc-100/80">
           <div className="flex items-center justify-between gap-3">
             <div>
               <h3 className="text-base font-semibold text-zinc-900">
@@ -318,7 +318,7 @@ export function HomePage() {
           </div>
         </div>
 
-        <div className="rounded-2xl border border-zinc-200/80 bg-zinc-900 p-6 text-zinc-100 shadow-sm ring-1 ring-zinc-800">
+        <div className="rounded-2xl border border-zinc-200/80 bg-zinc-900 p-6 text-zinc-100 shadow-md shadow-zinc-900/20 ring-1 ring-zinc-800">
           <h3 className="text-base font-semibold text-white">
             Campanhas rodando agora
           </h3>
@@ -366,7 +366,7 @@ export function HomePage() {
         </div>
       </section>
 
-      <section className="rounded-2xl border border-zinc-200/80 bg-white p-6 shadow-sm">
+      <section className="rounded-2xl border border-zinc-200/80 bg-white p-6 shadow-md shadow-zinc-900/5 ring-1 ring-zinc-100/80">
         <div className="flex items-end justify-between gap-3">
           <div>
             <h3 className="text-base font-semibold text-zinc-900">

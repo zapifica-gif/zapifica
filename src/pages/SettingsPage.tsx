@@ -116,7 +116,7 @@ export function SettingsPage() {
   }
 
   return (
-    <div className="space-y-8">
+    <div className="animate-panel-in space-y-8">
       <div>
         <div className="mb-1 flex items-center gap-2 text-zinc-500">
           <Settings2 className="h-5 w-5" aria-hidden />
@@ -134,11 +134,11 @@ export function SettingsPage() {
       </div>
 
       <div className="grid gap-8 lg:grid-cols-2 lg:items-start">
-        <section className="rounded-2xl border border-zinc-200/90 bg-white p-6 shadow-sm ring-1 ring-zinc-100/80">
+        <section className="rounded-2xl border border-zinc-200/90 bg-white p-6 shadow-md shadow-zinc-900/5 ring-1 ring-zinc-100/80">
           <EvolutionConnectionSettings />
         </section>
 
-        <section className="rounded-2xl border border-zinc-200/90 bg-white p-6 shadow-sm ring-1 ring-zinc-100/80">
+        <section className="rounded-2xl border border-zinc-200/90 bg-white p-6 shadow-md shadow-zinc-900/5 ring-1 ring-zinc-100/80">
           <h3 className="text-base font-semibold text-zinc-900">
             Dados da Empresa (para tags dinâmicas)
           </h3>
@@ -177,7 +177,7 @@ export function SettingsPage() {
                   <input
                     value={agenciaNome}
                     onChange={(e) => setAgenciaNome(e.target.value)}
-                    className="w-full rounded-lg border border-zinc-200 bg-white px-3 py-2 text-sm shadow-inner focus:border-brand-300 focus:outline-none focus:ring-2 focus:ring-brand-500/20"
+                    className="w-full rounded-lg border border-zinc-200 bg-white px-3 py-2 text-sm shadow-inner focus:border-google-blue/35 focus:outline-none"
                   />
                 </div>
                 <div>
@@ -187,7 +187,7 @@ export function SettingsPage() {
                   <input
                     value={vendedorPrimeiroNome}
                     onChange={(e) => setVendedorPrimeiroNome(e.target.value)}
-                    className="w-full rounded-lg border border-zinc-200 bg-white px-3 py-2 text-sm shadow-inner focus:border-brand-300 focus:outline-none focus:ring-2 focus:ring-brand-500/20"
+                    className="w-full rounded-lg border border-zinc-200 bg-white px-3 py-2 text-sm shadow-inner focus:border-google-blue/35 focus:outline-none"
                   />
                 </div>
               </div>
@@ -201,7 +201,7 @@ export function SettingsPage() {
                     value={telefoneContato}
                     onChange={(e) => setTelefoneContato(e.target.value)}
                     placeholder="(47) 99999-9999"
-                    className="w-full rounded-lg border border-zinc-200 bg-white px-3 py-2 text-sm shadow-inner focus:border-brand-300 focus:outline-none focus:ring-2 focus:ring-brand-500/20"
+                    className="w-full rounded-lg border border-zinc-200 bg-white px-3 py-2 text-sm shadow-inner focus:border-google-blue/35 focus:outline-none"
                   />
                 </div>
                 <div>
@@ -212,7 +212,7 @@ export function SettingsPage() {
                     value={telefonesRaw}
                     onChange={(e) => setTelefonesRaw(e.target.value)}
                     placeholder="(47) 99999-9999 / (48) 98888-8888"
-                    className="w-full rounded-lg border border-zinc-200 bg-white px-3 py-2 text-sm shadow-inner focus:border-brand-300 focus:outline-none focus:ring-2 focus:ring-brand-500/20"
+                    className="w-full rounded-lg border border-zinc-200 bg-white px-3 py-2 text-sm shadow-inner focus:border-google-blue/35 focus:outline-none"
                   />
                   <p className="mt-1 text-[11px] text-zinc-500">
                     Separe por <b>/</b>. Usado na tag <b>{'{telefones}'}</b>.
@@ -229,7 +229,7 @@ export function SettingsPage() {
                     value={instagramEmpresa}
                     onChange={(e) => setInstagramEmpresa(e.target.value)}
                     placeholder="@suaempresa"
-                    className="w-full rounded-lg border border-zinc-200 bg-white px-3 py-2 text-sm shadow-inner focus:border-brand-300 focus:outline-none focus:ring-2 focus:ring-brand-500/20"
+                    className="w-full rounded-lg border border-zinc-200 bg-white px-3 py-2 text-sm shadow-inner focus:border-google-blue/35 focus:outline-none"
                   />
                 </div>
                 <div>
@@ -240,7 +240,7 @@ export function SettingsPage() {
                     value={siteEmpresa}
                     onChange={(e) => setSiteEmpresa(e.target.value)}
                     placeholder="https://…"
-                    className="w-full rounded-lg border border-zinc-200 bg-white px-3 py-2 text-sm shadow-inner focus:border-brand-300 focus:outline-none focus:ring-2 focus:ring-brand-500/20"
+                    className="w-full rounded-lg border border-zinc-200 bg-white px-3 py-2 text-sm shadow-inner focus:border-google-blue/35 focus:outline-none"
                   />
                 </div>
               </div>
@@ -253,7 +253,7 @@ export function SettingsPage() {
                   value={avalieGoogle}
                   onChange={(e) => setAvalieGoogle(e.target.value)}
                   placeholder="https://g.page/…/review"
-                  className="w-full rounded-lg border border-zinc-200 bg-white px-3 py-2 text-sm shadow-inner focus:border-brand-300 focus:outline-none focus:ring-2 focus:ring-brand-500/20"
+                  className="w-full rounded-lg border border-zinc-200 bg-white px-3 py-2 text-sm shadow-inner focus:border-google-blue/35 focus:outline-none"
                 />
               </div>
 
@@ -265,7 +265,7 @@ export function SettingsPage() {
                   value={endereco}
                   onChange={(e) => setEndereco(e.target.value)}
                   placeholder="Rua…, 123 — Bairro — Cidade/UF"
-                  className="w-full rounded-lg border border-zinc-200 bg-white px-3 py-2 text-sm shadow-inner focus:border-brand-300 focus:outline-none focus:ring-2 focus:ring-brand-500/20"
+                  className="w-full rounded-lg border border-zinc-200 bg-white px-3 py-2 text-sm shadow-inner focus:border-google-blue/35 focus:outline-none"
                 />
               </div>
 
@@ -273,7 +273,7 @@ export function SettingsPage() {
                 type="button"
                 onClick={() => void save()}
                 disabled={saving}
-                className="inline-flex items-center justify-center rounded-xl bg-brand-600 px-4 py-3 text-sm font-bold text-white shadow-sm transition hover:bg-brand-700 disabled:opacity-60"
+                className="btn-primary-magnetic disabled:opacity-60"
               >
                 {saving ? 'Salvando…' : 'Salvar'}
               </button>

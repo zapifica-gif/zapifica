@@ -432,7 +432,7 @@ export function AiTrainingPage() {
       data: { user },
     } = await supabase.auth.getUser()
     if (!user) {
-      setAddingMaterial(false)
+      setAddingTextCategoryId(null)
       setError('Sessão inválida. Entre novamente.')
       return
     }
@@ -463,14 +463,14 @@ export function AiTrainingPage() {
   }
 
   return (
-    <div className="relative space-y-6">
+    <div className="relative animate-panel-in space-y-6">
       {studying ? (
         <div
           className="fixed inset-0 z-[90] flex items-center justify-center bg-zinc-950/45 px-6 backdrop-blur-[2px]"
           role="status"
           aria-live="polite"
         >
-          <div className="max-w-md rounded-2xl border border-zinc-200 bg-white p-6 text-center shadow-2xl">
+          <div className="animate-modal-in max-w-md rounded-2xl border border-zinc-200 bg-white p-6 text-center shadow-2xl">
             <Loader2 className="mx-auto h-10 w-10 animate-spin text-brand-600" aria-hidden />
             <p className="mt-4 text-sm font-semibold text-zinc-900">
               A IA está estudando o material (isso pode levar 1 minuto)…
@@ -498,7 +498,7 @@ export function AiTrainingPage() {
         </div>
       ) : null}
 
-      <section className="rounded-2xl border border-zinc-200 bg-white p-5 shadow-sm">
+      <section className="rounded-2xl border border-zinc-200 bg-white p-5 shadow-md shadow-zinc-900/5 ring-1 ring-zinc-100/80">
         <div className="flex items-center justify-between gap-3">
           <div className="flex items-center gap-2">
             <span className="flex h-10 w-10 items-center justify-center rounded-xl bg-emerald-50 text-emerald-700 ring-1 ring-emerald-200">
@@ -516,7 +516,7 @@ export function AiTrainingPage() {
             type="button"
             onClick={() => void salvarPrompt()}
             disabled={loading || savingPrompt}
-            className="inline-flex items-center gap-2 rounded-xl bg-gradient-to-r from-brand-600 to-brand-700 px-4 py-2 text-sm font-semibold text-white shadow-md transition hover:from-brand-500 hover:to-brand-600 disabled:cursor-not-allowed disabled:opacity-50"
+            className="btn-primary-magnetic-sm disabled:cursor-not-allowed disabled:opacity-50"
           >
             {savingPrompt ? <Loader2 className="h-4 w-4 animate-spin" /> : <Save className="h-4 w-4" />}
             Salvar
@@ -529,12 +529,12 @@ export function AiTrainingPage() {
             onChange={(e) => setMasterPrompt(e.target.value)}
             rows={6}
             placeholder="Ex.: Seja rápido, gentil e persuasivo. Faça perguntas curtas para entender o objetivo do cliente..."
-            className="w-full resize-none rounded-xl border border-zinc-200 bg-zinc-50 px-3 py-3 text-sm text-zinc-900 outline-none transition focus:border-brand-400 focus:bg-white focus:ring-2 focus:ring-brand-600/20"
+            className="w-full resize-none rounded-xl border border-zinc-200 bg-zinc-50 px-3 py-3 text-sm text-zinc-900 outline-none transition focus:border-google-blue/35 focus:bg-white"
           />
         </div>
       </section>
 
-      <section className="rounded-2xl border border-zinc-200 bg-white p-5 shadow-sm">
+      <section className="rounded-2xl border border-zinc-200 bg-white p-5 shadow-md shadow-zinc-900/5 ring-1 ring-zinc-100/80">
         <div className="flex items-center gap-2">
           <span className="flex h-10 w-10 items-center justify-center rounded-xl bg-violet-50 text-violet-700 ring-1 ring-violet-200">
             <BookOpen className="h-5 w-5" />
@@ -552,13 +552,13 @@ export function AiTrainingPage() {
             value={newCategoryName}
             onChange={(e) => setNewCategoryName(e.target.value)}
             placeholder="Criar novo empreendimento/categoria… (ex.: Residencial Atlântico)"
-            className="w-full rounded-xl border border-zinc-200 bg-zinc-50 px-3 py-2.5 text-sm outline-none focus:border-brand-400 focus:bg-white focus:ring-2 focus:ring-brand-600/20"
+            className="w-full rounded-xl border border-zinc-200 bg-zinc-50 px-3 py-2.5 text-sm outline-none transition focus:border-google-blue/35 focus:bg-white"
           />
           <button
             type="button"
             onClick={() => void criarCategoria()}
             disabled={loading || creatingCategory || !newCategoryName.trim()}
-            className="inline-flex items-center justify-center gap-2 rounded-xl bg-zinc-900 px-4 py-2 text-sm font-semibold text-white transition hover:bg-zinc-800 disabled:cursor-not-allowed disabled:opacity-50"
+            className="btn-primary-magnetic-sm shrink-0 disabled:cursor-not-allowed disabled:opacity-50"
           >
             {creatingCategory ? <Loader2 className="h-4 w-4 animate-spin" /> : null}
             Criar
@@ -641,14 +641,14 @@ export function AiTrainingPage() {
                         }
                         rows={6}
                         placeholder="Cole aqui informações úteis: ofertas, prazos, objeções, diferenciais, perguntas frequentes..."
-                        className="mt-2 w-full resize-none rounded-xl border border-zinc-200 bg-white px-3 py-3 text-sm text-zinc-900 outline-none transition focus:border-brand-400 focus:ring-2 focus:ring-brand-600/20"
+                        className="mt-2 w-full resize-none rounded-xl border border-zinc-200 bg-white px-3 py-3 text-sm text-zinc-900 outline-none transition focus:border-google-blue/35"
                       />
                       <div className="mt-3 flex items-center justify-end gap-2">
                         <button
                           type="button"
                           onClick={() => void adicionarTexto(cat.id)}
                           disabled={loading || addingTextCategoryId === cat.id || !canAdd}
-                          className="inline-flex items-center gap-2 rounded-xl bg-zinc-900 px-4 py-2 text-sm font-semibold text-white transition hover:bg-zinc-800 disabled:cursor-not-allowed disabled:opacity-50"
+                          className="btn-primary-magnetic-sm disabled:cursor-not-allowed disabled:opacity-50"
                         >
                           {addingTextCategoryId === cat.id ? (
                             <Loader2 className="h-4 w-4 animate-spin" />
@@ -749,7 +749,7 @@ export function AiTrainingPage() {
       {linkModalOpen ? (
         <div className="fixed inset-0 z-[80] flex items-center justify-center bg-zinc-950/50 px-4 backdrop-blur-[2px]">
           <div
-            className="w-full max-w-md rounded-2xl border border-zinc-200 bg-white p-5 shadow-2xl"
+            className="animate-modal-in w-full max-w-md rounded-2xl border border-zinc-200 bg-white p-5 shadow-2xl"
             role="dialog"
             aria-modal="true"
             aria-labelledby="link-modal-title"
@@ -765,7 +765,7 @@ export function AiTrainingPage() {
               value={linkUrl}
               onChange={(e) => setLinkUrl(e.target.value)}
               placeholder="https://…"
-              className="mt-3 w-full rounded-xl border border-zinc-200 bg-zinc-50 px-3 py-2.5 text-sm outline-none focus:border-brand-400 focus:bg-white focus:ring-2 focus:ring-brand-600/20"
+              className="mt-3 w-full rounded-xl border border-zinc-200 bg-zinc-50 px-3 py-2.5 text-sm outline-none transition focus:border-google-blue/35 focus:bg-white"
             />
             <div className="mt-4 flex justify-end gap-2">
               <button
@@ -782,7 +782,7 @@ export function AiTrainingPage() {
                 type="button"
                 onClick={() => void processarLink()}
                 disabled={studying || !linkUrl.trim()}
-                className="inline-flex items-center gap-2 rounded-xl bg-gradient-to-r from-brand-600 to-brand-700 px-4 py-2 text-sm font-semibold text-white shadow-md hover:from-brand-500 hover:to-brand-600 disabled:cursor-not-allowed disabled:opacity-50"
+                className="btn-primary-magnetic-sm disabled:cursor-not-allowed disabled:opacity-50"
               >
                 {studying ? <Loader2 className="h-4 w-4 animate-spin" /> : null}
                 Estudar link

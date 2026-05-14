@@ -597,7 +597,7 @@ export function LeadExtractorPage({ onOpenZapVoice }: LeadExtractorPageProps) {
   )
 
   return (
-    <div className="space-y-8">
+    <div className="animate-panel-in space-y-8">
       <div>
         <h2 className="text-xl font-semibold tracking-tight text-zinc-900">Extrator de Leads</h2>
         <p className="mt-1 max-w-2xl text-sm leading-relaxed text-zinc-600">
@@ -606,7 +606,7 @@ export function LeadExtractorPage({ onOpenZapVoice }: LeadExtractorPageProps) {
         </p>
       </div>
 
-      <div className="rounded-2xl border border-zinc-200/80 bg-gradient-to-br from-white via-white to-brand-50/50 p-6 shadow-sm">
+      <div className="rounded-2xl border border-zinc-200/80 bg-gradient-to-br from-white via-white to-brand-50/50 p-6 shadow-md shadow-zinc-900/5 ring-1 ring-zinc-100/80">
         <div className="flex flex-wrap items-center justify-between gap-4">
           <div className="flex items-center gap-3">
             <span className="flex h-12 w-12 items-center justify-center rounded-2xl bg-brand-600/10 text-brand-700">
@@ -629,7 +629,7 @@ export function LeadExtractorPage({ onOpenZapVoice }: LeadExtractorPageProps) {
       <div className="grid gap-8 lg:grid-cols-1">
         <form
           onSubmit={(e) => void onSubmit(e)}
-          className="rounded-2xl border border-zinc-200/80 bg-white p-6 shadow-sm"
+          className="rounded-2xl border border-zinc-200/80 bg-white p-6 shadow-md shadow-zinc-900/5 ring-1 ring-zinc-100/80"
         >
           <h3 className="text-base font-semibold text-zinc-900">Nova busca</h3>
           <p className="mt-1 text-sm text-zinc-500">
@@ -645,7 +645,7 @@ export function LeadExtractorPage({ onOpenZapVoice }: LeadExtractorPageProps) {
                 id="le-source"
                 value={source}
                 onChange={(e) => setSource(e.target.value as LeadExtractionSource)}
-                className="mt-1.5 w-full rounded-xl border border-zinc-200 bg-zinc-50 px-3 py-2.5 text-sm text-zinc-900 outline-none ring-brand-600/0 transition focus:border-brand-200 focus:bg-white focus:ring-4 focus:ring-brand-600/15"
+                className="mt-1.5 w-full rounded-xl border border-zinc-200 bg-zinc-50 px-3 py-2.5 text-sm text-zinc-900 outline-none transition focus:border-google-blue/35 focus:bg-white"
               >
                 <option value="google_maps">Google Maps</option>
                 <option value="instagram">Instagram</option>
@@ -660,7 +660,7 @@ export function LeadExtractorPage({ onOpenZapVoice }: LeadExtractorPageProps) {
                 value={searchTerm}
                 onChange={(e) => setSearchTerm(e.target.value)}
                 placeholder={searchTermPlaceholder}
-                className="mt-1.5 w-full rounded-xl border border-zinc-200 bg-zinc-50 px-3 py-2.5 text-sm text-zinc-900 outline-none placeholder:text-zinc-400 focus:border-brand-200 focus:bg-white focus:ring-4 focus:ring-brand-600/15"
+                className="mt-1.5 w-full rounded-xl border border-zinc-200 bg-zinc-50 px-3 py-2.5 text-sm text-zinc-900 outline-none placeholder:text-zinc-400 transition focus:border-google-blue/35 focus:bg-white"
               />
               {isInstagram ? (
                 <p className="mt-1.5 text-xs text-zinc-500">
@@ -677,7 +677,7 @@ export function LeadExtractorPage({ onOpenZapVoice }: LeadExtractorPageProps) {
                 id="le-country"
                 value={country}
                 onChange={(e) => setCountry(e.target.value)}
-                className="mt-1.5 w-full rounded-xl border border-zinc-200 bg-zinc-50 px-3 py-2.5 text-sm text-zinc-900 outline-none focus:border-brand-200 focus:bg-white focus:ring-4 focus:ring-brand-600/15"
+                className="mt-1.5 w-full rounded-xl border border-zinc-200 bg-zinc-50 px-3 py-2.5 text-sm text-zinc-900 outline-none transition focus:border-google-blue/35 focus:bg-white"
               >
                 {COUNTRIES.map((c) => (
                   <option key={c} value={c}>
@@ -696,7 +696,7 @@ export function LeadExtractorPage({ onOpenZapVoice }: LeadExtractorPageProps) {
                 onChange={(e) => setState(e.target.value.toUpperCase())}
                 placeholder="Ex.: SC"
                 maxLength={2}
-                className="mt-1.5 w-full rounded-xl border border-zinc-200 bg-zinc-50 px-3 py-2.5 text-sm text-zinc-900 outline-none placeholder:text-zinc-400 focus:border-brand-200 focus:bg-white focus:ring-4 focus:ring-brand-600/15"
+                className="mt-1.5 w-full rounded-xl border border-zinc-200 bg-zinc-50 px-3 py-2.5 text-sm text-zinc-900 outline-none placeholder:text-zinc-400 transition focus:border-google-blue/35 focus:bg-white"
               />
             </div>
             <div className="sm:col-span-2">
@@ -708,7 +708,7 @@ export function LeadExtractorPage({ onOpenZapVoice }: LeadExtractorPageProps) {
                 value={city}
                 onChange={(e) => setCity(e.target.value)}
                 placeholder="Ex.: Florianópolis"
-                className="mt-1.5 w-full rounded-xl border border-zinc-200 bg-zinc-50 px-3 py-2.5 text-sm text-zinc-900 outline-none placeholder:text-zinc-400 focus:border-brand-200 focus:bg-white focus:ring-4 focus:ring-brand-600/15"
+                className="mt-1.5 w-full rounded-xl border border-zinc-200 bg-zinc-50 px-3 py-2.5 text-sm text-zinc-900 outline-none placeholder:text-zinc-400 transition focus:border-google-blue/35 focus:bg-white"
               />
             </div>
             <div>
@@ -722,7 +722,7 @@ export function LeadExtractorPage({ onOpenZapVoice }: LeadExtractorPageProps) {
                 max={200}
                 value={requestedAmount}
                 onChange={(e) => setRequestedAmount(Number(e.target.value) || 0)}
-                className="mt-1.5 w-full rounded-xl border border-zinc-200 bg-zinc-50 px-3 py-2.5 text-sm text-zinc-900 outline-none focus:border-brand-200 focus:bg-white focus:ring-4 focus:ring-brand-600/15"
+                className="mt-1.5 w-full rounded-xl border border-zinc-200 bg-zinc-50 px-3 py-2.5 text-sm text-zinc-900 outline-none transition focus:border-google-blue/35 focus:bg-white"
               />
             </div>
           </div>
@@ -750,7 +750,7 @@ export function LeadExtractorPage({ onOpenZapVoice }: LeadExtractorPageProps) {
             <button
               type="submit"
               disabled={submitting || loading}
-              className="inline-flex items-center justify-center gap-2 rounded-xl bg-gradient-to-r from-brand-600 to-brand-700 px-5 py-2.5 text-sm font-semibold text-white shadow-sm shadow-[0_8px_24px_rgba(106,0,184,0.25)] transition hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-50"
+              className="btn-primary-magnetic disabled:cursor-not-allowed disabled:opacity-50"
             >
               {submitting ? (
                 <>
@@ -769,7 +769,7 @@ export function LeadExtractorPage({ onOpenZapVoice }: LeadExtractorPageProps) {
         <h3 className="mb-4 text-sm font-semibold uppercase tracking-wide text-zinc-500">
           Suas extrações recentes
         </h3>
-        <div className="overflow-x-auto rounded-2xl border border-zinc-200/80 bg-white shadow-sm">
+        <div className="overflow-x-auto rounded-2xl border border-zinc-200/80 bg-white shadow-md shadow-zinc-900/5 ring-1 ring-zinc-100/80">
           <table className="w-full min-w-[720px] text-left text-sm">
             <thead>
               <tr className="border-b border-zinc-200 bg-zinc-50/80">

@@ -8,6 +8,7 @@ import { supabase } from '../lib/supabase'
 import { useImpersonation } from '../contexts/ImpersonationContext'
 
 type DashboardLayoutProps = {
+  /** Chave para animação de troca de tela ao mudar o menu. */
   activeNav: DashboardNavId
   onNavigate: (id: DashboardNavId) => void
   title: string
@@ -58,7 +59,7 @@ export function DashboardLayout({
     <div className="flex min-h-dvh bg-zinc-50">
       <Sidebar active={activeNav} onNavigate={onNavigate} isSuperadmin={isSuperadmin} />
       <div className="flex min-w-0 flex-1 flex-col">
-        <header className="sticky top-0 z-10 flex items-center justify-between gap-4 border-b border-zinc-200/80 bg-white/80 px-6 py-4 backdrop-blur-md">
+        <header className="sticky top-0 z-10 flex items-center justify-between gap-4 border-b border-zinc-200/70 bg-white/90 px-6 py-4 shadow-sm shadow-zinc-900/5 backdrop-blur-md">
           <div>
             <h1 className="text-lg font-semibold tracking-tight text-zinc-900">
               {title}
@@ -85,7 +86,7 @@ export function DashboardLayout({
               <input
                 type="search"
                 placeholder="Buscar contatos, chats…"
-                className="h-10 w-64 rounded-xl border border-zinc-200 bg-zinc-50 pl-9 pr-3 text-sm text-zinc-900 outline-none ring-brand-600/0 transition placeholder:text-zinc-400 focus:border-brand-200 focus:bg-white focus:ring-4 focus:ring-brand-600/15"
+                className="h-10 w-64 rounded-xl border border-zinc-200 bg-zinc-50 pl-9 pr-3 text-sm text-zinc-900 shadow-sm outline-none transition placeholder:text-zinc-400 focus:border-google-blue/50 focus:bg-white"
               />
             </div>
             <button
@@ -97,7 +98,11 @@ export function DashboardLayout({
             </button>
           </div>
         </header>
-        <main className="flex-1 overflow-auto p-6 lg:p-8">{children}</main>
+        <main className="flex-1 overflow-auto p-6 lg:p-8">
+          <div key={activeNav} className="animate-panel-in">
+            {children}
+          </div>
+        </main>
       </div>
     </div>
   )

@@ -58,7 +58,7 @@ export function NewLeadModal({ open, onClose, onSave }: NewLeadModalProps) {
         onClick={handleClose}
       />
 
-      <div className="relative w-full max-w-md rounded-2xl border border-zinc-200/90 bg-white p-6 shadow-2xl shadow-zinc-900/20 ring-1 ring-zinc-100">
+      <div className="animate-modal-in relative w-full max-w-md rounded-2xl border border-zinc-200/90 bg-white p-6 shadow-2xl shadow-zinc-900/25 ring-1 ring-zinc-100">
         <div className="flex items-start justify-between gap-4">
           <div>
             <h2
@@ -107,7 +107,7 @@ export function NewLeadModal({ open, onClose, onSave }: NewLeadModalProps) {
               onChange={(e) => setNome(e.target.value)}
               disabled={submitting}
               placeholder="Nome do contato"
-              className="h-11 w-full rounded-xl border border-zinc-200 bg-zinc-50 px-3 text-sm text-zinc-900 outline-none transition focus:border-brand-400 focus:bg-white focus:ring-4 focus:ring-brand-600/15 disabled:opacity-60"
+              className="h-11 w-full rounded-xl border border-zinc-200 bg-zinc-50 px-3 text-sm text-zinc-900 outline-none transition focus:border-google-blue/40 focus:bg-white disabled:opacity-60"
             />
           </div>
           <div>
@@ -124,7 +124,7 @@ export function NewLeadModal({ open, onClose, onSave }: NewLeadModalProps) {
               onChange={(e) => setTelefone(e.target.value)}
               disabled={submitting}
               placeholder="(11) 98765-4321"
-              className="h-11 w-full rounded-xl border border-zinc-200 bg-zinc-50 px-3 text-sm text-zinc-900 outline-none transition focus:border-brand-400 focus:bg-white focus:ring-4 focus:ring-brand-600/15 disabled:opacity-60"
+              className="h-11 w-full rounded-xl border border-zinc-200 bg-zinc-50 px-3 text-sm text-zinc-900 outline-none transition focus:border-google-blue/40 focus:bg-white disabled:opacity-60"
             />
           </div>
 
@@ -140,7 +140,7 @@ export function NewLeadModal({ open, onClose, onSave }: NewLeadModalProps) {
             <button
               type="submit"
               disabled={submitting}
-              className="rounded-xl bg-gradient-to-r from-brand-600 to-brand-700 px-4 py-2.5 text-sm font-semibold text-white shadow-md shadow-[0_8px_24px_rgba(106,0,184,0.35)] transition hover:from-brand-500 hover:to-brand-600 disabled:opacity-60"
+              className="rounded-xl bg-gradient-to-r from-brand-600 to-brand-green px-4 py-2.5 text-sm font-semibold text-white shadow-md shadow-brand-600/25 transition-all duration-300 hover:-translate-y-0.5 hover:shadow-lg hover:from-brand-500 hover:to-brand-green-dark disabled:opacity-60"
             >
               {submitting ? 'Salvando…' : 'Salvar'}
             </button>

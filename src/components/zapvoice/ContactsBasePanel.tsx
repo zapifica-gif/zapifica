@@ -1079,7 +1079,7 @@ export function ContactsBasePanel({ userId, onContactsChanged, onError, onSucces
           role="dialog"
           aria-modal="true"
         >
-          <div className="max-h-[min(90vh,720px)] w-full max-w-lg overflow-y-auto rounded-2xl border border-zinc-200 bg-white p-6 shadow-2xl">
+          <div className="animate-modal-in max-h-[min(90vh,720px)] w-full max-w-lg overflow-y-auto rounded-2xl border border-zinc-200 bg-white p-6 shadow-2xl">
             <h4 className="text-base font-semibold text-zinc-900">Adicionar contato</h4>
             <div className="mt-4 space-y-3">
               <label className="block text-xs font-medium text-zinc-600">
@@ -1172,7 +1172,7 @@ export function ContactsBasePanel({ userId, onContactsChanged, onError, onSucces
                 type="button"
                 disabled={addBusy}
                 onClick={() => void addManualContact()}
-                className="rounded-xl bg-brand-600 px-4 py-2 text-sm font-semibold text-white hover:bg-brand-700 disabled:opacity-60"
+                className="btn-primary-magnetic-sm disabled:opacity-60"
               >
                 {addBusy ? 'Salvando…' : 'Salvar'}
               </button>
@@ -1187,7 +1187,7 @@ export function ContactsBasePanel({ userId, onContactsChanged, onError, onSucces
           role="dialog"
           aria-modal="true"
         >
-          <div className="w-full max-w-md rounded-2xl border border-zinc-200 bg-white p-6 shadow-2xl">
+          <div className="animate-modal-in w-full max-w-md rounded-2xl border border-zinc-200 bg-white p-6 shadow-2xl">
             <h4 className="text-base font-semibold text-zinc-900">Criar público</h4>
             <p className="mt-1 text-sm text-zinc-600">
               Você selecionou <strong>{selectedLeadIds.size}</strong> contato(s).
@@ -1214,7 +1214,7 @@ export function ContactsBasePanel({ userId, onContactsChanged, onError, onSucces
                 type="button"
                 disabled={audienceBusy}
                 onClick={() => void createAudienceFromSelection()}
-                className="rounded-xl bg-zinc-900 px-4 py-2 text-sm font-semibold text-white hover:bg-zinc-800 disabled:opacity-60"
+                className="btn-primary-magnetic-sm disabled:opacity-60"
               >
                 {audienceBusy ? 'Criando…' : 'Criar público'}
               </button>
@@ -1228,7 +1228,7 @@ export function ContactsBasePanel({ userId, onContactsChanged, onError, onSucces
           role="dialog"
           aria-modal="true"
         >
-          <div className="w-full max-w-md rounded-2xl border border-zinc-200 bg-white p-6 shadow-2xl">
+          <div className="animate-modal-in w-full max-w-md rounded-2xl border border-zinc-200 bg-white p-6 shadow-2xl">
             <h4 className="text-base font-semibold text-zinc-900">Importar planilha</h4>
             <p className="mt-1 text-sm text-zinc-600">
               Aceitamos <strong>.csv</strong>, <strong>.xlsx</strong> e <strong>.xls</strong> (Excel:
@@ -1285,7 +1285,7 @@ export function ContactsBasePanel({ userId, onContactsChanged, onError, onSucces
           aria-modal="true"
           aria-labelledby="edit-contact-title"
         >
-          <div className="max-h-[min(90vh,760px)] w-full max-w-lg overflow-y-auto rounded-2xl border border-zinc-200 bg-white p-6 shadow-2xl">
+          <div className="animate-modal-in max-h-[min(90vh,760px)] w-full max-w-lg overflow-y-auto rounded-2xl border border-zinc-200 bg-white p-6 shadow-2xl">
             <h4 id="edit-contact-title" className="text-base font-semibold text-zinc-900">
               Editar contato
             </h4>
@@ -1382,7 +1382,7 @@ export function ContactsBasePanel({ userId, onContactsChanged, onError, onSucces
                 type="button"
                 disabled={saveContactBusy}
                 onClick={() => void saveEdit()}
-                className="rounded-xl bg-brand-600 px-4 py-2 text-sm font-semibold text-white hover:bg-brand-700 disabled:opacity-60"
+                className="btn-primary-magnetic-sm disabled:opacity-60"
               >
                 {saveContactBusy ? 'Salvando…' : 'Salvar'}
               </button>
@@ -1397,7 +1397,7 @@ export function ContactsBasePanel({ userId, onContactsChanged, onError, onSucces
           role="dialog"
           aria-modal="true"
         >
-          <div className="w-full max-w-sm rounded-2xl border border-zinc-200 bg-white p-6 shadow-2xl">
+          <div className="animate-modal-in w-full max-w-sm rounded-2xl border border-zinc-200 bg-white p-6 shadow-2xl">
             <p className="text-sm font-semibold text-zinc-900">Excluir contato?</p>
             <p className="mt-2 text-sm text-zinc-600">
               Remove <strong>{deleteTarget.name}</strong> da base e o histórico de mensagens ligado a
@@ -1431,7 +1431,7 @@ export function ContactsBasePanel({ userId, onContactsChanged, onError, onSucces
           role="dialog"
           aria-modal="true"
         >
-          <div className="max-h-[min(90vh,720px)] w-full max-w-lg overflow-y-auto rounded-2xl border border-zinc-200 bg-white p-6 shadow-2xl">
+          <div className="animate-modal-in max-h-[min(90vh,720px)] w-full max-w-lg overflow-y-auto rounded-2xl border border-zinc-200 bg-white p-6 shadow-2xl">
             <div className="flex items-start justify-between gap-4">
               <div>
                 <h4 className="text-base font-semibold text-zinc-900">Gestão de etiquetas</h4>
@@ -1468,7 +1468,7 @@ export function ContactsBasePanel({ userId, onContactsChanged, onError, onSucces
                   type="button"
                   disabled={presetBusyId === 'new' || !newPresetName.trim()}
                   onClick={() => void addPreset()}
-                  className="shrink-0 rounded-xl bg-zinc-900 px-4 py-2 text-sm font-semibold text-white hover:bg-zinc-800 disabled:opacity-50"
+                  className="btn-primary-magnetic-sm shrink-0 disabled:opacity-50"
                 >
                   {presetBusyId === 'new' ? <Loader2 className="h-4 w-4 animate-spin" /> : 'Adicionar'}
                 </button>
@@ -1613,7 +1613,7 @@ export function ContactsBasePanel({ userId, onContactsChanged, onError, onSucces
           role="alertdialog"
           aria-modal="true"
         >
-          <div className="w-full max-w-md rounded-2xl border border-red-100 bg-white p-6 shadow-2xl">
+          <div className="animate-modal-in w-full max-w-md rounded-2xl border border-red-100 bg-white p-6 shadow-2xl">
             <p className="text-base font-semibold text-red-900">Exclusão irreversível</p>
             <p className="mt-3 text-sm text-zinc-700">
               Serão removidos <strong>todos os contatos</strong> cuja etiqueta é exatamente:{' '}

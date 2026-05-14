@@ -497,7 +497,7 @@ export function NewEventModal({
         onClick={handleClose}
       />
 
-      <div className="relative max-h-[min(92dvh,920px)] w-full max-w-2xl overflow-y-auto rounded-[32px] border border-zinc-200/90 bg-white p-8 shadow-2xl shadow-zinc-900/15 ring-1 ring-zinc-100">
+      <div className="animate-modal-in relative max-h-[min(92dvh,920px)] w-full max-w-2xl overflow-y-auto rounded-[28px] border border-zinc-200/90 bg-white p-8 shadow-2xl shadow-zinc-900/20 ring-1 ring-zinc-100/90">
         <div className="flex items-start justify-between gap-4">
           <h2
             id="new-event-title"

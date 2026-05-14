@@ -64,7 +64,7 @@ export function NewCampaignModal({
         onClick={handleClose}
         disabled={sending}
       />
-      <div className="relative w-full max-w-lg overflow-hidden rounded-2xl border border-zinc-200/90 bg-white shadow-2xl ring-1 ring-zinc-100">
+      <div className="animate-modal-in relative w-full max-w-lg overflow-hidden rounded-2xl border border-zinc-200/90 bg-white shadow-2xl ring-1 ring-zinc-100">
         <div className="pointer-events-none absolute -right-20 -top-20 h-56 w-56 rounded-full bg-brand-500/10 blur-3xl" />
         <div className="pointer-events-none absolute -bottom-24 -left-16 h-48 w-48 rounded-full bg-brand-green/10 blur-3xl" />
 
@@ -112,7 +112,7 @@ export function NewCampaignModal({
               value={destination}
               onChange={(e) => setDestination(e.target.value)}
               disabled={sending}
-              className="w-full rounded-xl border border-zinc-200 bg-zinc-50/50 px-4 py-3 text-sm text-zinc-900 shadow-inner ring-zinc-100 transition placeholder:text-zinc-400 focus:border-brand-400 focus:bg-white focus:outline-none focus:ring-2 focus:ring-brand-500/20 disabled:opacity-60"
+              className="w-full rounded-xl border border-zinc-200 bg-zinc-50/50 px-4 py-3 text-sm text-zinc-900 shadow-inner ring-zinc-100 transition placeholder:text-zinc-400 focus:border-google-blue/35 focus:bg-white focus:outline-none disabled:opacity-60"
             />
           </div>
 
@@ -130,7 +130,7 @@ export function NewCampaignModal({
               value={message}
               onChange={(e) => setMessage(e.target.value)}
               disabled={sending}
-              className="w-full resize-none rounded-xl border border-zinc-200 bg-zinc-50/50 px-4 py-3 text-sm leading-relaxed text-zinc-900 shadow-inner transition placeholder:text-zinc-400 focus:border-brand-400 focus:bg-white focus:outline-none focus:ring-2 focus:ring-brand-500/20 disabled:opacity-60"
+              className="w-full resize-none rounded-xl border border-zinc-200 bg-zinc-50/50 px-4 py-3 text-sm leading-relaxed text-zinc-900 shadow-inner transition placeholder:text-zinc-400 focus:border-google-blue/35 focus:bg-white focus:outline-none disabled:opacity-60"
             />
           </div>
         </div>
@@ -148,7 +148,7 @@ export function NewCampaignModal({
             type="button"
             onClick={() => void handleSubmit()}
             disabled={sending}
-            className="inline-flex w-full items-center justify-center gap-2 rounded-xl bg-brand-green px-5 py-3 text-sm font-bold text-white shadow-[0_0_0_1px_rgba(255,255,255,0.15)_inset,0_10px_32px_rgba(37,211,102,0.45)] transition hover:bg-[var(--color-brand-green-dark)] hover:shadow-[0_0_0_1px_rgba(255,255,255,0.2)_inset,0_14px_40px_rgba(37,211,102,0.55)] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-brand-green disabled:opacity-60 sm:w-auto"
+            className="btn-primary-magnetic w-full disabled:opacity-60 sm:w-auto"
           >
             {sending ? (
               <>

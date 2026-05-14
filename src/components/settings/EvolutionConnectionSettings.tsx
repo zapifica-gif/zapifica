@@ -500,7 +500,7 @@ export function EvolutionConnectionSettings() {
             <button
               type="button"
               onClick={openConnectFlow}
-              className="inline-flex w-full items-center justify-center gap-2 rounded-xl bg-gradient-to-r from-brand-600 to-brand-700 px-4 py-3.5 text-sm font-semibold text-white shadow-lg shadow-[0_12px_36px_rgba(106,0,184,0.35)] transition hover:from-brand-500 hover:to-brand-600 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-brand-500"
+              className="btn-primary-magnetic w-full"
             >
               <Smartphone className="h-4 w-4 opacity-90" aria-hidden />
               Conectar WhatsApp (QR Code)
@@ -522,7 +522,7 @@ export function EvolutionConnectionSettings() {
             aria-label="Fechar"
             onClick={closeQrModal}
           />
-          <div className="relative w-full max-w-sm rounded-2xl border border-zinc-200/90 bg-white p-8 text-center shadow-2xl ring-1 ring-zinc-100">
+          <div className="animate-modal-in relative w-full max-w-sm rounded-2xl border border-zinc-200/90 bg-white p-8 text-center shadow-2xl ring-1 ring-zinc-100">
             <button
               type="button"
               onClick={closeQrModal}

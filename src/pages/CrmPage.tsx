@@ -2,7 +2,7 @@ import { CrmKanbanBoard } from '../components/crm/CrmKanbanBoard'
 
 export function CrmPage() {
   return (
-    <div className="space-y-6">
+    <div className="animate-panel-in space-y-6">
       <div>
         <h2 className="text-xl font-semibold tracking-tight text-zinc-900">
           CRM / Funil

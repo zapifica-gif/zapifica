@@ -405,8 +405,16 @@ export function AgendaPage() {
 
   return (
     <div className="space-y-6">
-      <div className="flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between">
-        <div>
+      <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
+        <button
+          type="button"
+          onClick={() => openNewAt(startOfDay(cursor), 9)}
+          className="btn-primary-magnetic order-first w-full sm:order-2 sm:w-auto sm:shrink-0"
+        >
+          <Plus className="h-4 w-4" />
+          + Evento
+        </button>
+        <div className="order-2 min-w-0 sm:order-1">
           <div className="flex items-center gap-2">
             <span className="inline-flex h-2 w-2 rounded-full bg-brand-600 shadow-[0_0_10px_rgba(106,0,184,0.7)]" />
             <h2 className="text-xl font-semibold tracking-tight text-zinc-900">
@@ -418,43 +426,36 @@ export function AgendaPage() {
             automáticos via WhatsApp (Evolution API).
           </p>
         </div>
-        <button
-          type="button"
-          onClick={() => openNewAt(startOfDay(cursor), 9)}
-          className="inline-flex items-center justify-center gap-2 self-start rounded-xl bg-gradient-to-r from-brand-600 to-brand-700 px-5 py-2.5 text-sm font-semibold text-white shadow-lg shadow-[0_10px_28px_rgba(106,0,184,0.35)] transition hover:from-brand-500 hover:to-brand-600"
-        >
-          <Plus className="h-4 w-4" />
-          + Evento
-        </button>
       </div>
 
-      <div className="inline-flex rounded-xl border border-zinc-200 bg-white p-1 shadow-sm">
+      <div className="flex flex-wrap gap-0 border-b border-zinc-200/90 bg-white/80">
         <button
           type="button"
           onClick={() => setTab('calendario')}
-          className={`inline-flex items-center gap-2 rounded-lg px-4 py-2 text-sm font-semibold transition ${
+          className={`inline-flex items-center gap-2 border-b-[3px] px-4 py-2.5 text-sm font-medium transition-all duration-300 ease-out ${
             tab === 'calendario'
-              ? 'bg-brand-600 text-white shadow-md shadow-brand-600/25'
-              : 'text-zinc-600 hover:bg-zinc-50'
+              ? 'border-google-blue text-zinc-900'
+              : 'border-transparent text-zinc-500 hover:text-google-blue'
           }`}
         >
-          <CalendarDays className="h-4 w-4" />
+          <CalendarDays className="h-4 w-4 shrink-0" />
           Calendário
         </button>
         <button
           type="button"
           onClick={() => setTab('historico')}
-          className={`inline-flex items-center gap-2 rounded-lg px-4 py-2 text-sm font-semibold transition ${
+          className={`inline-flex items-center gap-2 border-b-[3px] px-4 py-2.5 text-sm font-medium transition-all duration-300 ease-out ${
             tab === 'historico'
-              ? 'bg-brand-600 text-white shadow-md shadow-brand-600/25'
-              : 'text-zinc-600 hover:bg-zinc-50'
+              ? 'border-google-green text-zinc-900'
+              : 'border-transparent text-zinc-500 hover:text-google-green'
           }`}
         >
-          <Clock className="h-4 w-4" />
+          <Clock className="h-4 w-4 shrink-0" />
           Histórico
         </button>
       </div>
 
+      <div key={tab} className="animate-panel-in">
       {tab === 'historico' ? (
         <div className="rounded-2xl border border-zinc-200 bg-white p-6 shadow-sm">
           <h3 className="text-sm font-semibold text-zinc-900">
@@ -833,6 +834,8 @@ export function AgendaPage() {
           )}
         </div>
       )}
+
+      </div>
 
       <NewEventModal
         open={modalOpen}

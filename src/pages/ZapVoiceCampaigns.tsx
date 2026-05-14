@@ -199,7 +199,7 @@ function TagMultiPicker({ options, value, onChange, customHint }: TagMultiPicker
             }
           }}
           placeholder="Outra tag (Enter para adicionar)"
-          className="min-w-0 flex-1 rounded-lg border border-zinc-200 px-2 py-1.5 text-xs outline-none focus:border-brand-300"
+          className="min-w-0 flex-1 rounded-lg border border-zinc-200 px-2 py-1.5 text-xs outline-none transition focus:border-google-blue/40"
         />
         <button
           type="button"
@@ -268,7 +268,7 @@ function PhraseChipsInput({ value, onChange, help, placeholder }: PhraseChipsInp
             }
           }}
           placeholder={placeholder ?? 'Digite a frase e pressione Enter'}
-          className="min-w-0 flex-1 rounded-lg border border-zinc-200 px-2 py-1.5 text-sm outline-none focus:border-brand-300"
+          className="min-w-0 flex-1 rounded-lg border border-zinc-200 px-2 py-1.5 text-sm outline-none transition focus:border-google-blue/40"
         />
         <button
           type="button"
@@ -1843,20 +1843,20 @@ export function ZapVoiceCampaignsPage() {
         </div>
       </div>
 
-      <div className="flex flex-wrap gap-1 border-b border-zinc-200/90">
+      <div className="flex flex-wrap gap-0 border-b border-zinc-200/90">
         <button
           type="button"
           onClick={() => {
             setMainTab('campanhas')
             window.location.hash = ''
           }}
-          className={`inline-flex items-center gap-2 border-b-2 px-3 py-2.5 text-sm font-medium transition ${
+          className={`inline-flex items-center gap-2 border-b-[3px] px-4 py-2.5 text-sm font-medium transition-all duration-300 ease-out ${
             mainTab === 'campanhas'
-              ? 'border-brand-600 text-brand-800'
-              : 'border-transparent text-zinc-500 hover:text-zinc-800'
+              ? 'border-google-blue text-zinc-900'
+              : 'border-transparent text-zinc-500 hover:text-google-blue'
           }`}
         >
-          <ListTodo className="h-4 w-4" aria-hidden />
+          <ListTodo className="h-4 w-4 shrink-0" aria-hidden />
           Campanhas ativas
         </button>
         <button
@@ -1865,13 +1865,13 @@ export function ZapVoiceCampaignsPage() {
             setMainTab('contatos')
             window.location.hash = '#contatos'
           }}
-          className={`inline-flex items-center gap-2 border-b-2 px-3 py-2.5 text-sm font-medium transition ${
+          className={`inline-flex items-center gap-2 border-b-[3px] px-4 py-2.5 text-sm font-medium transition-all duration-300 ease-out ${
             mainTab === 'contatos'
-              ? 'border-brand-600 text-brand-800'
-              : 'border-transparent text-zinc-500 hover:text-zinc-800'
+              ? 'border-google-green text-zinc-900'
+              : 'border-transparent text-zinc-500 hover:text-google-green'
           }`}
         >
-          <LayoutGrid className="h-4 w-4" aria-hidden />
+          <LayoutGrid className="h-4 w-4 shrink-0" aria-hidden />
           Base de contatos
         </button>
         <button
@@ -1880,34 +1880,42 @@ export function ZapVoiceCampaignsPage() {
             setMainTab('historico')
             window.location.hash = '#historico'
           }}
-          className={`inline-flex items-center gap-2 border-b-2 px-3 py-2.5 text-sm font-medium transition ${
+          className={`inline-flex items-center gap-2 border-b-[3px] px-4 py-2.5 text-sm font-medium transition-all duration-300 ease-out ${
             mainTab === 'historico'
-              ? 'border-brand-600 text-brand-800'
-              : 'border-transparent text-zinc-500 hover:text-zinc-800'
+              ? 'border-google-yellow text-zinc-900'
+              : 'border-transparent text-zinc-500 hover:text-amber-600'
           }`}
         >
-          <History className="h-4 w-4" aria-hidden />
+          <History className="h-4 w-4 shrink-0" aria-hidden />
           Histórico de campanhas
         </button>
       </div>
 
       {mainTab === 'campanhas' ? (
-        <div className="mb-2 flex flex-wrap gap-1 border-b border-zinc-100">
+        <div className="mb-2 flex flex-wrap gap-0 border-b border-zinc-100 bg-zinc-50/40">
           {(
             [
-              { id: 'campanhas' as const, label: 'Campanhas (isca & gatilho)' },
-              { id: 'fluxos' as const, label: 'Fluxos (automação)' },
-              { id: 'relatorios' as const, label: 'Relatórios' },
+              { id: 'campanhas' as const, label: 'Campanhas (isca & gatilho)', accent: 'blue' as const },
+              { id: 'fluxos' as const, label: 'Fluxos (automação)', accent: 'red' as const },
+              { id: 'relatorios' as const, label: 'Relatórios', accent: 'green' as const },
             ] as const
-          ).map(({ id, label }) => (
+          ).map(({ id, label, accent }) => (
             <button
               key={id}
               type="button"
               onClick={() => setVoiceSubTab(id)}
-              className={`inline-flex items-center gap-2 border-b-2 px-3 py-2 text-sm font-medium transition ${
+              className={`inline-flex items-center gap-2 border-b-[3px] px-4 py-2 text-sm font-medium transition-all duration-300 ease-out ${
                 voiceSubTab === id
-                  ? 'border-brand-600 text-brand-800'
-                  : 'border-transparent text-zinc-500 hover:text-zinc-800'
+                  ? accent === 'blue'
+                    ? 'border-google-blue text-zinc-900'
+                    : accent === 'red'
+                      ? 'border-google-red text-zinc-900'
+                      : 'border-google-green text-zinc-900'
+                  : accent === 'blue'
+                    ? 'border-transparent text-zinc-500 hover:text-google-blue'
+                    : accent === 'red'
+                      ? 'border-transparent text-zinc-500 hover:text-google-red'
+                      : 'border-transparent text-zinc-500 hover:text-google-green'
               }`}
             >
               {label}
@@ -1916,6 +1924,10 @@ export function ZapVoiceCampaignsPage() {
         </div>
       ) : null}
 
+      <div
+        key={`${mainTab}-${voiceSubTab}`}
+        className="animate-panel-in space-y-6"
+      >
       {mainTab === 'campanhas' && voiceSubTab === 'relatorios' && userId ? (
         <ZapVoiceReportsTab
           userId={userId}
@@ -1938,23 +1950,23 @@ export function ZapVoiceCampaignsPage() {
       {mainTab === 'campanhas' && voiceSubTab !== 'relatorios' ? (
       <div className="grid gap-6 lg:grid-cols-[360px_minmax(0,1fr)]">
         {/* COLUNA ESQUERDA: campanhas ou fluxos */}
-        <aside className="rounded-2xl border border-zinc-200/90 bg-white p-4 shadow-sm ring-1 ring-zinc-100/80">
+        <aside className="rounded-2xl border border-zinc-200/90 bg-white p-4 shadow-md shadow-zinc-900/5 ring-1 ring-zinc-100/80">
           {voiceSubTab === 'fluxos' ? (
             <div className="space-y-3">
+              <button
+                type="button"
+                onClick={() => void createEmptyFlow()}
+                className="btn-primary-magnetic-sm w-full"
+              >
+                <Plus className="h-3.5 w-3.5" aria-hidden />
+                Novo fluxo
+              </button>
               <div className="flex items-center justify-between gap-2 px-1">
                 <p className="text-xs font-semibold uppercase tracking-wider text-zinc-500">
                   Seus fluxos
                 </p>
                 <span className="text-xs tabular-nums text-zinc-400">{flows.length}</span>
               </div>
-              <button
-                type="button"
-                onClick={() => void createEmptyFlow()}
-                className="inline-flex w-full items-center justify-center gap-2 rounded-xl border border-brand-300 bg-brand-50 px-3 py-2.5 text-xs font-semibold text-brand-800 hover:bg-brand-100"
-              >
-                <Plus className="h-3.5 w-3.5" aria-hidden />
-                Novo fluxo
-              </button>
               <div className="max-h-[420px] space-y-1.5 overflow-y-auto">
                 {flows.map((f) => {
                   const active = f.id === selectedFlowId
@@ -2016,15 +2028,6 @@ export function ZapVoiceCampaignsPage() {
             </div>
           ) : (
             <>
-          <div className="flex items-center justify-between gap-2 px-1 pb-3">
-            <p className="text-xs font-semibold uppercase tracking-wider text-zinc-500">
-              Rascunho, ativa e pausada
-            </p>
-            <span className="text-xs tabular-nums text-zinc-400">
-              {activeCampaigns.length}
-            </span>
-          </div>
-
           <button
             type="button"
             onClick={() => {
@@ -2039,11 +2042,20 @@ export function ZapVoiceCampaignsPage() {
                 return next
               })
             }}
-            className="group inline-flex w-full items-center justify-center gap-2 rounded-xl bg-gradient-to-r from-brand-600 via-brand-700 to-brand-700 px-4 py-3 text-sm font-bold text-white shadow-[0_10px_32px_rgba(106,0,184,0.35)] transition hover:from-brand-500 hover:to-brand-600"
+            className="btn-primary-magnetic group w-full"
           >
-            <Plus className="h-4 w-4" aria-hidden />
+            <Plus className="h-4 w-4 transition-transform duration-300 group-hover:scale-110" aria-hidden />
             Nova Campanha de Disparo
           </button>
+
+          <div className="flex items-center justify-between gap-2 px-1 pb-1 pt-2">
+            <p className="text-xs font-semibold uppercase tracking-wider text-zinc-500">
+              Rascunho, ativa e pausada
+            </p>
+            <span className="text-xs tabular-nums text-zinc-400">
+              {activeCampaigns.length}
+            </span>
+          </div>
 
           {newOpen ? (
             <div className="mt-4 space-y-3 rounded-xl border border-brand-200/70 bg-brand-50/30 p-3">
@@ -2055,7 +2067,7 @@ export function ZapVoiceCampaignsPage() {
                   value={newName}
                   onChange={(e) => setNewName(e.target.value)}
                   placeholder="Black Friday Petshops SC"
-                  className="w-full rounded-lg border border-zinc-200 bg-white px-3 py-2 text-sm shadow-inner focus:border-brand-300 focus:outline-none focus:ring-2 focus:ring-brand-500/20"
+                  className="w-full rounded-lg border border-zinc-200 bg-white px-3 py-2 text-sm shadow-inner focus:border-google-blue/35 focus:outline-none"
                 />
               </div>
 
@@ -2071,7 +2083,7 @@ export function ZapVoiceCampaignsPage() {
                   <select
                     value={newCampaignFlowId}
                     onChange={(e) => setNewCampaignFlowId(e.target.value)}
-                    className="w-full rounded-lg border border-zinc-200 bg-white px-3 py-2 text-sm shadow-inner focus:border-brand-300 focus:outline-none focus:ring-2 focus:ring-brand-500/20"
+                    className="w-full rounded-lg border border-zinc-200 bg-white px-3 py-2 text-sm shadow-inner focus:border-google-blue/35 focus:outline-none"
                   >
                     {flows.map((f) => (
                       <option key={f.id} value={f.id}>
@@ -2105,7 +2117,7 @@ export function ZapVoiceCampaignsPage() {
                   value={newDescription}
                   onChange={(e) => setNewDescription(e.target.value)}
                   placeholder="Curta, objetiva — só pra você lembrar."
-                  className="w-full rounded-lg border border-zinc-200 bg-white px-3 py-2 text-sm shadow-inner focus:border-brand-300 focus:outline-none focus:ring-2 focus:ring-brand-500/20"
+                  className="w-full rounded-lg border border-zinc-200 bg-white px-3 py-2 text-sm shadow-inner focus:border-google-blue/35 focus:outline-none"
                 />
               </div>
 
@@ -2117,7 +2129,7 @@ export function ZapVoiceCampaignsPage() {
                   type="datetime-local"
                   value={newScheduledStartLocal}
                   onChange={(e) => setNewScheduledStartLocal(e.target.value)}
-                  className="w-full rounded-lg border border-zinc-200 bg-white px-3 py-2 text-sm shadow-inner focus:border-brand-300 focus:outline-none focus:ring-2 focus:ring-brand-500/20"
+                  className="w-full rounded-lg border border-zinc-200 bg-white px-3 py-2 text-sm shadow-inner focus:border-google-blue/35 focus:outline-none"
                 />
                 <p className="mt-1 text-[11px] text-zinc-500">
                   Opcional. Se vazio, ao ativar a campanha a fila começa na hora. Se
@@ -2145,7 +2157,7 @@ export function ZapVoiceCampaignsPage() {
                           setNewIscas(next)
                           if (idx === 0) setNewIscaMessage(e.target.value)
                         }}
-                        className="w-full rounded-lg border border-zinc-200 bg-zinc-50 px-3 py-2 text-sm shadow-inner focus:border-brand-300 focus:outline-none focus:ring-2 focus:ring-brand-500/20"
+                        className="w-full rounded-lg border border-zinc-200 bg-zinc-50 px-3 py-2 text-sm shadow-inner focus:border-google-blue/35 focus:outline-none"
                       />
                     </div>
                   ))}
@@ -2637,7 +2649,7 @@ export function ZapVoiceCampaignsPage() {
                               max_delay_seconds: Math.max(v, selected.max_delay_seconds),
                             })
                           }}
-                          className="w-full rounded-lg border border-zinc-200 bg-white px-2.5 py-2 text-xs tabular-nums shadow-inner focus:border-brand-300 focus:outline-none focus:ring-2 focus:ring-brand-500/20"
+                          className="w-full rounded-lg border border-zinc-200 bg-white px-2.5 py-2 text-xs tabular-nums shadow-inner focus:border-google-blue/35 focus:outline-none"
                         />
                       </div>
                       <div className="flex items-center gap-2">
@@ -2662,7 +2674,7 @@ export function ZapVoiceCampaignsPage() {
                               max_delay_seconds: Math.max(v, selected.min_delay_seconds),
                             })
                           }}
-                          className="w-full rounded-lg border border-zinc-200 bg-white px-2.5 py-2 text-xs tabular-nums shadow-inner focus:border-brand-300 focus:outline-none focus:ring-2 focus:ring-brand-500/20"
+                          className="w-full rounded-lg border border-zinc-200 bg-white px-2.5 py-2 text-xs tabular-nums shadow-inner focus:border-google-blue/35 focus:outline-none"
                         />
                       </div>
                     </div>
@@ -2705,7 +2717,7 @@ export function ZapVoiceCampaignsPage() {
                           scheduled_start_at: datetimeLocalToIso(e.target.value),
                         })
                       }
-                      className="w-full max-w-md rounded-lg border border-zinc-200 bg-white px-3 py-2 text-sm shadow-inner focus:border-brand-300 focus:outline-none focus:ring-2 focus:ring-brand-500/20"
+                      className="w-full max-w-md rounded-lg border border-zinc-200 bg-white px-3 py-2 text-sm shadow-inner focus:border-google-blue/35 focus:outline-none"
                     />
                     <p className="mt-1 text-[11px] text-zinc-500">
                       Deixe vazio para, ao ativar, começar a fila na hora. Com data/hora
@@ -2755,7 +2767,7 @@ export function ZapVoiceCampaignsPage() {
                       onBlur={(e) =>
                         void updateCampaign(selected.id, { isca_message: e.target.value.trim() || '' })
                       }
-                      className="w-full max-w-xl rounded-lg border border-zinc-200 bg-white px-3 py-2 text-sm shadow-inner focus:border-brand-300 focus:outline-none focus:ring-2 focus:ring-brand-500/20"
+                      className="w-full max-w-xl rounded-lg border border-zinc-200 bg-white px-3 py-2 text-sm shadow-inner focus:border-google-blue/35 focus:outline-none"
                     />
                     <MessageVariableChips
                       variables={MESSAGE_VARIABLES}
@@ -2828,9 +2840,17 @@ export function ZapVoiceCampaignsPage() {
           {voiceSubTab === 'fluxos' && selectedFlowId ? (
               <>
               {/* Editor de etapas do fluxo */}
-              <div className="rounded-2xl border border-zinc-200/90 bg-white p-5 shadow-sm ring-1 ring-zinc-100/80">
-                <div className="mb-4 flex items-end justify-between gap-3">
-                  <div>
+              <div className="rounded-2xl border border-zinc-200/90 bg-white p-5 shadow-md shadow-zinc-900/5 ring-1 ring-zinc-100/80">
+                <div className="mb-4 flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+                  <button
+                    type="button"
+                    onClick={() => void addStep()}
+                    className="btn-primary-magnetic-sm order-first shrink-0 sm:order-2"
+                  >
+                    <Plus className="h-3.5 w-3.5" aria-hidden />
+                    Adicionar etapa
+                  </button>
+                  <div className="order-2 min-w-0 flex-1 sm:order-1">
                     <h3 className="flex flex-wrap items-center gap-2 text-base font-semibold text-zinc-900">
                       <span>Fluxo: {selectedFlow?.name ?? '—'}</span>
                       {selectedFlow ? (
@@ -2849,14 +2869,6 @@ export function ZapVoiceCampaignsPage() {
                       horário.
                     </p>
                   </div>
-                  <button
-                    type="button"
-                    onClick={() => void addStep()}
-                    className="inline-flex items-center gap-1.5 rounded-xl border border-brand-300 bg-brand-50 px-3 py-2 text-xs font-semibold text-brand-800 transition hover:bg-brand-100"
-                  >
-                    <Plus className="h-3.5 w-3.5" aria-hidden />
-                    Adicionar etapa
-                  </button>
                 </div>
 
                 {stepsLoading ? (
@@ -2947,6 +2959,7 @@ export function ZapVoiceCampaignsPage() {
           )}
         </div>
       ) : null}
+      </div>
     </div>
   )
 }
@@ -3198,7 +3211,7 @@ function StepCard({
                     setMediaUrl(e.target.value)
                   }}
                   placeholder="https://…"
-                  className="min-w-0 flex-1 rounded-lg border border-zinc-200 bg-zinc-50/50 px-2.5 py-2 text-xs text-zinc-900 shadow-inner focus:border-brand-300 focus:outline-none focus:ring-2 focus:ring-brand-500/20"
+                  className="min-w-0 flex-1 rounded-lg border border-zinc-200 bg-zinc-50/50 px-2.5 py-2 text-xs text-zinc-900 shadow-inner focus:border-google-blue/35 focus:outline-none"
                 />
                 <label className="inline-flex cursor-pointer items-center justify-center gap-1.5 rounded-lg border border-zinc-200 bg-white px-2.5 py-2 text-xs font-semibold text-zinc-700 transition hover:border-brand-300 hover:bg-brand-50">
                   {uploading ? (
@@ -3269,7 +3282,7 @@ function StepCard({
                   ? 'Olá {nome}, tudo bem? Aqui é da equipe…'
                   : 'Texto que acompanha a mídia (caption)…'
               }
-              className="w-full resize-y rounded-xl border border-zinc-200 bg-white px-3 py-2.5 text-sm leading-relaxed text-zinc-900 shadow-inner focus:border-brand-300 focus:outline-none focus:ring-2 focus:ring-brand-500/20"
+              className="w-full resize-y rounded-xl border border-zinc-200 bg-white px-3 py-2.5 text-sm leading-relaxed text-zinc-900 shadow-inner focus:border-google-blue/35 focus:outline-none"
             />
             <MessageVariableChips
               variables={MESSAGE_VARIABLES}
@@ -3298,7 +3311,7 @@ function StepCard({
                 onChange={(e) =>
                   setDelaySeconds(Math.max(0, Number(e.target.value) || 0))
                 }
-                className="w-24 rounded-lg border border-zinc-200 bg-white px-2.5 py-2 text-sm tabular-nums shadow-inner focus:border-brand-300 focus:outline-none focus:ring-2 focus:ring-brand-500/20"
+                className="w-24 rounded-lg border border-zinc-200 bg-white px-2.5 py-2 text-sm tabular-nums shadow-inner focus:border-google-blue/35 focus:outline-none"
               />
               <span className="text-xs text-zinc-500">segundos</span>
             </div>
@@ -3331,7 +3344,7 @@ function StepCard({
                     setStepMinDelay(v)
                     setStepMaxDelay((prev) => Math.max(prev, v))
                   }}
-                  className="mt-1 w-full rounded-lg border border-zinc-200 bg-white px-2.5 py-2 text-sm tabular-nums shadow-inner focus:border-brand-300 focus:outline-none focus:ring-2 focus:ring-brand-500/20"
+                  className="mt-1 w-full rounded-lg border border-zinc-200 bg-white px-2.5 py-2 text-sm tabular-nums shadow-inner focus:border-google-blue/35 focus:outline-none"
                 />
               </div>
               <div>
@@ -3343,7 +3356,7 @@ function StepCard({
                   min={0}
                   value={stepMaxDelay}
                   onChange={(e) => setStepMaxDelay(Math.max(0, Number(e.target.value) || 0))}
-                  className="mt-1 w-full rounded-lg border border-zinc-200 bg-white px-2.5 py-2 text-sm tabular-nums shadow-inner focus:border-brand-300 focus:outline-none focus:ring-2 focus:ring-brand-500/20"
+                  className="mt-1 w-full rounded-lg border border-zinc-200 bg-white px-2.5 py-2 text-sm tabular-nums shadow-inner focus:border-google-blue/35 focus:outline-none"
                 />
               </div>
             </div>

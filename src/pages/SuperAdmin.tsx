@@ -427,7 +427,7 @@ export function SuperAdminPage() {
   }
 
   return (
-    <div className="space-y-6">
+    <div className="animate-panel-in space-y-6">
       {success ? (
         <div className="rounded-2xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm font-medium text-emerald-900 shadow-sm ring-1 ring-emerald-100">
           {success}
@@ -439,7 +439,7 @@ export function SuperAdminPage() {
         </div>
       ) : null}
 
-      <section className="rounded-2xl border border-zinc-200/80 bg-gradient-to-br from-white via-white to-zinc-50 p-6 shadow-sm lg:p-7">
+      <section className="rounded-2xl border border-zinc-200/80 bg-gradient-to-br from-white via-white to-zinc-50 p-6 shadow-md shadow-zinc-900/5 ring-1 ring-zinc-100/80 lg:p-7">
         <div className="flex flex-wrap items-end justify-between gap-3">
           <div>
             <p className="text-sm font-medium text-brand-600">Painel Supremo</p>
@@ -459,36 +459,37 @@ export function SuperAdminPage() {
         </div>
       </section>
 
-      <div className="flex flex-wrap gap-1 border-b border-zinc-200/90">
+      <div className="flex flex-wrap gap-0 border-b border-zinc-200/90">
         <button
           type="button"
           onClick={() => setTab('clientes')}
-          className={`inline-flex items-center gap-2 border-b-2 px-3 py-2.5 text-sm font-medium transition ${
+          className={`inline-flex items-center gap-2 border-b-[3px] px-4 py-2.5 text-sm font-medium transition-all duration-300 ease-out ${
             tab === 'clientes'
-              ? 'border-brand-600 text-brand-800'
-              : 'border-transparent text-zinc-500 hover:text-zinc-800'
+              ? 'border-google-blue text-zinc-900'
+              : 'border-transparent text-zinc-500 hover:text-google-blue'
           }`}
         >
-          <Building2 className="h-4 w-4" aria-hidden />
+          <Building2 className="h-4 w-4 shrink-0" aria-hidden />
           Gestão de clientes
         </button>
         <button
           type="button"
           onClick={() => setTab('biblioteca')}
-          className={`inline-flex items-center gap-2 border-b-2 px-3 py-2.5 text-sm font-medium transition ${
+          className={`inline-flex items-center gap-2 border-b-[3px] px-4 py-2.5 text-sm font-medium transition-all duration-300 ease-out ${
             tab === 'biblioteca'
-              ? 'border-brand-600 text-brand-800'
-              : 'border-transparent text-zinc-500 hover:text-zinc-800'
+              ? 'border-google-green text-zinc-900'
+              : 'border-transparent text-zinc-500 hover:text-google-green'
           }`}
         >
-          <Database className="h-4 w-4" aria-hidden />
+          <Database className="h-4 w-4 shrink-0" aria-hidden />
           Biblioteca global de leads
         </button>
       </div>
 
+      <div key={tab} className="animate-panel-in space-y-6">
       {canRender && tab === 'clientes' ? (
         <div className="grid gap-4 lg:grid-cols-[420px_minmax(0,1fr)]">
-          <aside className="rounded-2xl border border-zinc-200/80 bg-white p-6 shadow-sm">
+          <aside className="rounded-2xl border border-zinc-200/80 bg-white p-6 shadow-md shadow-zinc-900/5 ring-1 ring-zinc-100/80">
             <div className="flex items-center justify-between">
               <h3 className="text-base font-semibold text-zinc-900">
                 Cadastrar novo cliente
@@ -506,7 +507,7 @@ export function SuperAdminPage() {
                   value={email}
                   onChange={(e) => setEmail(e.target.value)}
                   placeholder="cliente@empresa.com"
-                  className="w-full rounded-xl border border-zinc-200 bg-white px-3 py-2 text-sm shadow-inner focus:border-brand-300 focus:outline-none focus:ring-2 focus:ring-brand-500/20"
+                  className="w-full rounded-xl border border-zinc-200 bg-white px-3 py-2 text-sm shadow-inner focus:border-google-blue/35 focus:outline-none"
                 />
               </div>
               <div>
@@ -518,7 +519,7 @@ export function SuperAdminPage() {
                   onChange={(e) => setPassword(e.target.value)}
                   placeholder="Senha forte (mín. 8)"
                   type="password"
-                  className="w-full rounded-xl border border-zinc-200 bg-white px-3 py-2 text-sm shadow-inner focus:border-brand-300 focus:outline-none focus:ring-2 focus:ring-brand-500/20"
+                  className="w-full rounded-xl border border-zinc-200 bg-white px-3 py-2 text-sm shadow-inner focus:border-google-blue/35 focus:outline-none"
                 />
               </div>
               <div>
@@ -529,7 +530,7 @@ export function SuperAdminPage() {
                   value={companyName}
                   onChange={(e) => setCompanyName(e.target.value)}
                   placeholder="Petshop do João"
-                  className="w-full rounded-xl border border-zinc-200 bg-white px-3 py-2 text-sm shadow-inner focus:border-brand-300 focus:outline-none focus:ring-2 focus:ring-brand-500/20"
+                  className="w-full rounded-xl border border-zinc-200 bg-white px-3 py-2 text-sm shadow-inner focus:border-google-blue/35 focus:outline-none"
                 />
               </div>
               <div>
@@ -540,7 +541,7 @@ export function SuperAdminPage() {
                   type="file"
                   accept="image/*"
                   onChange={(e) => setLogoFile(e.target.files?.[0] ?? null)}
-                  className="w-full rounded-xl border border-zinc-200 bg-white px-3 py-2 text-sm shadow-inner file:mr-3 file:rounded-lg file:border-0 file:bg-zinc-100 file:px-3 file:py-1.5 file:text-xs file:font-semibold file:text-zinc-700 hover:file:bg-zinc-200/70 focus:border-brand-300 focus:outline-none focus:ring-2 focus:ring-brand-500/20"
+                  className="w-full rounded-xl border border-zinc-200 bg-white px-3 py-2 text-sm shadow-inner file:mr-3 file:rounded-lg file:border-0 file:bg-zinc-100 file:px-3 file:py-1.5 file:text-xs file:font-semibold file:text-zinc-700 hover:file:bg-zinc-200/70 focus:border-google-blue/35 focus:outline-none"
                 />
                 <p className="mt-1 text-[11px] text-zinc-500">
                   Enviamos para o bucket `company_logos` e salvamos a URL pública no perfil.
@@ -550,7 +551,7 @@ export function SuperAdminPage() {
                 type="button"
                 onClick={() => void handleCreate()}
                 disabled={creating || uploadingLogo}
-                className="inline-flex w-full items-center justify-center gap-2 rounded-xl bg-brand-600 px-4 py-3 text-sm font-bold text-white shadow-[0_10px_32px_rgba(106,0,184,0.30)] transition hover:bg-brand-700 disabled:opacity-60"
+                className="btn-primary-magnetic w-full"
               >
                 {creating || uploadingLogo ? (
                   <Loader2 className="h-4 w-4 animate-spin" aria-hidden />
@@ -566,7 +567,7 @@ export function SuperAdminPage() {
             </div>
           </aside>
 
-          <section className="rounded-2xl border border-zinc-200/80 bg-white p-6 shadow-sm">
+          <section className="rounded-2xl border border-zinc-200/80 bg-white p-6 shadow-md shadow-zinc-900/5 ring-1 ring-zinc-100/80">
             <div className="flex items-end justify-between gap-3">
               <div>
                 <h3 className="text-base font-semibold text-zinc-900">
@@ -672,7 +673,7 @@ export function SuperAdminPage() {
       ) : null}
 
       {canRender && tab === 'biblioteca' ? (
-        <section className="rounded-2xl border border-zinc-200/80 bg-white p-6 shadow-sm">
+        <section className="rounded-2xl border border-zinc-200/80 bg-white p-6 shadow-md shadow-zinc-900/5 ring-1 ring-zinc-100/80">
           <div className="flex items-end justify-between gap-3">
             <div>
               <h3 className="text-base font-semibold text-zinc-900">
@@ -691,12 +692,12 @@ export function SuperAdminPage() {
               value={q}
               onChange={(e) => setQ(e.target.value)}
               placeholder="Buscar por nome ou telefone…"
-              className="h-10 min-w-[240px] flex-1 rounded-xl border border-zinc-200 bg-zinc-50 px-3 text-sm outline-none focus:border-brand-300 focus:bg-white focus:ring-4 focus:ring-brand-600/15"
+              className="h-10 min-w-[240px] flex-1 rounded-xl border border-zinc-200 bg-zinc-50 px-3 text-sm outline-none transition focus:border-google-blue/35 focus:bg-white"
             />
             <select
               value={sourceFilter}
               onChange={(e) => setSourceFilter(e.target.value)}
-              className="h-10 rounded-xl border border-zinc-200 bg-zinc-50 px-3 text-sm outline-none focus:border-brand-300 focus:bg-white focus:ring-4 focus:ring-brand-600/15"
+              className="h-10 rounded-xl border border-zinc-200 bg-zinc-50 px-3 text-sm outline-none transition focus:border-google-blue/35 focus:bg-white"
             >
               {sourceOptions.map((s) => (
                 <option key={s} value={s}>
@@ -707,7 +708,7 @@ export function SuperAdminPage() {
             <select
               value={tagFilter}
               onChange={(e) => setTagFilter(e.target.value)}
-              className="h-10 rounded-xl border border-zinc-200 bg-zinc-50 px-3 text-sm outline-none focus:border-brand-300 focus:bg-white focus:ring-4 focus:ring-brand-600/15"
+              className="h-10 rounded-xl border border-zinc-200 bg-zinc-50 px-3 text-sm outline-none transition focus:border-google-blue/35 focus:bg-white"
             >
               {tagOptions.map((t) => (
                 <option key={t} value={t}>
@@ -787,9 +788,11 @@ export function SuperAdminPage() {
         </section>
       ) : null}
 
+      </div>
+
       {editOpen && editClient ? (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-zinc-950/40 p-4">
-          <div className="w-full max-w-lg overflow-hidden rounded-2xl border border-zinc-200 bg-white shadow-xl">
+          <div className="animate-modal-in w-full max-w-lg overflow-hidden rounded-2xl border border-zinc-200 bg-white shadow-xl shadow-zinc-900/15 ring-1 ring-zinc-100/90">
             <div className="flex items-start justify-between gap-3 border-b border-zinc-100 px-5 py-4">
               <div>
                 <p className="text-xs font-semibold uppercase tracking-wider text-zinc-500">
@@ -815,7 +818,7 @@ export function SuperAdminPage() {
                 <input
                   value={editCompanyName}
                   onChange={(e) => setEditCompanyName(e.target.value)}
-                  className="w-full rounded-xl border border-zinc-200 bg-white px-3 py-2 text-sm shadow-inner focus:border-brand-300 focus:outline-none focus:ring-2 focus:ring-brand-500/20"
+                  className="w-full rounded-xl border border-zinc-200 bg-white px-3 py-2 text-sm shadow-inner focus:border-google-blue/35 focus:outline-none"
                 />
               </div>
               <div>
@@ -827,7 +830,7 @@ export function SuperAdminPage() {
                   min={0}
                   value={editCredits}
                   onChange={(e) => setEditCredits(Math.max(0, Number(e.target.value) || 0))}
-                  className="w-full rounded-xl border border-zinc-200 bg-white px-3 py-2 text-sm tabular-nums shadow-inner focus:border-brand-300 focus:outline-none focus:ring-2 focus:ring-brand-500/20"
+                  className="w-full rounded-xl border border-zinc-200 bg-white px-3 py-2 text-sm tabular-nums shadow-inner focus:border-google-blue/35 focus:outline-none"
                 />
               </div>
               <div>
@@ -838,7 +841,7 @@ export function SuperAdminPage() {
                   type="file"
                   accept="image/*"
                   onChange={(e) => setEditLogoFile(e.target.files?.[0] ?? null)}
-                  className="w-full rounded-xl border border-zinc-200 bg-white px-3 py-2 text-sm shadow-inner file:mr-3 file:rounded-lg file:border-0 file:bg-zinc-100 file:px-3 file:py-1.5 file:text-xs file:font-semibold file:text-zinc-700 hover:file:bg-zinc-200/70 focus:border-brand-300 focus:outline-none focus:ring-2 focus:ring-brand-500/20"
+                  className="w-full rounded-xl border border-zinc-200 bg-white px-3 py-2 text-sm shadow-inner file:mr-3 file:rounded-lg file:border-0 file:bg-zinc-100 file:px-3 file:py-1.5 file:text-xs file:font-semibold file:text-zinc-700 hover:file:bg-zinc-200/70 focus:border-google-blue/35 focus:outline-none"
                 />
               </div>
             </div>
@@ -854,7 +857,7 @@ export function SuperAdminPage() {
                 type="button"
                 onClick={() => void saveEdit()}
                 disabled={savingEdit}
-                className="inline-flex items-center gap-2 rounded-xl bg-brand-600 px-4 py-2 text-sm font-bold text-white hover:bg-brand-700 disabled:opacity-60"
+                className="btn-primary-magnetic-sm inline-flex items-center gap-2 disabled:opacity-60"
               >
                 {savingEdit ? (
                   <Loader2 className="h-4 w-4 animate-spin" aria-hidden />
