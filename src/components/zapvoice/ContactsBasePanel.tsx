@@ -192,6 +192,11 @@ export function ContactsBasePanel({ userId, onContactsChanged, onError, onSucces
   const [bulkDeleteBusy, setBulkDeleteBusy] = useState(false)
   const [bulkDeletePreviewBusy, setBulkDeletePreviewBusy] = useState(false)
 
+  const [sidebarTagRenameOpen, setSidebarTagRenameOpen] = useState(false)
+  const [sidebarTagRenameFrom, setSidebarTagRenameFrom] = useState('')
+  const [sidebarTagRenameDraft, setSidebarTagRenameDraft] = useState('')
+  const [sidebarTagRenameBusy, setSidebarTagRenameBusy] = useState(false)
+
   // seleção para criar público
   const [selectedLeadIds, setSelectedLeadIds] = useState<Set<string>>(() => new Set())
   const [audienceOpen, setAudienceOpen] = useState(false)
@@ -741,6 +746,66 @@ export function ContactsBasePanel({ userId, onContactsChanged, onError, onSucces
       await loadPresets()
     } finally {
       setPresetBusyId(null)
+    }
+  }
+
+  async function renameSidebarTag() {
+    const from = sidebarTagRenameFrom.trim()
+    const to = sidebarTagRenameDraft.trim().slice(0, 480)
+    if (!from) return
+    if (!to) {
+      onError('Informe o novo nome da marcação.')
+      return
+    }
+    if (from === to) {
+      setSidebarTagRenameOpen(false)
+      return
+    }
+    setSidebarTagRenameBusy(true)
+    try {
+      const { data: rows, error: qe } = await supabase
+        .from('leads')
+        .select('id')
+        .eq('user_id', userId)
+        .eq('tag', from)
+      if (qe) {
+        onError(qe.message)
+        return
+      }
+      const n = rows?.length ?? 0
+      if (n > 0) {
+        const { error: ue } = await supabase
+          .from('leads')
+          .update({ tag: to.slice(0, 480), updated_at: new Date().toISOString() })
+          .eq('user_id', userId)
+          .eq('tag', from)
+        if (ue) {
+          onError(ue.message)
+          return
+        }
+      }
+      const { error: pe } = await supabase
+        .from('zv_contact_tag_presets')
+        .update({ name: to.slice(0, 240) })
+        .eq('user_id', userId)
+        .eq('name', from)
+      if (pe) {
+        onError(pe.message)
+        return
+      }
+      if (sidebarTagFilter === from) setSidebarTagFilter(to)
+      onSuccess(
+        n > 0
+          ? `Marcação renomeada: ${n} contato(s) atualizado(s).`
+          : 'Marcação da biblioteca atualizada.',
+      )
+      setSidebarTagRenameOpen(false)
+      setSidebarTagRenameFrom('')
+      setSidebarTagRenameDraft('')
+      onContactsChanged()
+      void load()
+    } finally {
+      setSidebarTagRenameBusy(false)
     }
   }
 
@@ -1644,6 +1709,62 @@ export function ContactsBasePanel({ userId, onContactsChanged, onError, onSucces
         </div>
       ) : null}
 
+      {sidebarTagRenameOpen ? (
+        <div className="fixed inset-0 z-[120] flex items-center justify-center bg-zinc-950/40 px-4 backdrop-blur-[1px]">
+          <div
+            className="w-full max-w-md rounded-2xl border border-[#dadce0] bg-white p-6 shadow-2xl"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="rename-tag-title"
+          >
+            <h3 id="rename-tag-title" className="text-lg font-semibold text-[#202124]">
+              Renomear marcação
+            </h3>
+            <p className="mt-1 text-sm text-[#5f6368]">
+              Todos os contatos com esta marcação passam a usar o novo nome. Se existir na biblioteca de
+              etiquetas, o nome lá também é atualizado.
+            </p>
+            <p className="mt-3 rounded-lg bg-[#f8f9fa] px-3 py-2 text-xs text-[#3c4043]">
+              <span className="font-medium text-[#202124]">Atual:</span>{' '}
+              <span className="break-all">{sidebarTagRenameFrom}</span>
+            </p>
+            <label className="mt-4 block text-xs font-semibold text-[#5f6368]" htmlFor="rename-tag-input">
+              Novo nome
+            </label>
+            <input
+              id="rename-tag-input"
+              value={sidebarTagRenameDraft}
+              onChange={(e) => setSidebarTagRenameDraft(e.target.value)}
+              maxLength={480}
+              className="mt-1 w-full rounded-xl border border-[#dadce0] px-3 py-2.5 text-sm text-[#202124] outline-none focus:border-[#1a73e8] focus:ring-1 focus:ring-[#1a73e8]"
+              autoFocus
+            />
+            <div className="mt-6 flex flex-wrap justify-end gap-2">
+              <button
+                type="button"
+                disabled={sidebarTagRenameBusy}
+                onClick={() => {
+                  setSidebarTagRenameOpen(false)
+                  setSidebarTagRenameFrom('')
+                  setSidebarTagRenameDraft('')
+                }}
+                className="rounded-xl px-4 py-2 text-sm font-medium text-zinc-700 hover:bg-zinc-100"
+              >
+                Cancelar
+              </button>
+              <button
+                type="button"
+                disabled={sidebarTagRenameBusy || !sidebarTagRenameDraft.trim()}
+                onClick={() => void renameSidebarTag()}
+                className="rounded-xl bg-[#1a73e8] px-4 py-2 text-sm font-semibold text-white hover:bg-[#1557b0] disabled:opacity-50"
+              >
+                {sidebarTagRenameBusy ? 'Salvando…' : 'Salvar'}
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
+
       <div className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-xl border border-[#dadce0] bg-white shadow-sm lg:flex-row">
         <aside className="flex w-full shrink-0 flex-col gap-1 border-b border-[#dadce0] bg-white p-3 lg:w-[280px] lg:border-b-0 lg:border-r">
           <button
@@ -1754,22 +1875,40 @@ export function ContactsBasePanel({ userId, onContactsChanged, onError, onSucces
               marcadoresSidebar.map((m) => {
                 const active = sidebarTagFilter === m.label
                 return (
-                  <button
+                  <div
                     key={m.key}
-                    type="button"
-                    onClick={() => {
-                      setSidebarNav('all')
-                      setSidebarTagFilter(active ? null : m.label)
-                    }}
-                    className={`flex w-full items-center justify-between rounded-r-full px-4 py-1.5 text-left text-sm ${
+                    className={`flex w-full items-center gap-0.5 rounded-r-full py-1.5 pl-2 pr-1 text-sm ${
                       active ? 'bg-[#e8f0fe] text-[#1967d2]' : 'text-[#3c4043] hover:bg-[#f1f3f4]'
                     }`}
                   >
-                    <span className="truncate pr-2" title={m.label}>
-                      {m.label}
-                    </span>
-                    <span className="shrink-0 text-xs tabular-nums text-[#5f6368]">{m.count}</span>
-                  </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setSidebarNav('all')
+                        setSidebarTagFilter(active ? null : m.label)
+                      }}
+                      className="flex min-w-0 flex-1 items-center justify-between gap-2 rounded-md px-2 py-0.5 text-left"
+                    >
+                      <span className="truncate" title={m.label}>
+                        {m.label}
+                      </span>
+                      <span className="shrink-0 text-xs tabular-nums text-[#5f6368]">{m.count}</span>
+                    </button>
+                    <button
+                      type="button"
+                      className="shrink-0 rounded-md p-1.5 text-[#5f6368] hover:bg-white/80 hover:text-[#1967d2]"
+                      title="Renomear marcação"
+                      aria-label={`Renomear marcação ${m.label}`}
+                      onClick={(e) => {
+                        e.stopPropagation()
+                        setSidebarTagRenameFrom(m.label)
+                        setSidebarTagRenameDraft(m.label)
+                        setSidebarTagRenameOpen(true)
+                      }}
+                    >
+                      <Pencil className="h-3.5 w-3.5" aria-hidden />
+                    </button>
+                  </div>
                 )
               })
             )}

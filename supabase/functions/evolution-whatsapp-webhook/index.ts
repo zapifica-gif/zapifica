@@ -936,6 +936,32 @@ async function resolveCanonicalLeadIdForPhone(
   return candidateId
 }
 
+/** Primeira etapa do funil CRM (`sort_order` mínimo), após garantir seed das colunas padrão. */
+async function resolveFirstKanbanSlugForUser(
+  supabase: SupabaseClient,
+  userId: string,
+): Promise<string> {
+  const { error: seedErr } = await supabase.rpc('crm_seed_default_kanban_columns', {
+    p_user_id: userId,
+  })
+  if (seedErr) {
+    console.warn('[evolution-whatsapp-webhook] crm_seed_default_kanban_columns', seedErr.message)
+  }
+  const { data, error } = await supabase
+    .from('crm_kanban_columns')
+    .select('key_slug')
+    .eq('user_id', userId)
+    .order('sort_order', { ascending: true })
+    .limit(1)
+    .maybeSingle()
+  if (error) {
+    console.warn('[evolution-whatsapp-webhook] crm_kanban_columns read', error.message)
+    return 'novo'
+  }
+  const slug = (data as { key_slug?: string } | null)?.key_slug?.trim()
+  return slug && slug.length > 0 ? slug : 'novo'
+}
+
 async function ensureLeadId(
   supabase: SupabaseClient,
   userId: string,
@@ -955,6 +981,8 @@ async function ensureLeadId(
     : (pushName && pushName.slice(0, 80)) ||
       `Novo Lead ${prettifyPhone(fullDigits)}`
 
+  const funnelSlug = await resolveFirstKanbanSlugForUser(supabase, userId)
+
   // IMPORTANTE:
   // Não usar `upsert(..., { onConflict: 'user_id,phone_key' })` aqui como único caminho,
   // porque `phone_key` é gerado (generated) e o PostgREST pode não inferir corretamente
@@ -966,7 +994,7 @@ async function ensureLeadId(
       user_id: userId,
       name: displayName,
       phone: normalized,
-      status: 'novo',
+      status: funnelSlug,
       source: 'inbound_whatsapp',
       is_group: isGroup,
       updated_at: new Date().toISOString(),
