@@ -1421,6 +1421,14 @@ serve(async (req) => {
         skipped.push(`dup:${item.msgId}`)
         continue
       }
+      console.error('[evolution-whatsapp-webhook] FALHA insert chat_messages', {
+        msgId: item.msgId,
+        leadId: crmLeadId,
+        code: insErr.code,
+        message: insErr.message,
+        details: insErr.details,
+        hint: insErr.hint,
+      })
       errors.push(`msg:${item.msgId}:${insErr.message}`)
       continue
     }
