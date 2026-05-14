@@ -50,15 +50,15 @@ export function Sidebar({ active, onNavigate, isSuperadmin = false }: SidebarPro
     : items
   return (
     <aside className="flex h-full w-64 shrink-0 flex-col border-r border-zinc-800/80 bg-zinc-950 text-zinc-100">
-      <div className="border-b border-zinc-800/60 bg-gradient-to-b from-zinc-900/80 to-zinc-950 px-3 pt-4 pb-3">
-        <div className="flex w-full items-center justify-center px-1">
-          <div className="rounded-2xl bg-white p-3 shadow-md ring-1 ring-zinc-200/90">
+      <div className="border-b border-zinc-800/60 bg-gradient-to-b from-zinc-900/80 to-zinc-950 px-2 pt-3 pb-2.5">
+        <div className="flex w-full items-stretch justify-center">
+          <div className="w-full rounded-2xl bg-white px-4 py-4 shadow-lg ring-1 ring-zinc-200/90">
             <img
               src={logoZapifica}
               alt="Zapifica"
-              className="h-auto w-full max-h-[48px] object-contain object-center"
-              width={220}
-              height={48}
+              className="mx-auto h-auto w-full max-h-[84px] object-contain object-center"
+              width={260}
+              height={84}
             />
           </div>
         </div>

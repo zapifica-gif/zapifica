@@ -982,7 +982,7 @@ export function ChatWindow({ open, onClose, lead, boardTenantUserIdRef }: ChatWi
         onClick={onClose}
       />
       <aside
-        className="fixed right-0 top-0 z-[70] flex h-full w-full max-w-md flex-col border-l border-zinc-200/90 bg-zinc-50 shadow-2xl"
+        className="fixed right-0 top-0 z-[70] flex h-dvh max-h-dvh w-full max-w-md flex-col overflow-hidden border-l border-zinc-200/90 bg-zinc-50 shadow-2xl"
         role="complementary"
         aria-labelledby="inbox-title"
       >
@@ -1054,10 +1054,20 @@ export function ChatWindow({ open, onClose, lead, boardTenantUserIdRef }: ChatWi
           </button>
         </header>
 
-        <div
-          ref={listRef}
-          className="min-h-0 flex-1 space-y-3 overflow-y-auto px-4 py-4"
-        >
+        <div className="flex min-h-0 flex-1 flex-col px-2 pb-3 pt-2">
+          <div className="mx-auto flex min-h-0 w-full max-w-sm flex-1 flex-col items-stretch">
+            <div className="flex min-h-0 flex-1 flex-col rounded-[1.85rem] border-[10px] border-zinc-950 bg-zinc-950 p-[3px] shadow-2xl shadow-zinc-900/40">
+              <div
+                className="flex min-h-0 max-h-[70vh] flex-1 flex-col overflow-hidden rounded-[1.35rem] bg-[#e5ddd5]"
+                style={{
+                  backgroundImage:
+                    'radial-gradient(circle at 12% 8%, rgba(255,255,255,0.45), transparent 35%), radial-gradient(circle at 88% 12%, rgba(255,255,255,0.25), transparent 32%)',
+                }}
+              >
+                <div
+                  ref={listRef}
+                  className="min-h-0 flex-1 space-y-3 overflow-y-auto overscroll-contain px-2.5 py-3"
+                >
           {loading ? (
             <p className="text-center text-sm text-zinc-500">Carregando mensagens…</p>
           ) : null}
@@ -1120,9 +1130,9 @@ export function ChatWindow({ open, onClose, lead, boardTenantUserIdRef }: ChatWi
               </div>
             </div>
           ))}
-        </div>
+                </div>
 
-        <footer className="shrink-0 border-t border-zinc-200/90 bg-white p-3">
+                <footer className="shrink-0 border-t border-zinc-200/90 bg-white/95 p-2 backdrop-blur-sm">
           {sendError ? (
             <p className="mb-2 text-xs text-rose-600" role="alert">
               {sendError}
@@ -1232,6 +1242,10 @@ export function ChatWindow({ open, onClose, lead, boardTenantUserIdRef }: ChatWi
             </form>
           )}
         </footer>
+              </div>
+            </div>
+          </div>
+        </div>
       </aside>
 
       {scheduleToast ? (
