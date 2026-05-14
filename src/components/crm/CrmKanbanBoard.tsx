@@ -554,6 +554,8 @@ export function CrmKanbanBoard() {
   const columnsRef = useRef(columns)
   const dragStartRef = useRef<DragStartInfo | null>(null)
   const columnsSnapshotRef = useRef<Record<ColumnId, string[]> | null>(null)
+  /** Dono do CRM exibido (para o chat filtrar `leads` / campanhas com o mesmo `user_id`). */
+  const boardTenantUserIdRef = useRef<string | null>(null)
   /** Respostas antigas da RPC são ignoradas quando um refetch mais novo já iniciou ou o componente desmontou. */
   const fetchGenerationRef = useRef(0)
   /** Agrupa rajadas INSERT/UPDATE (leads + chat_messages) em um único refetch estável ao board. */
@@ -593,9 +595,11 @@ export function CrmKanbanBoard() {
           setLoadError('Sessão inválida. Entre novamente para carregar o CRM.')
           setLoading(false)
         }
+        boardTenantUserIdRef.current = null
         return
       }
       const effectiveUserId = imp.targetUserId ?? user.id
+      boardTenantUserIdRef.current = effectiveUserId
 
       const { data, error } = await supabase.rpc('crm_leads_with_conversation', {
         p_user_id: effectiveUserId,
@@ -1025,6 +1029,7 @@ export function CrmKanbanBoard() {
         open={chatLead != null}
         onClose={() => setChatLead(null)}
         lead={chatLead}
+        boardTenantUserIdRef={boardTenantUserIdRef}
       />
     </>
   )

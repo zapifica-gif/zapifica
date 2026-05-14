@@ -927,10 +927,12 @@ export function ZapVoiceCampaignsPage() {
 
   const updateCampaign = useCallback(
     async (id: string, patch: Partial<Campaign>) => {
+      if (!userId) return
       const { error: e } = await supabase
         .from('zv_campaigns')
         .update(patch)
         .eq('id', id)
+        .eq('user_id', userId)
       if (e) {
         setError(`Falha ao atualizar campanha: ${e.message}`)
         return
@@ -939,7 +941,7 @@ export function ZapVoiceCampaignsPage() {
         prev.map((c) => (c.id === id ? { ...c, ...patch } : c)),
       )
     },
-    [],
+    [userId],
   )
 
   const createEmptyFlow = useCallback(async () => {
@@ -1443,6 +1445,7 @@ export function ZapVoiceCampaignsPage() {
           .from('zv_campaigns')
           .update({ status: 'active' as CampaignStatus })
           .eq('id', c.id)
+          .eq('user_id', userId)
         if (upErr) {
           throw new Error(upErr.message)
         }
@@ -1484,6 +1487,7 @@ export function ZapVoiceCampaignsPage() {
           .from('zv_campaigns')
           .update({ status: 'paused' as CampaignStatus })
           .eq('id', c.id)
+          .eq('user_id', userId)
         if (e) {
           setError(e.message)
           return
@@ -1516,6 +1520,7 @@ export function ZapVoiceCampaignsPage() {
           .from('zv_campaigns')
           .update({ status: 'completed' as CampaignStatus })
           .eq('id', c.id)
+          .eq('user_id', userId)
         if (e) {
           setError(e.message)
           return
@@ -1540,10 +1545,18 @@ export function ZapVoiceCampaignsPage() {
 
   const deleteCampaign = useCallback(
     async (id: string) => {
+      if (!userId) {
+        setError('Sessão inválida.')
+        return
+      }
       if (!confirm('Excluir esta campanha? O fluxo vinculado permanece (guia Fluxos).')) {
         return
       }
-      const { error: e } = await supabase.from('zv_campaigns').delete().eq('id', id)
+      const { error: e } = await supabase
+        .from('zv_campaigns')
+        .delete()
+        .eq('id', id)
+        .eq('user_id', userId)
       if (e) {
         setError(`Falha ao excluir: ${e.message}`)
         return
@@ -1557,7 +1570,7 @@ export function ZapVoiceCampaignsPage() {
         return next
       })
     },
-    [],
+    [userId],
   )
 
   // -------------------------------------------------------------------------

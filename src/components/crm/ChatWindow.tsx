@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent, type RefObject } from 'react'
 import {
   CalendarClock,
   Clock,
@@ -43,6 +43,17 @@ type ChatWindowProps = {
   open: boolean
   onClose: () => void
   lead: Lead | null
+  /** Dono dos dados no CRM (auth ou cliente em impersonação); evita filtrar lead com `user_id` errado. */
+  boardTenantUserIdRef: RefObject<string | null>
+}
+
+async function resolveCrmTenantUserId(ref: RefObject<string | null>): Promise<string | null> {
+  const pinned = ref.current
+  if (pinned) return pinned
+  const {
+    data: { user },
+  } = await supabase.auth.getUser()
+  return user?.id ?? null
 }
 
 function bubbleStyle(sender: ChatMessageRow['sender_type']): string {
@@ -211,7 +222,7 @@ function MessageMedia({ message }: { message: ChatMessageRow }) {
   return null
 }
 
-export function ChatWindow({ open, onClose, lead }: ChatWindowProps) {
+export function ChatWindow({ open, onClose, lead, boardTenantUserIdRef }: ChatWindowProps) {
   const [messages, setMessages] = useState<ChatMessageRow[]>([])
   const [loading, setLoading] = useState(false)
   const [sending, setSending] = useState(false)
@@ -304,10 +315,17 @@ export function ChatWindow({ open, onClose, lead }: ChatWindowProps) {
     setAiError(null)
     setLoadingAi(true)
     void (async () => {
+      const uid = await resolveCrmTenantUserId(boardTenantUserIdRef)
+      if (!uid) {
+        setAiError('Sessão inválida.')
+        setLoadingAi(false)
+        return
+      }
       const { data, error } = await supabase
         .from('leads')
         .select('ai_enabled')
         .eq('id', lead.id)
+        .eq('user_id', uid)
         .maybeSingle()
       if (error) {
         setAiError('Não foi possível carregar o estado da IA.')
@@ -318,7 +336,7 @@ export function ChatWindow({ open, onClose, lead }: ChatWindowProps) {
       setAiEnabled(enabled !== false)
       setLoadingAi(false)
     })()
-  }, [open, lead?.id])
+  }, [open, lead?.id, boardTenantUserIdRef])
 
   // Identificação da campanha de origem (mais recente):
   // 1) se existe progresso ativo para este lead, usa essa campanha
@@ -330,10 +348,16 @@ export function ChatWindow({ open, onClose, lead }: ChatWindowProps) {
     setCampaignLabel(null)
     void (async () => {
       try {
+        const uid = await resolveCrmTenantUserId(boardTenantUserIdRef)
+        if (!uid) {
+          if (!cancelled) setCampaignLoading(false)
+          return
+        }
         const { data: prog, error: pErr } = await supabase
           .from('lead_campaign_progress')
           .select('campaign_id, updated_at')
           .eq('lead_id', lead.id)
+          .eq('user_id', uid)
           .in('status', ['active', 'awaiting_last_send'])
           .order('updated_at', { ascending: false })
           .limit(1)
@@ -344,6 +368,7 @@ export function ChatWindow({ open, onClose, lead }: ChatWindowProps) {
             .from('zv_campaigns')
             .select('name')
             .eq('id', cid)
+            .eq('user_id', uid)
             .maybeSingle()
           if (cancelled) return
           const nm = (camp as any)?.name ? String((camp as any).name) : null
@@ -356,6 +381,7 @@ export function ChatWindow({ open, onClose, lead }: ChatWindowProps) {
           .from('lead_campaign_completions')
           .select('campaign_id, completed_at')
           .eq('lead_id', lead.id)
+          .eq('user_id', uid)
           .order('completed_at', { ascending: false })
           .limit(1)
         if (cancelled) return
@@ -369,6 +395,7 @@ export function ChatWindow({ open, onClose, lead }: ChatWindowProps) {
           .from('zv_campaigns')
           .select('name')
           .eq('id', cid)
+          .eq('user_id', uid)
           .maybeSingle()
         if (cancelled) return
         const nm = (camp as any)?.name ? String((camp as any).name) : null
@@ -384,15 +411,24 @@ export function ChatWindow({ open, onClose, lead }: ChatWindowProps) {
     return () => {
       cancelled = true
     }
-  }, [open, lead?.id])
+  }, [open, lead?.id, boardTenantUserIdRef])
 
   async function toggleAiEnabled() {
     if (!lead) return
+    const uid = await resolveCrmTenantUserId(boardTenantUserIdRef)
+    if (!uid) {
+      setAiError('Sessão inválida.')
+      return
+    }
     setAiError(null)
     const next = !aiEnabled
     setAiEnabled(next)
     setLoadingAi(true)
-    const { error } = await supabase.from('leads').update({ ai_enabled: next }).eq('id', lead.id)
+    const { error } = await supabase
+      .from('leads')
+      .update({ ai_enabled: next })
+      .eq('id', lead.id)
+      .eq('user_id', uid)
     setLoadingAi(false)
     if (error) {
       setAiEnabled(!next)

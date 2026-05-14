@@ -259,6 +259,14 @@ export function AgendaPage() {
     setLoading(true)
     setLoadError(null)
     setLoadErrorDetail(null)
+    const {
+      data: { user },
+    } = await supabase.auth.getUser()
+    if (!user) {
+      setEvents([])
+      setLoading(false)
+      return
+    }
     const rs = syncWindow.start.toISOString()
     const re = syncWindow.end.toISOString()
     const { data, error } = await supabase
@@ -267,6 +275,7 @@ export function AgendaPage() {
         `id, title, category, client_id, start_at, end_at, sync_kanban,
          scheduled_messages ( status, is_active, scheduled_at, last_error, evolution_message_id )`,
       )
+      .eq('user_id', user.id)
       .lte('start_at', re)
       .gte('end_at', rs)
       .order('start_at', { ascending: true })

@@ -430,7 +430,7 @@ export function NewEventModal({
             contentType: mediaFile.type || undefined,
           })
         if (upErr) {
-          await supabase.from('events').delete().eq('id', eventoCriado.id)
+          await supabase.from('events').delete().eq('id', eventoCriado.id).eq('user_id', ownerId)
           setError(`Falha no upload da mídia: ${upErr.message}`)
           return
         }
@@ -445,7 +445,7 @@ export function NewEventModal({
         .eq('event_id', eventoCriado.id)
         .eq('user_id', ownerId)
       if (delErr) {
-        await supabase.from('events').delete().eq('id', eventoCriado.id)
+        await supabase.from('events').delete().eq('id', eventoCriado.id).eq('user_id', ownerId)
         setError(`Passo 2 (scheduled_messages): ${textoErroParaUsuario(delErr)}`)
         return
       }
@@ -458,7 +458,7 @@ export function NewEventModal({
       if (erroMsg) {
         // Rollback best-effort do events antes de devolver o controle.
         // Mesmo que isso falhe, o próximo Salvar gera um novo UUID e não colide.
-        await supabase.from('events').delete().eq('id', eventoCriado.id)
+        await supabase.from('events').delete().eq('id', eventoCriado.id).eq('user_id', ownerId)
         setError(
           `Passo 2 (scheduled_messages): ${textoErroParaUsuario(erroMsg)}`,
         )

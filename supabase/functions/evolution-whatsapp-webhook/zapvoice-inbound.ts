@@ -1210,6 +1210,7 @@ async function enqueueFunnelStepAndAdvance(p: {
       .from('scheduled_messages')
       .select('id, status, scheduled_at, lead_id, zv_campaign_id, zv_funnel_step_id')
       .eq('id', insertedId)
+      .eq('user_id', p.userId)
       .maybeSingle()
     if (relidoErr) {
       const dbErr = extractDbError(relidoErr)

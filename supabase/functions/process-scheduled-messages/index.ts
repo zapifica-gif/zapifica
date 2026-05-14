@@ -350,7 +350,12 @@ async function renderMessageTemplate(params: {
 
   const now = new Date()
   const leadPromise = params.leadId
-    ? params.supabase.from('leads').select('name').eq('id', params.leadId).maybeSingle()
+    ? params.supabase
+        .from('leads')
+        .select('name')
+        .eq('id', params.leadId)
+        .eq('user_id', params.userId)
+        .maybeSingle()
     : Promise.resolve({ data: null as any, error: null as any })
 
   const settingsPromise = params.supabase
@@ -688,6 +693,7 @@ async function enqueueZapVoiceNextScheduledMessage(
         isLastEnqueued ? ('awaiting_last_send' as const) : ('active' as const),
     })
     .eq('id', String((prog2 as { id: string }).id))
+    .eq('user_id', msg.user_id)
 
   return { id: ins2.data.id, gapMs: delayS * 1000 }
 }
@@ -1192,6 +1198,7 @@ serve(async () => {
                 },
           )
           .eq('id', msg.id)
+          .eq('user_id', msg.user_id)
         if (upErr) {
           throw new Error(`Supabase: falha ao atualizar agendamento: ${upErr.message}`)
         }
@@ -1229,6 +1236,7 @@ serve(async () => {
                 updated_at: new Date().toISOString(),
               })
               .eq('id', msg.id)
+              .eq('user_id', msg.user_id)
           } else {
             await supabase
               .from('leads')
@@ -1252,6 +1260,7 @@ serve(async () => {
             updated_at: new Date().toISOString(),
           })
           .eq('id', msg.id)
+          .eq('user_id', msg.user_id)
         failed += 1
       }
 
@@ -1307,6 +1316,7 @@ serve(async () => {
                 .from('lead_campaign_progress')
                 .delete()
                 .eq('id', (prog as any).id)
+                .eq('user_id', msg.user_id)
               if (delErr) {
                 console.warn('[Agenda Suprema] Falha ao remover progress:', delErr.message)
               }
@@ -1347,6 +1357,7 @@ serve(async () => {
               updated_at: new Date().toISOString(),
             })
             .eq('id', qi.id)
+            .eq('user_id', msg.user_id)
           if (uErr) {
             console.warn('[ZV-FUNNEL] stay-awake não pôde preparar linha:', uErr.message)
             break inner
@@ -1355,6 +1366,7 @@ serve(async () => {
             .from('scheduled_messages')
             .select('*')
             .eq('id', qi.id)
+            .eq('user_id', msg.user_id)
             .single()
           if (nxtErr || !nxtRow) {
             console.warn('[ZV-FUNNEL] stay-awake fetch linha:', nxtErr?.message)
@@ -1383,11 +1395,13 @@ serve(async () => {
           updated_at: new Date().toISOString(),
         })
         .eq('id', msg.id)
+        .eq('user_id', msg.user_id)
       if (e2) {
         await supabase
           .from('scheduled_messages')
           .update({ status: 'error', updated_at: new Date().toISOString() })
           .eq('id', msg.id)
+          .eq('user_id', msg.user_id)
       }
       failed += 1
       // Fluxo Zap Voice: erro no envio deixa o lead preso sem IA (funnel lock). Liberamos explicitamente.

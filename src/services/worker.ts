@@ -224,7 +224,12 @@ async function renderMessageTemplate(params: {
 
   const now = new Date()
   const leadPromise = params.leadId
-    ? params.supabase.from('leads').select('name').eq('id', params.leadId).maybeSingle()
+    ? params.supabase
+        .from('leads')
+        .select('name')
+        .eq('id', params.leadId)
+        .eq('user_id', params.userId)
+        .maybeSingle()
     : Promise.resolve({ data: null as any, error: null as any })
   const settingsPromise = params.supabase
     .from('user_settings')
@@ -579,6 +584,7 @@ async function enqueueNextFunnelStepAfterSend(
       status: isLastEnqueued ? 'awaiting_last_send' : 'active',
     })
     .eq('id', String((prog2 as { id: string }).id))
+    .eq('user_id', row.user_id)
 
   const newId = (ins2.data as { id: string }).id
   console.log('[ZV-FUNNEL][worker] próxima etapa agendada', scheduledAt, 'id=', newId)
@@ -817,7 +823,11 @@ async function maybeFinalizeZapVoiceCampaignLead(
         console.warn('[worker] completion insert:', compErr.message)
       }
       if (prog && (prog as { id?: string }).id) {
-        await supabase.from('lead_campaign_progress').delete().eq('id', (prog as { id: string }).id)
+        await supabase
+          .from('lead_campaign_progress')
+          .delete()
+          .eq('id', (prog as { id: string }).id)
+          .eq('user_id', row.user_id)
       }
       await maybeReleaseLeadZvAiDispatchPause(supabase, row.user_id, row.lead_id)
     }
@@ -1045,6 +1055,7 @@ export async function checkAndSendScheduledMessages(
               updated_at: new Date().toISOString(),
             })
             .eq('id', row.id)
+            .eq('user_id', row.user_id)
           processed += 1
           break inner
         }
@@ -1106,6 +1117,7 @@ export async function checkAndSendScheduledMessages(
                   },
             )
             .eq('id', row.id)
+            .eq('user_id', row.user_id)
 
           if (upScheduledErr) {
             console.error(
@@ -1125,6 +1137,7 @@ export async function checkAndSendScheduledMessages(
                 updated_at: new Date().toISOString(),
               })
               .eq('id', row.id)
+              .eq('user_id', row.user_id)
             processed += 1
             break inner
           }
@@ -1164,6 +1177,7 @@ export async function checkAndSendScheduledMessages(
                   updated_at: new Date().toISOString(),
                 })
                 .eq('id', row.id)
+                .eq('user_id', row.user_id)
             } else {
               await supabase
                 .from('leads')
@@ -1208,6 +1222,7 @@ export async function checkAndSendScheduledMessages(
                   updated_at: new Date().toISOString(),
                 })
                 .eq('id', qi.scheduledMessageId)
+                .eq('user_id', row.user_id)
               if (uErr) {
                 console.warn('[worker] stay-awake update:', uErr.message)
                 break inner
@@ -1216,6 +1231,7 @@ export async function checkAndSendScheduledMessages(
                 .from('scheduled_messages')
                 .select('*')
                 .eq('id', qi.scheduledMessageId)
+                .eq('user_id', row.user_id)
                 .single()
               if (nxErr || !nxtRow) {
                 console.warn('[worker] stay-awake fetch:', nxErr?.message)
@@ -1243,6 +1259,7 @@ export async function checkAndSendScheduledMessages(
               updated_at: new Date().toISOString(),
             })
             .eq('id', row.id)
+            .eq('user_id', row.user_id)
           processed += 1
           break inner
         } else {
@@ -1262,6 +1279,7 @@ export async function checkAndSendScheduledMessages(
               updated_at: new Date().toISOString(),
             })
             .eq('id', row.id)
+            .eq('user_id', row.user_id)
 
           if (isScheduledMessageZapVoiceFunnelStepRow(row)) {
             queuedInline = await enqueueNextFunnelStepAfterSend(supabase, row)
@@ -1298,6 +1316,7 @@ export async function checkAndSendScheduledMessages(
                   updated_at: new Date().toISOString(),
                 })
                 .eq('id', qi.scheduledMessageId)
+                .eq('user_id', row.user_id)
               if (uErr) {
                 console.warn('[worker] stay-awake update:', uErr.message)
                 break inner
@@ -1306,6 +1325,7 @@ export async function checkAndSendScheduledMessages(
                 .from('scheduled_messages')
                 .select('*')
                 .eq('id', qi.scheduledMessageId)
+                .eq('user_id', row.user_id)
                 .single()
               if (nxErr || !nxtRow) {
                 console.warn('[worker] stay-awake fetch:', nxErr?.message)
@@ -1329,6 +1349,7 @@ export async function checkAndSendScheduledMessages(
           updated_at: new Date().toISOString(),
         })
         .eq('id', row.id)
+        .eq('user_id', row.user_id)
       processed += 1
     }
   }

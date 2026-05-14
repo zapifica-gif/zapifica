@@ -367,6 +367,7 @@ async function runPipeline(
     .from('leads')
     .select('ai_paused_until')
     .eq('id', triggerRow.lead_id)
+    .eq('user_id', leadData.user_id)
     .maybeSingle()
   if (pauseEarlyErr) {
     return { error: `ai_pause_check_early: ${pauseEarlyErr.message}` }
@@ -476,6 +477,7 @@ async function runPipeline(
     .from('leads')
     .select('ai_paused_until')
     .eq('id', triggerRow.lead_id)
+    .eq('user_id', leadData.user_id)
     .maybeSingle()
   if (pauseErr) {
     return { error: `ai_pause_check: ${pauseErr.message}` }
@@ -547,6 +549,7 @@ async function runPipeline(
     .from('leads')
     .select('ai_paused_until')
     .eq('id', triggerRow.lead_id)
+    .eq('user_id', leadData.user_id)
     .maybeSingle()
   if (pausePreErr) {
     return { error: `ai_pause_pre_llm: ${pausePreErr.message}` }
