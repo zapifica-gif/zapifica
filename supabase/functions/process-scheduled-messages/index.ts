@@ -505,15 +505,52 @@ function mimeGuessFromFilename(name: string): string {
 type SupabaseService = ReturnType<typeof createClient>
 
 /**
+ * Igual a `countLeadZvProgressBlockingAi` no webhook: só bloqueia se existir progresso
+ * `active`/`awaiting_last_send` cuja campanha em `zv_campaigns` está `active`.
+ * Progresso ligado a campanha pausada/concluída não deve impedir `ai_paused_for_zv_dispatch = false`.
+ */
+async function countLeadZvProgressBlockingForRelease(
+  supabase: SupabaseService,
+  userId: string,
+  leadId: string,
+): Promise<{ count: number; error: { message: string } | null }> {
+  const { data: rows, error } = await supabase
+    .from('lead_campaign_progress')
+    .select('campaign_id')
+    .eq('user_id', userId)
+    .eq('lead_id', leadId)
+    .in('status', ['active', 'awaiting_last_send'])
+  if (error) {
+    return { count: 0, error: { message: error.message } }
+  }
+  const list = rows ?? []
+  if (list.length === 0) return { count: 0, error: null }
+  const ids = [...new Set(list.map((r) => String((r as { campaign_id: string }).campaign_id)))]
+  const { data: camps, error: cErr } = await supabase
+    .from('zv_campaigns')
+    .select('id')
+    .eq('user_id', userId)
+    .eq('status', 'active')
+    .in('id', ids)
+  if (cErr) {
+    console.warn('[ZV-Pause] count progress + campanha ativa:', cErr.message)
+    return { count: list.length, error: null }
+  }
+  const active = new Set((camps ?? []).map((c) => (c as { id: string }).id))
+  const count = list.filter((r) => active.has((r as { campaign_id: string }).campaign_id)).length
+  return { count, error: null }
+}
+
+/**
  * Libera a IA para o lead apenas se não houver mais Zap Voice pendente/processando
- * nem progresso ativo (evita erro ao pausar um lead que ainda está em outra campanha).
+ * nem progresso que ainda bloqueie IA (campanha pai ativa).
  */
 async function maybeReleaseLeadZvAiDispatchPause(
   supabase: SupabaseService,
   userId: string,
   leadId: string,
 ): Promise<void> {
-  const [{ count: pend, error: pe }, { count: progCt, error: pgE }] = await Promise.all([
+  const [{ count: pend, error: pe }, progBlocking] = await Promise.all([
     supabase
       .from('scheduled_messages')
       .select('id', { count: 'exact', head: true })
@@ -522,18 +559,15 @@ async function maybeReleaseLeadZvAiDispatchPause(
       .not('zv_campaign_id', 'is', null)
       .in('status', ['pending', 'processing'])
       .eq('is_active', true),
-    supabase
-      .from('lead_campaign_progress')
-      .select('id', { count: 'exact', head: true })
-      .eq('user_id', userId)
-      .eq('lead_id', leadId)
-      .in('status', ['active', 'awaiting_last_send']),
+    countLeadZvProgressBlockingForRelease(supabase, userId, leadId),
   ])
+  const progCt = progBlocking.count
+  const pgE = progBlocking.error
   if (pe || pgE) {
     console.warn('[ZV-Pause] checagem release:', pe?.message ?? pgE?.message)
     return
   }
-  if ((pend ?? 0) !== 0 || (progCt ?? 0) !== 0) return
+  if ((pend ?? 0) !== 0 || progCt !== 0) return
   const { error: ue } = await supabase
     .from('leads')
     .update({
@@ -544,6 +578,55 @@ async function maybeReleaseLeadZvAiDispatchPause(
     .eq('user_id', userId)
   if (ue) {
     console.warn('[ZV-Pause] falha ao liberar lead:', ue.message)
+  }
+}
+
+/**
+ * Após encerrar funil (ex.: progress → completed), garante UPDATE em `leads` se não há
+ * mais bloqueio ZV real. Chamada explícita além de `maybeRelease` cobre race leitura/contagem.
+ */
+async function ensureLeadAiUnblockedAfterZvFunnelEnd(
+  supabase: SupabaseService,
+  userId: string,
+  leadId: string,
+): Promise<void> {
+  await maybeReleaseLeadZvAiDispatchPause(supabase, userId, leadId)
+  const [{ count: pend, error: pe }, progBlocking] = await Promise.all([
+    supabase
+      .from('scheduled_messages')
+      .select('id', { count: 'exact', head: true })
+      .eq('user_id', userId)
+      .eq('lead_id', leadId)
+      .not('zv_campaign_id', 'is', null)
+      .in('status', ['pending', 'processing'])
+      .eq('is_active', true),
+    countLeadZvProgressBlockingForRelease(supabase, userId, leadId),
+  ])
+  const progCt = progBlocking.count
+  if (pe || progBlocking.error) return
+  if ((pend ?? 0) !== 0 || progCt !== 0) return
+  const { data: leadRow, error: leErr } = await supabase
+    .from('leads')
+    .select('ai_paused_for_zv_dispatch')
+    .eq('id', leadId)
+    .eq('user_id', userId)
+    .maybeSingle()
+  if (leErr || !leadRow) return
+  if ((leadRow as { ai_paused_for_zv_dispatch?: boolean | null }).ai_paused_for_zv_dispatch !== true) {
+    return
+  }
+  const { error: ue } = await supabase
+    .from('leads')
+    .update({
+      ai_paused_for_zv_dispatch: false,
+      funnel_locked_until: null,
+    })
+    .eq('id', leadId)
+    .eq('user_id', userId)
+  if (ue) {
+    console.warn('[ZV-Pause] ensure unblock (2ª passagem):', ue.message)
+  } else {
+    console.log('[ZV-Pause] lead liberado na 2ª passagem pós-funil', { lead_id: leadId })
   }
 }
 
@@ -1346,7 +1429,7 @@ serve(async () => {
               }
             }
 
-            await maybeReleaseLeadZvAiDispatchPause(supabase, msg.user_id, msg.lead_id)
+            await ensureLeadAiUnblockedAfterZvFunnelEnd(supabase, msg.user_id, msg.lead_id)
             console.log('[Agenda Suprema] Campanha/funil Zap Voice OK — progress completed + IA reavaliada', {
               lead_id: msg.lead_id,
               zv_campaign_id: msg.zv_campaign_id,
@@ -1430,8 +1513,8 @@ serve(async () => {
       failed += 1
       // Fluxo Zap Voice: erro no envio deixa o lead preso sem IA (funnel lock). Liberamos explicitamente.
       if (msg.lead_id && (msg.zv_campaign_id ?? msg.zv_funnel_step_id)) {
-        await maybeReleaseLeadZvAiDispatchPause(supabase, msg.user_id, msg.lead_id)
-        console.warn('[process-scheduled-messages] ZV pause reavaliada após erro', msg.lead_id)
+        await ensureLeadAiUnblockedAfterZvFunnelEnd(supabase, msg.user_id, msg.lead_id)
+        console.warn('[process-scheduled-messages] ZV pause + IA reavaliadas após erro', msg.lead_id)
       }
     }
 
