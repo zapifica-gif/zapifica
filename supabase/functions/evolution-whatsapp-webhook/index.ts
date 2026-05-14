@@ -1383,6 +1383,7 @@ serve(async (req) => {
       message_body: finalBody,
       evolution_message_id: item.msgId,
       media_url: upload.url,
+      evolution_instance_name: instance,
       ai_suppressed: zvSuppress,
       ai_suppress_reason: zvSuppress ? (zvReason ?? 'zapvoice') : null,
     })
@@ -1645,6 +1646,7 @@ serve(async (req) => {
                   message_body: ai.text,
                   evolution_message_id: evo.messageId,
                   media_url: null,
+                  evolution_instance_name: instance,
                 })
                 if (iaInsErr) {
                   console.error('[IA] Falha ao salvar resposta no chat_messages:', iaInsErr.message)

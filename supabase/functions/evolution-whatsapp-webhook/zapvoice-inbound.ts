@@ -228,6 +228,27 @@ function extractDbError(err: unknown): {
   return { code, message, hint, details, raw }
 }
 
+/** Garante que `flow_id` aponta para um fluxo do mesmo tenant (service role ignora RLS). */
+async function assertZvFlowOwnedByTenant(
+  supabase: SupabaseClient,
+  flowId: string | null | undefined,
+  userId: string,
+): Promise<boolean> {
+  const fid = typeof flowId === 'string' ? flowId.trim() : ''
+  if (!fid) return false
+  const { data, error } = await supabase
+    .from('zv_flows')
+    .select('id')
+    .eq('id', fid)
+    .eq('user_id', userId)
+    .maybeSingle()
+  if (error) {
+    console.warn('[ZapVoice inbound] assertZvFlowOwnedByTenant', error.message)
+    return false
+  }
+  return Boolean(data)
+}
+
 /** Verifica se algum campo obrigatório do payload está vazio/undefined antes do insert. */
 function findMissingRequired(
   obj: Record<string, unknown>,
@@ -313,6 +334,20 @@ async function handleActiveCampaignProgress(
     keyword: short(camp.trigger_keyword, 80),
   })
 
+  if (!(await assertZvFlowOwnedByTenant(p.supabase, flowId, p.userId))) {
+    console.error('[ZapVoice inbound] early return: fluxo não pertence ao tenant', {
+      leadId: p.leadId,
+      campaignId: progress.campaign_id,
+      flowId,
+    })
+    return {
+      enqueued: false,
+      reason: 'fluxo_tenant_incompativel',
+      campaignId: progress.campaign_id,
+      suppressAi: true,
+    }
+  }
+
   // Primeira etapa física pode ter step_order 2, 3… — nunca usar só literal `1`.
   const { data: primeiraEtapaRaw, error: primeiraErr } = await p.supabase
     .from('zv_funnels')
@@ -360,7 +395,11 @@ async function handleActiveCampaignProgress(
           lead_id: p.leadId,
           campaign_id: progress.campaign_id,
         })
-        await p.supabase.from('lead_campaign_progress').delete().eq('id', progress.id)
+        await p.supabase
+          .from('lead_campaign_progress')
+          .delete()
+          .eq('id', progress.id)
+          .eq('user_id', p.userId)
       }
       console.log('[ZapVoice inbound] early return: fluxo vazio', {
         leadId: p.leadId,
@@ -769,6 +808,21 @@ export async function processZapVoiceInbound(
       trigger_condition: matched.trigger_condition,
       trigger_keyword: short(matched.trigger_keyword, 80),
     })
+
+    if (!(await assertZvFlowOwnedByTenant(p.supabase, matched.flow_id, p.userId))) {
+      console.error('[ZapVoice inbound] orgânico: fluxo não pertence ao tenant', {
+        leadId: p.leadId,
+        campaignId: matched.id,
+        flowId: matched.flow_id,
+      })
+      await unlockLeadFunnelLock(p.supabase, p.userId, p.leadId, 'organico_fluxo_tenant_incompativel')
+      return {
+        enqueued: false,
+        reason: 'fluxo_tenant_incompativel',
+        campaignId: matched.id,
+        suppressAi: false,
+      }
+    }
 
     const { data: stepsRaw, error: sErr } = await p.supabase
       .from('zv_funnels')
@@ -1266,24 +1320,31 @@ async function enqueueFunnelStepAndAdvance(p: {
   const flowId = (campFlowRow as { flow_id?: string } | null)?.flow_id ?? null
   let nextExistingOrder: number | null = null
   if (flowId && Number.isFinite(ord)) {
-    const { data: nextStep, error: nextStepErr } = await p.supabase
-      .from('zv_funnels')
-      .select('step_order')
-      .eq('flow_id', flowId)
-      .gt('step_order', ord)
-      .order('step_order', { ascending: true })
-      .limit(1)
-      .maybeSingle()
-    if (nextStepErr) {
-      console.warn('[ZapVoice inbound] falha ao buscar próxima etapa existente', nextStepErr.message, {
+    if (!(await assertZvFlowOwnedByTenant(p.supabase, flowId, p.userId))) {
+      console.warn('[ZapVoice inbound] avanço ponteiro: fluxo não pertence ao tenant', {
         leadId: p.leadId,
-        campaignId: p.progress.campaign_id,
         flowId,
-        ord,
       })
-    } else if (nextStep) {
-      nextExistingOrder = Number((nextStep as { step_order?: number }).step_order ?? NaN)
-      if (!Number.isFinite(nextExistingOrder)) nextExistingOrder = null
+    } else {
+      const { data: nextStep, error: nextStepErr } = await p.supabase
+        .from('zv_funnels')
+        .select('step_order')
+        .eq('flow_id', flowId)
+        .gt('step_order', ord)
+        .order('step_order', { ascending: true })
+        .limit(1)
+        .maybeSingle()
+      if (nextStepErr) {
+        console.warn('[ZapVoice inbound] falha ao buscar próxima etapa existente', nextStepErr.message, {
+          leadId: p.leadId,
+          campaignId: p.progress.campaign_id,
+          flowId,
+          ord,
+        })
+      } else if (nextStep) {
+        nextExistingOrder = Number((nextStep as { step_order?: number }).step_order ?? NaN)
+        if (!Number.isFinite(nextExistingOrder)) nextExistingOrder = null
+      }
     }
   }
 
@@ -1308,6 +1369,7 @@ async function enqueueFunnelStepAndAdvance(p: {
         status: isLastEnqueued ? 'awaiting_last_send' : 'active',
       })
       .eq('id', p.progress.id)
+      .eq('user_id', p.userId)
     if (up.error) {
       const dbErr = extractDbError(up.error)
       console.error('[ZapVoice inbound] ERRO FATAL DB (update lead_campaign_progress)', {

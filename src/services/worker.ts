@@ -444,6 +444,17 @@ async function enqueueNextFunnelStepAfterSend(
     return null
   }
 
+  const { data: flowOwned, error: flowOwnErr } = await supabase
+    .from('zv_flows')
+    .select('id')
+    .eq('id', zvFlowId)
+    .eq('user_id', row.user_id)
+    .maybeSingle()
+  if (flowOwnErr || !flowOwned) {
+    console.error('[ZV-FUNNEL][worker] ABORT fluxo não pertence ao user_id do agendamento')
+    return null
+  }
+
   const { data: prog2, error: progE } = await supabase
     .from('lead_campaign_progress')
     .select('id')
@@ -464,6 +475,7 @@ async function enqueueNextFunnelStepAfterSend(
       .from('zv_funnels')
       .select('step_order')
       .eq('id', sid)
+      .eq('flow_id', zvFlowId)
       .limit(1)
       .maybeSingle()
     if (curErr) console.warn('[ZV-FUNNEL][worker] etapa atual UUID:', curErr.message)
@@ -1165,6 +1177,7 @@ export async function checkAndSendScheduledMessages(
               message_body: messageBodyParaChat(row),
               media_url: row.media_url,
               evolution_message_id: evoId,
+              evolution_instance_name: row.evolution_instance_name ?? null,
             })
             if (chatErr) {
               await supabase

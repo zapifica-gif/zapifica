@@ -85,6 +85,8 @@ type ChatMessageRow = {
   message_body: string | null
   ai_suppressed?: boolean | null
   created_at: string
+  /** Preenchido pelo webhook Evolution — validado contra o dono do lead. */
+  evolution_instance_name?: string | null
 }
 
 type LeadRow = {
@@ -344,7 +346,15 @@ async function runPipeline(
   evolutionUrl: string,
   evolutionKey: string,
 ): Promise<Record<string, unknown>> {
-  // Identifica o lead primeiro (precisamos do user_id para checar campanhas).
+  const ingestInstance = (triggerRow.evolution_instance_name ?? '').trim()
+  if (!ingestInstance) {
+    return {
+      error:
+        'chat_messages sem evolution_instance_name — aplique a migration e faça deploy do evolution-whatsapp-webhook.',
+    }
+  }
+
+  // Identifica o lead (user_id) e valida vínculo com a instância Evolution da mensagem.
   const { data: lead, error: leErr } = await supabase
     .from('leads')
     .select(
@@ -361,6 +371,14 @@ async function runPipeline(
   }
 
   const leadData = lead as LeadRow
+  const expectedInstance = instanceNameFromUserId(leadData.user_id)
+  if (ingestInstance !== expectedInstance) {
+    return {
+      error: 'Instância Evolution incompatível com o dono do lead (possível mistura de tenant ou payload adulterado).',
+      expected_instance: expectedInstance,
+      received_instance: ingestInstance,
+    }
+  }
 
   // Pausa humana já gravada antes deste disparo (ex.: fromMe chegou primeiro).
   const { data: pauseEarly, error: pauseEarlyErr } = await supabase
@@ -579,6 +597,7 @@ async function runPipeline(
       content_type: 'text',
       message_body: text,
       evolution_message_id: null,
+      evolution_instance_name: expectedInstance,
     })
     .select('id')
     .maybeSingle()
@@ -588,11 +607,10 @@ async function runPipeline(
   }
   const iaId = (insData as { id: string } | null)?.id
 
-  const instanceName = instanceNameFromUserId(leadData.user_id)
   const evo = await sendEvolutionText(
     evolutionUrl,
     evolutionKey,
-    instanceName,
+    expectedInstance,
     destination,
     text,
   )
@@ -708,6 +726,10 @@ serve(async (req) => {
     return jsonResponse({ ok: true, ignored: 'sender_not_cliente', sender_type: sender })
   }
 
+  const evoInstRaw =
+    typeof record.evolution_instance_name === 'string'
+      ? record.evolution_instance_name.trim()
+      : ''
   const triggerRow: ChatMessageRow = {
     id: typeof record.id === 'string' ? record.id : '',
     lead_id: typeof record.lead_id === 'string' ? record.lead_id : '',
@@ -716,6 +738,7 @@ serve(async (req) => {
     message_body: typeof record.message_body === 'string' ? record.message_body : null,
     ai_suppressed: boolValue(record.ai_suppressed) ?? null,
     created_at: typeof record.created_at === 'string' ? record.created_at : new Date().toISOString(),
+    evolution_instance_name: evoInstRaw || null,
   }
   if (!triggerRow.lead_id) {
     return jsonResponse({ error: 'record.lead_id em falta' }, 400)

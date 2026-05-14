@@ -568,6 +568,19 @@ async function enqueueZapVoiceNextScheduledMessage(
 
   const zvFlowId = (zvCampRow as { flow_id: string | null } | null)?.flow_id ?? null
 
+  if (zvFlowId) {
+    const { data: flowOwned, error: flowOwnErr } = await supabase
+      .from('zv_flows')
+      .select('id')
+      .eq('id', zvFlowId)
+      .eq('user_id', msg.user_id)
+      .maybeSingle()
+    if (flowOwnErr || !flowOwned) {
+      console.error('[ZV-FUNNEL] enqueue: ABORT fluxo não pertence ao user_id do agendamento')
+      return null
+    }
+  }
+
   const { data: prog2, error: prog2Err } = await supabase
     .from('lead_campaign_progress')
     .select('id')
@@ -578,6 +591,8 @@ async function enqueueZapVoiceNextScheduledMessage(
     .maybeSingle()
   if (prog2Err) console.warn('[ZV-FUNNEL] enqueue: progress:', prog2Err.message)
 
+  if (!zvFlowId || !prog2?.id) return null
+
   let curOrd = asFiniteOrd(msg.zv_funnel_step_order ?? null)
 
   if (curOrd === null) {
@@ -585,13 +600,14 @@ async function enqueueZapVoiceNextScheduledMessage(
       .from('zv_funnels')
       .select('id, step_order')
       .eq('id', funnelStepUuid)
+      .eq('flow_id', zvFlowId)
       .limit(1)
       .maybeSingle()
     if (curErr) console.warn('[ZV-FUNNEL] enqueue: etapa UUID:', curErr.message)
     curOrd = csr ? asFiniteOrd((csr as { step_order?: unknown }).step_order) : null
   }
 
-  if (!zvFlowId || !prog2?.id || curOrd === null) return null
+  if (curOrd === null) return null
 
   const { data: nextStep, error: nxErr } = await supabase
     .from('zv_funnels')
@@ -1223,6 +1239,7 @@ serve(async () => {
             message_body: messageBodyParaChat(msg),
             media_url: msg.media_url,
             evolution_message_id: lastEvolutionId,
+            evolution_instance_name: msg.evolution_instance_name ?? null,
           })
           if (chatErr) {
             console.error('[process-scheduled-messages] chat_messages insert:', chatErr)

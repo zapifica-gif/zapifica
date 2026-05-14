@@ -722,8 +722,25 @@ export function ZapVoiceCampaignsPage() {
     setLoading(false)
   }, [loadAudienceOptions, loadSavedAudiences, loadFlows])
 
-  const loadSteps = useCallback(async (flowId: string) => {
+  const loadSteps = useCallback(async (flowId: string, uid: string | null) => {
+    if (!uid) {
+      setSteps([])
+      setStepsLoading(false)
+      return
+    }
     setStepsLoading(true)
+    const { data: own, error: ownE } = await supabase
+      .from('zv_flows')
+      .select('id')
+      .eq('id', flowId)
+      .eq('user_id', uid)
+      .maybeSingle()
+    if (ownE || !own) {
+      setError('Fluxo não encontrado ou sem permissão.')
+      setSteps([])
+      setStepsLoading(false)
+      return
+    }
     const { data, error: e } = await supabase
       .from('zv_funnels')
       .select(
@@ -803,8 +820,8 @@ export function ZapVoiceCampaignsPage() {
       if (mainTab !== 'campanhas' || voiceSubTab !== 'fluxos') setSteps([])
       return
     }
-    void loadSteps(selectedFlowId)
-  }, [mainTab, voiceSubTab, selectedFlowId, loadSteps])
+    void loadSteps(selectedFlowId, userId)
+  }, [mainTab, voiceSubTab, selectedFlowId, loadSteps, userId])
 
   useEffect(() => {
     if (voiceSubTab !== 'fluxos' || flows.length === 0) return
@@ -971,10 +988,18 @@ export function ZapVoiceCampaignsPage() {
 
   const renameFlow = useCallback(
     async (f: ZvFlow) => {
+      if (!userId) {
+        setError('Sessão inválida.')
+        return
+      }
       const name = window.prompt('Nome do fluxo:', f.name)?.trim()
       if (!name) return
       setError(null)
-      const { error: e } = await supabase.from('zv_flows').update({ name }).eq('id', f.id)
+      const { error: e } = await supabase
+        .from('zv_flows')
+        .update({ name })
+        .eq('id', f.id)
+        .eq('user_id', userId)
       if (e) {
         setError(`Falha ao renomear o fluxo: ${e.message}`)
         return
@@ -983,7 +1008,7 @@ export function ZapVoiceCampaignsPage() {
       setSuccess('Fluxo atualizado.')
       window.setTimeout(() => setSuccess(null), 3000)
     },
-    [],
+    [userId],
   )
 
   const duplicateFlow = useCallback(
@@ -1009,7 +1034,18 @@ export function ZapVoiceCampaignsPage() {
         return
       }
       const newFlow = ins as ZvFlow
-        const { data: oldSteps, error: stE } = await supabase
+      const { data: flowSrc, error: srcE } = await supabase
+        .from('zv_flows')
+        .select('id')
+        .eq('id', f.id)
+        .eq('user_id', userId)
+        .maybeSingle()
+      if (srcE || !flowSrc) {
+        await supabase.from('zv_flows').delete().eq('id', newFlow.id).eq('user_id', userId)
+        setError('Fluxo de origem inválido ou sem permissão.')
+        return
+      }
+      const { data: oldSteps, error: stE } = await supabase
         .from('zv_funnels')
         .select(
           'step_order, message, media_type, media_url, delay_seconds, expected_trigger, advance_type, min_delay_seconds, max_delay_seconds',
@@ -1017,7 +1053,7 @@ export function ZapVoiceCampaignsPage() {
         .eq('flow_id', f.id)
         .order('step_order', { ascending: true })
       if (stE) {
-        await supabase.from('zv_flows').delete().eq('id', newFlow.id)
+        await supabase.from('zv_flows').delete().eq('id', newFlow.id).eq('user_id', userId)
         setError(`Falha ao ler etapas: ${stE.message}`)
         return
       }
@@ -1047,7 +1083,7 @@ export function ZapVoiceCampaignsPage() {
         )
         const { error: inStepE } = await supabase.from('zv_funnels').insert(rows)
         if (inStepE) {
-          await supabase.from('zv_flows').delete().eq('id', newFlow.id)
+          await supabase.from('zv_flows').delete().eq('id', newFlow.id).eq('user_id', userId)
           setError(`Falha ao copiar etapas: ${inStepE.message}`)
           return
         }
@@ -1063,6 +1099,10 @@ export function ZapVoiceCampaignsPage() {
 
   const deleteFlow = useCallback(
     async (f: ZvFlow) => {
+      if (!userId) {
+        setError('Sessão inválida.')
+        return
+      }
       setError(null)
       const blockers = (campaigns as Campaign[]).filter(
         (c) => c.flow_id === f.id && (c.status === 'draft' || c.status === 'active' || c.status === 'paused'),
@@ -1080,7 +1120,11 @@ export function ZapVoiceCampaignsPage() {
       ) {
         return
       }
-      const { error: e } = await supabase.from('zv_flows').delete().eq('id', f.id)
+      const { error: e } = await supabase
+        .from('zv_flows')
+        .delete()
+        .eq('id', f.id)
+        .eq('user_id', userId)
       if (e) {
         setError(`Falha ao excluir o fluxo: ${e.message}`)
         return
@@ -1092,7 +1136,7 @@ export function ZapVoiceCampaignsPage() {
       setSuccess('Fluxo excluído.')
       window.setTimeout(() => setSuccess(null), 4000)
     },
-    [campaigns, selectedFlowId],
+    [campaigns, selectedFlowId, userId],
   )
 
   /** Remove agendamentos pendentes desta campanha (re-ativação sem duplicar). */
@@ -1182,6 +1226,15 @@ export function ZapVoiceCampaignsPage() {
 
         if (!c.flow_id) {
           throw new Error('Esta campanha está sem fluxo (provavelmente o fluxo foi excluído). Selecione outro fluxo antes de ativar.')
+        }
+        const { data: flowOwned, error: flowOwnErr } = await supabase
+          .from('zv_flows')
+          .select('id')
+          .eq('id', c.flow_id)
+          .eq('user_id', userId)
+          .maybeSingle()
+        if (flowOwnErr || !flowOwned) {
+          throw new Error('O fluxo desta campanha não pertence à sua conta. Selecione outro fluxo.')
         }
         const { data: stepsData, error: stepsErr } = await supabase
           .from('zv_funnels')
@@ -1578,7 +1631,11 @@ export function ZapVoiceCampaignsPage() {
   // -------------------------------------------------------------------------
 
   const addStep = useCallback(async () => {
-    if (!selectedFlowId) return
+    if (!userId || !selectedFlowId) return
+    if (!flows.some((fl) => fl.id === selectedFlowId && fl.user_id === userId)) {
+      setError('Fluxo inválido para adicionar etapa.')
+      return
+    }
     const nextOrder = (steps[steps.length - 1]?.step_order ?? 0) + 1
     const { data, error: e } = await supabase
       .from('zv_funnels')
@@ -1603,7 +1660,7 @@ export function ZapVoiceCampaignsPage() {
       return
     }
     setSteps((prev) => [...prev, data as FunnelStep])
-  }, [selectedFlowId, steps])
+  }, [selectedFlowId, steps, flows, userId])
 
   const saveStep = useCallback(
     async (
@@ -1622,11 +1679,16 @@ export function ZapVoiceCampaignsPage() {
         >
       >,
     ) => {
+      if (!userId || !selectedFlowId) {
+        setError('Sessão ou fluxo inválido.')
+        return
+      }
       setSavingStepId(stepId)
       const { error: e } = await supabase
         .from('zv_funnels')
         .update(patch)
         .eq('id', stepId)
+        .eq('flow_id', selectedFlowId)
       setSavingStepId(null)
       if (e) {
         setError(`Falha ao salvar etapa: ${e.message}`)
@@ -1636,11 +1698,19 @@ export function ZapVoiceCampaignsPage() {
         prev.map((s) => (s.id === stepId ? { ...s, ...patch } : s)),
       )
     },
-    [],
+    [userId, selectedFlowId],
   )
 
   const deleteStep = useCallback(async (stepId: string) => {
-    const { error: e } = await supabase.from('zv_funnels').delete().eq('id', stepId)
+    if (!userId || !selectedFlowId) {
+      setError('Sessão ou fluxo inválido.')
+      return
+    }
+    const { error: e } = await supabase
+      .from('zv_funnels')
+      .delete()
+      .eq('id', stepId)
+      .eq('flow_id', selectedFlowId)
     if (e) {
       setError(`Falha ao excluir etapa: ${e.message}`)
       return
@@ -1655,16 +1725,24 @@ export function ZapVoiceCampaignsPage() {
       for (let i = 0; i < nextLocal.length; i += 1) {
         const s = nextLocal[i]!
         const tempOrder = -1000 - i
-        await supabase.from('zv_funnels').update({ step_order: tempOrder }).eq('id', s.id)
+        await supabase
+          .from('zv_funnels')
+          .update({ step_order: tempOrder })
+          .eq('id', s.id)
+          .eq('flow_id', selectedFlowId)
       }
       for (let i = 0; i < nextLocal.length; i += 1) {
         const s = nextLocal[i]!
         const newOrder = i + 1
-        await supabase.from('zv_funnels').update({ step_order: newOrder }).eq('id', s.id)
+        await supabase
+          .from('zv_funnels')
+          .update({ step_order: newOrder })
+          .eq('id', s.id)
+          .eq('flow_id', selectedFlowId)
       }
       setSteps((prev) => prev.slice().sort((a, b) => a.step_order - b.step_order))
     }
-  }, [])
+  }, [steps, selectedFlowId, userId])
 
   const moveStep = useCallback(
     async (stepId: string, direction: -1 | 1) => {
@@ -1674,6 +1752,21 @@ export function ZapVoiceCampaignsPage() {
       if (swap < 0 || swap >= steps.length) return
       const a = steps[idx]
       const b = steps[swap]
+      const flowId = selectedFlowId ?? a.flow_id
+      if (!userId || !flowId) {
+        setError('Sessão ou fluxo inválido.')
+        return
+      }
+      const { data: own, error: ownE } = await supabase
+        .from('zv_flows')
+        .select('id')
+        .eq('id', flowId)
+        .eq('user_id', userId)
+        .maybeSingle()
+      if (ownE || !own) {
+        setError('Fluxo não encontrado ou sem permissão.')
+        return
+      }
 
       // Truque para evitar conflito do unique(flow_id, step_order):
       // primeiro joga `a` para um valor temporário, depois ajusta os dois.
@@ -1682,14 +1775,17 @@ export function ZapVoiceCampaignsPage() {
         .from('zv_funnels')
         .update({ step_order: tempOrder })
         .eq('id', a.id)
+        .eq('flow_id', flowId)
       await supabase
         .from('zv_funnels')
         .update({ step_order: a.step_order })
         .eq('id', b.id)
+        .eq('flow_id', flowId)
       await supabase
         .from('zv_funnels')
         .update({ step_order: b.step_order })
         .eq('id', a.id)
+        .eq('flow_id', flowId)
 
       setSteps((prev) => {
         const next = prev.slice()
@@ -1702,7 +1798,7 @@ export function ZapVoiceCampaignsPage() {
         return next.sort((x, y) => x.step_order - y.step_order)
       })
     },
-    [steps],
+    [steps, selectedFlowId, userId],
   )
 
   // -------------------------------------------------------------------------
