@@ -198,9 +198,9 @@ function MessageMedia({ message }: { message: ChatMessageRow }) {
         target="_blank"
         rel="noreferrer"
         download
-        className="flex items-center gap-3 rounded-xl border border-zinc-200 bg-white/90 p-3 text-zinc-800 shadow-sm transition hover:border-brand-200 hover:bg-brand-50"
+        className="flex items-center gap-3 rounded-xl border border-zinc-200 bg-white/90 p-3 text-zinc-800 shadow-sm transition hover:border-google-blue/30 hover:bg-google-blue/5"
       >
-        <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-brand-600/10 text-brand-700">
+        <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-google-blue/10 text-google-blue">
           <FileText className="h-5 w-5" aria-hidden />
         </span>
         <span className="min-w-0">
@@ -987,7 +987,7 @@ export function ChatWindow({ open, onClose, lead, boardTenantUserIdRef }: ChatWi
         aria-labelledby="inbox-title"
       >
         <header className="flex shrink-0 items-start gap-3 border-b border-zinc-200/90 bg-white px-4 py-3">
-          <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-brand-600/10 text-brand-700">
+          <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-google-blue/10 text-google-blue">
             <MessageSquare className="h-5 w-5" />
           </div>
           <div className="min-w-0 flex-1">
@@ -1011,7 +1011,7 @@ export function ChatWindow({ open, onClose, lead, boardTenantUserIdRef }: ChatWi
                 className="mt-1 inline-flex items-center gap-1.5 rounded-full border border-zinc-200 bg-white px-2.5 py-1 text-[11px] font-semibold text-zinc-700 transition hover:bg-zinc-50"
                 title="Ver campanha de origem"
               >
-                <span className="h-1.5 w-1.5 rounded-full bg-brand-500" />
+                <span className="h-1.5 w-1.5 rounded-full bg-google-blue" />
                 {campaignLabel}
               </button>
             ) : null}
@@ -1019,7 +1019,7 @@ export function ChatWindow({ open, onClose, lead, boardTenantUserIdRef }: ChatWi
               type="button"
               onClick={abrirConversasFuturas}
               disabled={!lead}
-              className="mt-1 inline-flex items-center gap-1.5 rounded-full border border-brand-200 bg-brand-50 px-2.5 py-1 text-[11px] font-semibold text-brand-700 transition hover:border-brand-300 hover:bg-brand-100 disabled:cursor-not-allowed disabled:opacity-50"
+              className="mt-1 inline-flex items-center gap-1.5 rounded-full border border-google-blue/25 bg-google-blue/5 px-2.5 py-1 text-[11px] font-semibold text-google-blue transition hover:border-google-blue/40 hover:bg-google-blue/10 disabled:cursor-not-allowed disabled:opacity-50"
               title="Ver mensagens agendadas para este lead"
             >
               <CalendarClock className="h-3.5 w-3.5" />
@@ -1085,7 +1085,7 @@ export function ChatWindow({ open, onClose, lead, boardTenantUserIdRef }: ChatWi
                     <span
                       className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-semibold ${
                         pendingMedia[m.id] === 'sending'
-                          ? 'bg-brand-50 text-brand-700 ring-1 ring-brand-200'
+                          ? 'bg-google-blue/10 text-google-blue ring-1 ring-google-blue/25'
                           : 'bg-rose-50 text-rose-800 ring-1 ring-rose-200'
                       }`}
                       title={
@@ -1153,7 +1153,7 @@ export function ChatWindow({ open, onClose, lead, boardTenantUserIdRef }: ChatWi
               <button
                 type="button"
                 onClick={() => void confirmRecording()}
-                className="inline-flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-gradient-to-r from-brand-600 to-brand-700 text-white shadow-md transition hover:from-brand-500 hover:to-brand-600"
+                className="btn-primary-magnetic-sm inline-flex h-11 w-11 shrink-0 !min-h-11 !min-w-11 !gap-0 !p-0"
                 aria-label="Enviar áudio"
                 title="Enviar"
               >
@@ -1180,7 +1180,7 @@ export function ChatWindow({ open, onClose, lead, boardTenantUserIdRef }: ChatWi
               type="button"
               onClick={() => fileInputRef.current?.click()}
               disabled={!lead || sending}
-              className="inline-flex h-11 w-11 shrink-0 items-center justify-center rounded-xl border border-zinc-200 bg-white text-zinc-700 shadow-sm transition hover:border-brand-300 hover:bg-brand-50 hover:text-brand-700 disabled:cursor-not-allowed disabled:opacity-50"
+              className="inline-flex h-11 w-11 shrink-0 items-center justify-center rounded-xl border border-zinc-200 bg-white text-zinc-700 shadow-sm transition hover:border-google-blue/35 hover:bg-google-blue/5 hover:text-google-blue disabled:cursor-not-allowed disabled:opacity-50"
               aria-label="Anexar arquivo"
               title="Anexar arquivo"
             >
@@ -1190,7 +1190,7 @@ export function ChatWindow({ open, onClose, lead, boardTenantUserIdRef }: ChatWi
               type="button"
               onClick={() => void startRecording()}
               disabled={!lead || sending}
-              className="inline-flex h-11 w-11 shrink-0 items-center justify-center rounded-xl border border-zinc-200 bg-white text-zinc-700 shadow-sm transition hover:border-brand-300 hover:bg-brand-50 hover:text-brand-700 disabled:cursor-not-allowed disabled:opacity-50"
+              className="inline-flex h-11 w-11 shrink-0 items-center justify-center rounded-xl border border-zinc-200 bg-white text-zinc-700 shadow-sm transition hover:border-google-blue/35 hover:bg-google-blue/5 hover:text-google-blue disabled:cursor-not-allowed disabled:opacity-50"
               aria-label="Gravar áudio"
               title="Gravar áudio"
             >
@@ -1200,7 +1200,7 @@ export function ChatWindow({ open, onClose, lead, boardTenantUserIdRef }: ChatWi
               type="button"
               onClick={abrirModalAgendamento}
               disabled={!lead || sending}
-              className="inline-flex h-11 w-11 shrink-0 items-center justify-center rounded-xl border border-zinc-200 bg-white text-zinc-700 shadow-sm transition hover:border-brand-300 hover:bg-brand-50 hover:text-brand-700 disabled:cursor-not-allowed disabled:opacity-50"
+              className="inline-flex h-11 w-11 shrink-0 items-center justify-center rounded-xl border border-zinc-200 bg-white text-zinc-700 shadow-sm transition hover:border-google-blue/35 hover:bg-google-blue/5 hover:text-google-blue disabled:cursor-not-allowed disabled:opacity-50"
               aria-label="Agendar envio"
               title="Agendar envio"
             >
@@ -1219,12 +1219,12 @@ export function ChatWindow({ open, onClose, lead, boardTenantUserIdRef }: ChatWi
               disabled={!lead || sending}
               rows={2}
               placeholder="Digite e envie ao WhatsApp…"
-              className="min-h-[44px] w-full resize-none rounded-xl border border-zinc-200 bg-zinc-50 px-3 py-2.5 text-sm text-zinc-900 outline-none transition focus:border-brand-400 focus:bg-white focus:ring-2 focus:ring-brand-600/20 disabled:opacity-50"
+              className="min-h-[44px] w-full resize-none rounded-xl border border-zinc-200 bg-zinc-50 px-3 py-2.5 text-sm text-zinc-900 outline-none transition focus:border-google-blue/35 focus:bg-white focus-visible:ring-2 focus-visible:ring-google-blue focus-visible:ring-offset-2 focus-visible:ring-offset-white disabled:opacity-50"
             />
             <button
               type="submit"
               disabled={!lead || sending || !draft.trim()}
-              className="inline-flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-gradient-to-r from-brand-600 to-brand-700 text-white shadow-md transition hover:from-brand-500 hover:to-brand-600 disabled:cursor-not-allowed disabled:opacity-50"
+              className="btn-primary-magnetic-sm inline-flex h-11 w-11 shrink-0 !min-h-11 !min-w-11 !gap-0 !p-0 disabled:cursor-not-allowed disabled:opacity-50"
               aria-label="Enviar"
             >
               <Send className="h-4 w-4" />
@@ -1247,13 +1247,13 @@ export function ChatWindow({ open, onClose, lead, boardTenantUserIdRef }: ChatWi
       {scheduleModalOpen ? (
         <div className="fixed inset-0 z-[80] flex items-center justify-center bg-zinc-950/50 backdrop-blur-[2px] px-4">
           <div
-            className="w-full max-w-md overflow-hidden rounded-2xl border border-zinc-200 bg-white shadow-2xl"
+            className="animate-modal-in w-full max-w-md overflow-hidden rounded-2xl border border-zinc-200 bg-white shadow-2xl"
             role="dialog"
             aria-modal="true"
             aria-labelledby="agendar-titulo"
           >
             <div className="flex items-center gap-3 border-b border-zinc-200 px-5 py-4">
-              <span className="flex h-10 w-10 items-center justify-center rounded-xl bg-brand-600/10 text-brand-700">
+              <span className="flex h-10 w-10 items-center justify-center rounded-xl bg-google-blue/10 text-google-blue">
                 <CalendarClock className="h-5 w-5" />
               </span>
               <div className="flex-1">
@@ -1285,7 +1285,7 @@ export function ChatWindow({ open, onClose, lead, boardTenantUserIdRef }: ChatWi
                     type="date"
                     value={scheduleDate}
                     onChange={(e) => setScheduleDate(e.target.value)}
-                    className="w-full rounded-xl border border-zinc-200 bg-zinc-50 px-3 py-2 text-sm outline-none transition focus:border-brand-400 focus:bg-white focus:ring-2 focus:ring-brand-600/20"
+                    className="w-full rounded-xl border border-zinc-200 bg-zinc-50 px-3 py-2 text-sm outline-none transition focus:border-google-blue/35 focus:bg-white focus-visible:ring-2 focus-visible:ring-google-blue focus-visible:ring-offset-2 focus-visible:ring-offset-white"
                   />
                 </label>
                 <label className="block">
@@ -1296,7 +1296,7 @@ export function ChatWindow({ open, onClose, lead, boardTenantUserIdRef }: ChatWi
                     type="time"
                     value={scheduleTime}
                     onChange={(e) => setScheduleTime(e.target.value)}
-                    className="w-full rounded-xl border border-zinc-200 bg-zinc-50 px-3 py-2 text-sm outline-none transition focus:border-brand-400 focus:bg-white focus:ring-2 focus:ring-brand-600/20"
+                    className="w-full rounded-xl border border-zinc-200 bg-zinc-50 px-3 py-2 text-sm outline-none transition focus:border-google-blue/35 focus:bg-white focus-visible:ring-2 focus-visible:ring-google-blue focus-visible:ring-offset-2 focus-visible:ring-offset-white"
                   />
                 </label>
               </div>
@@ -1310,7 +1310,7 @@ export function ChatWindow({ open, onClose, lead, boardTenantUserIdRef }: ChatWi
                       e.target.value as 'none' | 'daily' | 'weekly' | 'monthly' | 'yearly',
                     )
                   }
-                  className="w-full rounded-xl border border-zinc-200 bg-zinc-50 px-3 py-2 text-sm outline-none transition focus:border-brand-400 focus:bg-white focus:ring-2 focus:ring-brand-600/20"
+                  className="w-full rounded-xl border border-zinc-200 bg-zinc-50 px-3 py-2 text-sm outline-none transition focus:border-google-blue/35 focus:bg-white focus-visible:ring-2 focus-visible:ring-google-blue focus-visible:ring-offset-2 focus-visible:ring-offset-white"
                 >
                   <option value="none">Não repetir</option>
                   <option value="daily">Diário</option>
@@ -1347,19 +1347,19 @@ export function ChatWindow({ open, onClose, lead, boardTenantUserIdRef }: ChatWi
                   }}
                 />
                 {scheduleAttachment ? (
-                  <div className="flex items-center justify-between rounded-xl border border-brand-200 bg-brand-50 px-3 py-2">
+                  <div className="flex items-center justify-between rounded-xl border border-google-blue/25 bg-google-blue/5 px-3 py-2">
                     <div className="min-w-0">
-                      <p className="truncate text-xs font-semibold text-brand-800">
+                      <p className="truncate text-xs font-semibold text-zinc-900">
                         {scheduleAttachment.name}
                       </p>
-                      <p className="text-[11px] text-brand-700/80">
+                      <p className="text-[11px] text-zinc-600">
                         {(scheduleAttachment.size / 1024).toFixed(1)} KB · {scheduleAttachment.type || 'arquivo'}
                       </p>
                     </div>
                     <button
                       type="button"
                       onClick={() => setScheduleAttachment(null)}
-                      className="rounded-lg p-1.5 text-brand-700 hover:bg-brand-100"
+                      className="rounded-lg p-1.5 text-google-blue hover:bg-google-blue/10"
                       aria-label="Remover anexo"
                     >
                       <X className="h-4 w-4" />
@@ -1369,7 +1369,7 @@ export function ChatWindow({ open, onClose, lead, boardTenantUserIdRef }: ChatWi
                   <button
                     type="button"
                     onClick={() => scheduleAttachmentInputRef.current?.click()}
-                    className="inline-flex items-center gap-2 rounded-xl border border-dashed border-zinc-300 bg-white px-3 py-2 text-xs font-semibold text-zinc-700 transition hover:border-brand-300 hover:bg-brand-50 hover:text-brand-700"
+                    className="inline-flex items-center gap-2 rounded-xl border border-dashed border-zinc-300 bg-white px-3 py-2 text-xs font-semibold text-zinc-700 transition hover:border-google-blue/40 hover:bg-google-blue/5 hover:text-google-blue"
                   >
                     <Paperclip className="h-3.5 w-3.5" />
                     Anexar arquivo (opcional)
@@ -1396,7 +1396,7 @@ export function ChatWindow({ open, onClose, lead, boardTenantUserIdRef }: ChatWi
                 type="button"
                 onClick={() => void programarEnvio()}
                 disabled={submittingSchedule}
-                className="inline-flex items-center gap-2 rounded-xl bg-gradient-to-r from-brand-600 to-brand-700 px-4 py-2 text-sm font-semibold text-white shadow-md transition hover:from-brand-500 hover:to-brand-600 disabled:cursor-not-allowed disabled:opacity-50"
+                className="btn-primary-magnetic-sm disabled:cursor-not-allowed disabled:opacity-50"
               >
                 {submittingSchedule ? (
                   <Loader2 className="h-4 w-4 animate-spin" />
@@ -1413,14 +1413,14 @@ export function ChatWindow({ open, onClose, lead, boardTenantUserIdRef }: ChatWi
       {futureModalOpen ? (
         <div className="fixed inset-0 z-[80] flex items-center justify-center bg-zinc-950/50 backdrop-blur-[2px] px-4">
           <div
-            className="flex w-full max-w-lg flex-col overflow-hidden rounded-2xl border border-zinc-200 bg-white shadow-2xl"
+            className="animate-modal-in flex w-full max-w-lg flex-col overflow-hidden rounded-2xl border border-zinc-200 bg-white shadow-2xl"
             role="dialog"
             aria-modal="true"
             aria-labelledby="futuras-titulo"
             style={{ maxHeight: '85vh' }}
           >
             <div className="flex items-center gap-3 border-b border-zinc-200 px-5 py-4">
-              <span className="flex h-10 w-10 items-center justify-center rounded-xl bg-brand-600/10 text-brand-700">
+              <span className="flex h-10 w-10 items-center justify-center rounded-xl bg-google-blue/10 text-google-blue">
                 <CalendarClock className="h-5 w-5" />
               </span>
               <div className="flex-1">
@@ -1491,7 +1491,7 @@ export function ChatWindow({ open, onClose, lead, boardTenantUserIdRef }: ChatWi
                           ? 'bg-zinc-100 text-zinc-600 ring-zinc-200'
                           : m.status === 'processing'
                             ? 'bg-amber-50 text-amber-700 ring-amber-200'
-                            : 'bg-brand-50 text-brand-700 ring-brand-200'
+                            : 'bg-google-blue/10 text-google-blue ring-google-blue/25'
                   const recRaw = (m.recurrence ?? 'none').trim().toLowerCase()
                   const recurrenceLabel =
                     recRaw === 'daily'
@@ -1532,7 +1532,7 @@ export function ChatWindow({ open, onClose, lead, boardTenantUserIdRef }: ChatWi
                             href={m.media_url}
                             target="_blank"
                             rel="noreferrer"
-                            className="mt-1 inline-flex items-center gap-1 text-[11px] font-semibold text-brand-700 hover:underline"
+                            className="mt-1 inline-flex items-center gap-1 text-[11px] font-semibold text-google-blue hover:underline"
                           >
                             <Paperclip className="h-3 w-3" />
                             Ver anexo

@@ -140,7 +140,7 @@ export function NewLeadModal({ open, onClose, onSave }: NewLeadModalProps) {
             <button
               type="submit"
               disabled={submitting}
-              className="rounded-xl bg-gradient-to-r from-brand-600 to-brand-green px-4 py-2.5 text-sm font-semibold text-white shadow-md shadow-brand-600/25 transition-all duration-300 hover:-translate-y-0.5 hover:shadow-lg hover:from-brand-500 hover:to-brand-green-dark disabled:opacity-60"
+              className="btn-primary-magnetic-sm disabled:opacity-60"
             >
               {submitting ? 'Salvando…' : 'Salvar'}
             </button>
