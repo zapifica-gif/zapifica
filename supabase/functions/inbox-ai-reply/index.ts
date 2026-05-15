@@ -13,8 +13,8 @@
 //   3) HARD LOCK: progresso ativo, ai_paused_for_zv_dispatch, fila ZV pendente
 //      ou última mensagem com ai_suppressed — sempre respeitados (idem).
 //      Self-healing: se `ai_paused_for_zv_dispatch` estiver true sem funil ZV real
-//      nem fila pendente, a Edge corrige `leads` e segue com o DeepSeek (até 3 tentativas
-//      com pausa curta para race com o disparo que ainda grava sent/completed).
+//      nem fila pendente, a Edge corrige `leads` e segue com o DeepSeek (6 leituras,
+//      2s entre falhas ≈10s; re-poll de progresso/fila antes do self-heal quando pause ZV ativo).
 //
 // Secrets obrigatórios:
 //   * DEEPSEEK_API_KEY
@@ -35,9 +35,13 @@ const DEEPSEEK_MODEL = (Deno.env.get('DEEPSEEK_MODEL')?.trim() || 'deepseek-reas
 const HISTORY_LIMIT = 20
 // Reasoner tende a demorar mais. Mantemos folga abaixo do limite típico da Edge Function.
 const DEEPSEEK_TIMEOUT_MS = 110_000
-/** Self-heal: intervalo entre tentativas (race dispatch vs inbox no mesmo minuto). */
-const INBOX_ZV_SELF_HEAL_RETRY_MS = 1200
-const INBOX_ZV_SELF_HEAL_MAX_ATTEMPTS = 3
+/** Entre leituras do self-heal e re-polls de progresso/fila (race pós-disparo vs inbox). */
+const INBOX_ZV_SELF_HEAL_RETRY_MS = 2000
+/**
+ * 6 leituras com até 5 × 2s de espera = 10s de janela (≥5 tentativas com intervalo de 2s).
+ * O loop de self-heal faz até (MAX_ATTEMPTS - 1) sleeps entre leituras.
+ */
+const INBOX_ZV_SELF_HEAL_MAX_ATTEMPTS = 6
 
 const cors: Record<string, string> = {
   'Access-Control-Allow-Origin': '*',
@@ -672,13 +676,43 @@ async function runPipeline(
     return { error: 'lead_after_delay: lead não encontrado' }
   }
 
-  const progBlockRes = await countLeadZvProgressBlockingAiInbox(
+  /** Pause por disparo ZV: permite re-poll de progresso/fila antes de hard-block (race pós-última etapa). */
+  const zvDispatchRaceSignal = leadZv.ai_paused_for_zv_dispatch === true
+
+  let progBlockRes = await countLeadZvProgressBlockingAiInbox(
     supabase,
     leadData.user_id,
     triggerRow.lead_id,
   )
   if (progBlockRes.error) {
     console.warn('[inbox-ai-reply] progress ZV (pós-delay):', progBlockRes.error.message)
+    return {
+      ok: true,
+      ignored: 'hard_lock_progress_check_error',
+      lead_id: triggerRow.lead_id,
+    }
+  }
+  if (progBlockRes.count > 0 && zvDispatchRaceSignal) {
+    for (let attempt = 2; attempt <= INBOX_ZV_SELF_HEAL_MAX_ATTEMPTS; attempt++) {
+      console.log('[inbox-ai-reply][ZV-race] progress ainda bloqueia com pause dispatch — aguardando DB', {
+        lead_id: triggerRow.lead_id,
+        attempt,
+        max_attempts: INBOX_ZV_SELF_HEAL_MAX_ATTEMPTS,
+        delay_ms: INBOX_ZV_SELF_HEAL_RETRY_MS,
+        prog_blocking_count: progBlockRes.count,
+      })
+      await sleep(INBOX_ZV_SELF_HEAL_RETRY_MS)
+      progBlockRes = await countLeadZvProgressBlockingAiInbox(
+        supabase,
+        leadData.user_id,
+        triggerRow.lead_id,
+      )
+      if (progBlockRes.error) break
+      if (progBlockRes.count === 0) break
+    }
+  }
+  if (progBlockRes.error) {
+    console.warn('[inbox-ai-reply] progress ZV (pós-delay, pós-race):', progBlockRes.error.message)
     return {
       ok: true,
       ignored: 'hard_lock_progress_check_error',
@@ -720,7 +754,21 @@ async function runPipeline(
     }
   }
 
-  const pendZv = await countPendingZvScheduledForLead(supabase, leadData.user_id, triggerRow.lead_id)
+  let pendZv = await countPendingZvScheduledForLead(supabase, leadData.user_id, triggerRow.lead_id)
+  if (pendZv > 0 && zvDispatchRaceSignal) {
+    for (let attempt = 2; attempt <= INBOX_ZV_SELF_HEAL_MAX_ATTEMPTS; attempt++) {
+      console.log('[inbox-ai-reply][ZV-race] fila ZV ainda pendente com pause dispatch — aguardando DB', {
+        lead_id: triggerRow.lead_id,
+        attempt,
+        max_attempts: INBOX_ZV_SELF_HEAL_MAX_ATTEMPTS,
+        delay_ms: INBOX_ZV_SELF_HEAL_RETRY_MS,
+        pending_zv: pendZv,
+      })
+      await sleep(INBOX_ZV_SELF_HEAL_RETRY_MS)
+      pendZv = await countPendingZvScheduledForLead(supabase, leadData.user_id, triggerRow.lead_id)
+      if (pendZv === 0) break
+    }
+  }
   if (pendZv > 0) {
     return {
       ok: true,
@@ -856,12 +904,52 @@ async function runPipeline(
     }
   }
 
-  const [progPreRes, pendPre] = await Promise.all([
-    countLeadZvProgressBlockingAiInbox(supabase, leadData.user_id, triggerRow.lead_id),
-    countPendingZvScheduledForLead(supabase, leadData.user_id, triggerRow.lead_id),
-  ])
+  const zvRacePreSignal = pre?.ai_paused_for_zv_dispatch === true
+
+  let progPreRes: Awaited<ReturnType<typeof countLeadZvProgressBlockingAiInbox>>
+  let pendPre: number
+  {
+    const [p0, z0] = await Promise.all([
+      countLeadZvProgressBlockingAiInbox(supabase, leadData.user_id, triggerRow.lead_id),
+      countPendingZvScheduledForLead(supabase, leadData.user_id, triggerRow.lead_id),
+    ])
+    progPreRes = p0
+    pendPre = z0
+  }
+
   if (progPreRes.error) {
     console.warn('[inbox-ai-reply] progress ZV (pré-LLM):', progPreRes.error.message)
+    return {
+      ok: true,
+      ignored: 'hard_lock_progress_check_error_pre_llm',
+      lead_id: triggerRow.lead_id,
+    }
+  }
+
+  if ((progPreRes.count > 0 || pendPre > 0) && zvRacePreSignal) {
+    for (let attempt = 2; attempt <= INBOX_ZV_SELF_HEAL_MAX_ATTEMPTS; attempt++) {
+      console.log('[inbox-ai-reply][ZV-race][pre-LLM] progress ou fila ainda bloqueiam com pause dispatch', {
+        lead_id: triggerRow.lead_id,
+        attempt,
+        max_attempts: INBOX_ZV_SELF_HEAL_MAX_ATTEMPTS,
+        delay_ms: INBOX_ZV_SELF_HEAL_RETRY_MS,
+        prog_blocking_count: progPreRes.count,
+        pending_zv: pendPre,
+      })
+      await sleep(INBOX_ZV_SELF_HEAL_RETRY_MS)
+      const [p1, z1] = await Promise.all([
+        countLeadZvProgressBlockingAiInbox(supabase, leadData.user_id, triggerRow.lead_id),
+        countPendingZvScheduledForLead(supabase, leadData.user_id, triggerRow.lead_id),
+      ])
+      progPreRes = p1
+      pendPre = z1
+      if (progPreRes.error) break
+      if (progPreRes.count === 0 && pendPre === 0) break
+    }
+  }
+
+  if (progPreRes.error) {
+    console.warn('[inbox-ai-reply] progress ZV (pré-LLM, pós-race):', progPreRes.error.message)
     return {
       ok: true,
       ignored: 'hard_lock_progress_check_error_pre_llm',
