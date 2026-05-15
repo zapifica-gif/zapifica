@@ -12,6 +12,9 @@
 //   2) Delay aleatório de 5–6 s: dá ao webhook do funil tempo para gravar progresso.
 //   3) HARD LOCK: progresso ativo, ai_paused_for_zv_dispatch, fila ZV pendente
 //      ou última mensagem com ai_suppressed — sempre respeitados (idem).
+//      Self-healing: se `ai_paused_for_zv_dispatch` estiver true sem funil ZV real
+//      nem fila pendente, a Edge corrige `leads` e segue com o DeepSeek (até 3 tentativas
+//      com pausa curta para race com o disparo que ainda grava sent/completed).
 //
 // Secrets obrigatórios:
 //   * DEEPSEEK_API_KEY
@@ -32,6 +35,9 @@ const DEEPSEEK_MODEL = (Deno.env.get('DEEPSEEK_MODEL')?.trim() || 'deepseek-reas
 const HISTORY_LIMIT = 20
 // Reasoner tende a demorar mais. Mantemos folga abaixo do limite típico da Edge Function.
 const DEEPSEEK_TIMEOUT_MS = 110_000
+/** Self-heal: intervalo entre tentativas (race dispatch vs inbox no mesmo minuto). */
+const INBOX_ZV_SELF_HEAL_RETRY_MS = 1200
+const INBOX_ZV_SELF_HEAL_MAX_ATTEMPTS = 3
 
 const cors: Record<string, string> = {
   'Access-Control-Allow-Origin': '*',
@@ -108,15 +114,19 @@ async function countLeadZvProgressBlockingAiInbox(
   supabase: SupabaseClient,
   userId: string,
   leadId: string,
-): Promise<number> {
+): Promise<{ count: number; error: { message: string } | null }> {
   const { data: rows, error } = await supabase
     .from('lead_campaign_progress')
     .select('campaign_id')
     .eq('lead_id', leadId)
     .eq('user_id', userId)
     .in('status', ['active', 'awaiting_last_send'])
-  if (error || !rows?.length) return 0
-  const ids = [...new Set(rows.map((r) => (r as { campaign_id: string }).campaign_id))]
+  if (error) {
+    return { count: 0, error: { message: error.message } }
+  }
+  const list = rows ?? []
+  if (list.length === 0) return { count: 0, error: null }
+  const ids = [...new Set(list.map((r) => (r as { campaign_id: string }).campaign_id))]
   const { data: camps, error: cErr } = await supabase
     .from('zv_campaigns')
     .select('id')
@@ -125,10 +135,11 @@ async function countLeadZvProgressBlockingAiInbox(
     .in('id', ids)
   if (cErr) {
     console.warn('[inbox-ai-reply] count progress + campanha ativa:', cErr.message)
-    return rows.length
+    return { count: list.length, error: null }
   }
   const active = new Set((camps ?? []).map((c) => (c as { id: string }).id))
-  return rows.filter((r) => active.has((r as { campaign_id: string }).campaign_id)).length
+  const count = list.filter((r) => active.has((r as { campaign_id: string }).campaign_id)).length
+  return { count, error: null }
 }
 
 /** Mesma regra que `zapvoice-inbound`: mensagens ZV pendentes/processando bloqueiam IA genérica. */
@@ -259,6 +270,128 @@ function inboxIaEntryDelayMs(): number {
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms))
+}
+
+/**
+ * Uma tentativa de auto-cura (logs com `attempt` para Supabase Logs).
+ */
+async function trySelfHealStaleZvDispatchPauseInboxOnce(
+  supabase: SupabaseClient,
+  userId: string,
+  leadId: string,
+  attempt: number,
+): Promise<boolean> {
+  const [progRes, pendRes] = await Promise.all([
+    countLeadZvProgressBlockingAiInbox(supabase, userId, leadId),
+    supabase
+      .from('scheduled_messages')
+      .select('id', { count: 'exact', head: true })
+      .eq('user_id', userId)
+      .eq('lead_id', leadId)
+      .not('zv_campaign_id', 'is', null)
+      .in('status', ['pending', 'processing'])
+      .eq('is_active', true),
+  ])
+  const pendCt = pendRes.count ?? 0
+  const pendErrMsg = pendRes.error?.message ?? null
+  const progErrMsg = progRes.error?.message ?? null
+
+  console.log('[inbox-ai-reply][self-heal] snapshot', {
+    lead_id: leadId,
+    attempt,
+    scheduled_zv_pending_or_processing_count: pendCt,
+    scheduled_zv_count_error: pendErrMsg,
+    lead_campaign_progress_blocking_count: progRes.count,
+    progress_count_error: progErrMsg,
+  })
+
+  if (progRes.error || pendRes.error) {
+    console.warn(
+      '[inbox-ai-reply][self-heal] abort tentativa: checagem incompleta',
+      attempt,
+      progErrMsg ?? pendErrMsg,
+    )
+    return false
+  }
+  if (progRes.count > 0 || pendCt > 0) {
+    console.log('[inbox-ai-reply][self-heal] abort tentativa: fila ou funil ainda bloqueia', {
+      attempt,
+      lead_id: leadId,
+      pend_exact: pendCt,
+      prog_blocking_exact: progRes.count,
+    })
+    return false
+  }
+
+  const { data: row, error: leErr } = await supabase
+    .from('leads')
+    .select('ai_paused_for_zv_dispatch')
+    .eq('id', leadId)
+    .eq('user_id', userId)
+    .maybeSingle()
+  if (leErr || !row) {
+    if (leErr) console.warn('[inbox-ai-reply][self-heal] read lead', attempt, leErr.message)
+    return false
+  }
+  const flagOn =
+    (row as { ai_paused_for_zv_dispatch?: boolean | null }).ai_paused_for_zv_dispatch === true
+  console.log('[inbox-ai-reply][self-heal] lead flag', {
+    attempt,
+    lead_id: leadId,
+    ai_paused_for_zv_dispatch: flagOn,
+  })
+  if (!flagOn) {
+    console.log('[inbox-ai-reply][self-heal] ok tentativa: flag já false', { attempt, lead_id: leadId })
+    return true
+  }
+
+  const { error: ue } = await supabase
+    .from('leads')
+    .update({
+      ai_paused_for_zv_dispatch: false,
+      funnel_locked_until: null,
+    })
+    .eq('id', leadId)
+    .eq('user_id', userId)
+  if (ue) {
+    console.warn('[inbox-ai-reply][self-heal] UPDATE leads falhou', attempt, ue.message)
+    return false
+  }
+  console.log('[inbox-ai-reply][self-heal] UPDATE ok', {
+    attempt,
+    lead_id: leadId,
+    ai_paused_for_zv_dispatch: false,
+    funnel_locked_until: null,
+  })
+  return true
+}
+
+/**
+ * Auto-cura com retry (race: resposta do cliente no mesmo minuto que o disparo ainda grava `sent`/`completed`).
+ */
+async function trySelfHealStaleZvDispatchPauseInbox(
+  supabase: SupabaseClient,
+  userId: string,
+  leadId: string,
+): Promise<boolean> {
+  for (let attempt = 1; attempt <= INBOX_ZV_SELF_HEAL_MAX_ATTEMPTS; attempt++) {
+    const ok = await trySelfHealStaleZvDispatchPauseInboxOnce(supabase, userId, leadId, attempt)
+    if (ok) return true
+    if (attempt < INBOX_ZV_SELF_HEAL_MAX_ATTEMPTS) {
+      console.log('[inbox-ai-reply][self-heal] aguardando retry (race dispatch ↔ inbox)', {
+        lead_id: leadId,
+        attempt,
+        delay_ms: INBOX_ZV_SELF_HEAL_RETRY_MS,
+        max_attempts: INBOX_ZV_SELF_HEAL_MAX_ATTEMPTS,
+      })
+      await sleep(INBOX_ZV_SELF_HEAL_RETRY_MS)
+    }
+  }
+  console.warn('[inbox-ai-reply][self-heal] esgotadas tentativas sem destravar', {
+    lead_id: leadId,
+    attempts: INBOX_ZV_SELF_HEAL_MAX_ATTEMPTS,
+  })
+  return false
 }
 
 function instanceNameFromUserId(userId: string): string {
@@ -539,20 +672,51 @@ async function runPipeline(
     return { error: 'lead_after_delay: lead não encontrado' }
   }
 
-  const progBlock = await countLeadZvProgressBlockingAiInbox(
+  const progBlockRes = await countLeadZvProgressBlockingAiInbox(
     supabase,
     leadData.user_id,
     triggerRow.lead_id,
   )
-  if (progBlock > 0) {
+  if (progBlockRes.error) {
+    console.warn('[inbox-ai-reply] progress ZV (pós-delay):', progBlockRes.error.message)
+    return {
+      ok: true,
+      ignored: 'hard_lock_progress_check_error',
+      lead_id: triggerRow.lead_id,
+    }
+  }
+  if (progBlockRes.count > 0) {
     return { ok: true, ignored: 'hard_lock_progress_active', lead_id: triggerRow.lead_id }
   }
 
-  if (leadZv.ai_paused_for_zv_dispatch === true) {
-    return {
-      ok: true,
-      ignored: 'zv_dispatch_ai_paused_flag',
-      lead_id: triggerRow.lead_id,
+  let leadGate = leadZv
+  if (leadGate.ai_paused_for_zv_dispatch === true) {
+    const unblocked = await trySelfHealStaleZvDispatchPauseInbox(
+      supabase,
+      leadData.user_id,
+      triggerRow.lead_id,
+    )
+    if (!unblocked) {
+      return {
+        ok: true,
+        ignored: 'zv_dispatch_ai_paused_flag',
+        lead_id: triggerRow.lead_id,
+      }
+    }
+    const { data: refLead, error: refErr } = await supabase
+      .from('leads')
+      .select('funnel_locked_until, ai_paused_for_zv_dispatch, ai_enabled')
+      .eq('id', triggerRow.lead_id)
+      .eq('user_id', leadData.user_id)
+      .maybeSingle()
+    if (!refErr && refLead) {
+      leadGate = { ...leadGate, ...(refLead as LeadRow) }
+    } else {
+      leadGate = {
+        ...leadGate,
+        ai_paused_for_zv_dispatch: false,
+        funnel_locked_until: null,
+      }
     }
   }
 
@@ -581,7 +745,7 @@ async function runPipeline(
     return { ok: true, ignored: 'hard_lock_last_message_suppressed', lead_id: triggerRow.lead_id }
   }
 
-  const lockedUntilIso = (leadZv.funnel_locked_until ?? null)?.trim?.() ?? null
+  const lockedUntilIso = (leadGate.funnel_locked_until ?? null)?.trim?.() ?? null
   if (lockedUntilIso) {
     const t = new Date(lockedUntilIso).getTime()
     if (!Number.isNaN(t) && Date.now() < t) {
@@ -691,18 +855,20 @@ async function runPipeline(
       lead_id: triggerRow.lead_id,
     }
   }
-  if (pre?.ai_paused_for_zv_dispatch === true) {
-    return {
-      ok: true,
-      ignored: 'zv_dispatch_ai_paused_flag_pre_llm',
-      lead_id: triggerRow.lead_id,
-    }
-  }
-  const [progPre, pendPre] = await Promise.all([
+
+  const [progPreRes, pendPre] = await Promise.all([
     countLeadZvProgressBlockingAiInbox(supabase, leadData.user_id, triggerRow.lead_id),
     countPendingZvScheduledForLead(supabase, leadData.user_id, triggerRow.lead_id),
   ])
-  if (progPre > 0) {
+  if (progPreRes.error) {
+    console.warn('[inbox-ai-reply] progress ZV (pré-LLM):', progPreRes.error.message)
+    return {
+      ok: true,
+      ignored: 'hard_lock_progress_check_error_pre_llm',
+      lead_id: triggerRow.lead_id,
+    }
+  }
+  if (progPreRes.count > 0) {
     return { ok: true, ignored: 'hard_lock_progress_active_pre_llm', lead_id: triggerRow.lead_id }
   }
   if (pendPre > 0) {
@@ -713,7 +879,39 @@ async function runPipeline(
       pending_zv: pendPre,
     }
   }
-  const lockPre = (pre?.funnel_locked_until ?? '').trim()
+
+  let preGate = pre
+  if (preGate?.ai_paused_for_zv_dispatch === true) {
+    const unblockedPre = await trySelfHealStaleZvDispatchPauseInbox(
+      supabase,
+      leadData.user_id,
+      triggerRow.lead_id,
+    )
+    if (!unblockedPre) {
+      return {
+        ok: true,
+        ignored: 'zv_dispatch_ai_paused_flag_pre_llm',
+        lead_id: triggerRow.lead_id,
+      }
+    }
+    const { data: refPre, error: refPreErr } = await supabase
+      .from('leads')
+      .select('funnel_locked_until, ai_paused_for_zv_dispatch')
+      .eq('id', triggerRow.lead_id)
+      .eq('user_id', leadData.user_id)
+      .maybeSingle()
+    if (!refPreErr && refPre) {
+      preGate = { ...preGate, ...(refPre as typeof preGate) }
+    } else {
+      preGate = {
+        ...preGate,
+        ai_paused_for_zv_dispatch: false,
+        funnel_locked_until: null,
+      }
+    }
+  }
+
+  const lockPre = (preGate?.funnel_locked_until ?? '').trim()
   if (lockPre) {
     const t = new Date(lockPre).getTime()
     if (!Number.isNaN(t) && Date.now() < t) {
@@ -726,7 +924,7 @@ async function runPipeline(
     }
   }
 
-  if (pre?.ai_enabled === false) {
+  if (preGate?.ai_enabled === false) {
     return {
       ok: true,
       ignored: 'ai_disabled_explicit',

@@ -1278,6 +1278,12 @@ serve(async () => {
           nextAt &&
           new Date(nextAt).getTime() > Date.now()
 
+        console.log('[Agenda Suprema] Evolution OK — scheduled_messages → sent + funil/IA antes do chat CRM', {
+          sched_id: msg.id,
+          lead_id: msg.lead_id ?? null,
+          zv_campaign_id: msg.zv_campaign_id ?? null,
+        })
+
         const { error: upErr } = await supabase
           .from('scheduled_messages')
           .update(
@@ -1300,6 +1306,78 @@ serve(async () => {
           .eq('user_id', msg.user_id)
         if (upErr) {
           throw new Error(`Supabase: falha ao atualizar agendamento: ${upErr.message}`)
+        }
+
+        if (isScheduledMessageZapVoiceFunnelStep(msg)) {
+          queuedInline = await enqueueZapVoiceNextScheduledMessage(supabase, msg)
+        }
+
+        if (msg.lead_id && msg.zv_campaign_id) {
+          const { data: prog, error: progErr } = await supabase
+            .from('lead_campaign_progress')
+            .select('id, status')
+            .eq('user_id', msg.user_id)
+            .eq('lead_id', msg.lead_id)
+            .eq('campaign_id', msg.zv_campaign_id)
+            .in('status', ['active', 'awaiting_last_send'])
+            .maybeSingle()
+          if (progErr) {
+            console.warn('[Agenda Suprema] Falha ao ler progress:', progErr.message)
+          }
+
+          const { count, error: cntErr } = await supabase
+            .from('scheduled_messages')
+            .select('id', { count: 'exact', head: true })
+            .eq('user_id', msg.user_id)
+            .eq('lead_id', msg.lead_id)
+            .eq('zv_campaign_id', msg.zv_campaign_id)
+            .in('status', ['pending', 'processing'])
+            .eq('is_active', true)
+
+          if (cntErr) {
+            console.warn('[Agenda Suprema] Falha ao checar fim do funil:', cntErr.message)
+          } else if ((count ?? 0) === 0) {
+            const st = prog && typeof (prog as { status?: unknown }).status === 'string'
+              ? String((prog as { status: string }).status)
+              : ''
+            const isAwaiting = st === 'awaiting_last_send'
+            const sentFunnelStep = isScheduledMessageZapVoiceFunnelStep(msg)
+            const noFollowUpQueued = queuedInline === null
+            const funnelJustFinished =
+              Boolean(prog) && sentFunnelStep && noFollowUpQueued && (isAwaiting || st === 'active')
+
+            if (!prog || isAwaiting || funnelJustFinished) {
+              const { error: compErr } = await supabase
+                .from('lead_campaign_completions')
+                .insert({
+                  user_id: msg.user_id,
+                  lead_id: msg.lead_id,
+                  campaign_id: msg.zv_campaign_id,
+                })
+              if (compErr && compErr.code !== '23505') {
+                console.warn('[Agenda Suprema] Falha ao gravar completion:', compErr.message)
+              }
+              if (prog && (prog as { id?: string }).id) {
+                const { error: finErr } = await supabase
+                  .from('lead_campaign_progress')
+                  .update({
+                    status: 'completed',
+                    updated_at: new Date().toISOString(),
+                  })
+                  .eq('id', (prog as { id: string }).id)
+                  .eq('user_id', msg.user_id)
+                if (finErr) {
+                  console.warn('[Agenda Suprema] Falha ao marcar progress completed:', finErr.message)
+                }
+              }
+
+              await ensureLeadAiUnblockedAfterZvFunnelEnd(supabase, msg.user_id, msg.lead_id)
+              console.log('[Agenda Suprema] Campanha/funil Zap Voice OK — progress completed + IA reavaliada', {
+                lead_id: msg.lead_id,
+                zv_campaign_id: msg.zv_campaign_id,
+              })
+            }
+          }
         }
 
         if (isScheduledMessageAgendaOuAvulsa(msg)) {
@@ -1362,80 +1440,6 @@ serve(async () => {
           .eq('id', msg.id)
           .eq('user_id', msg.user_id)
         failed += 1
-      }
-
-      if (isScheduledMessageZapVoiceFunnelStep(msg)) {
-        queuedInline = await enqueueZapVoiceNextScheduledMessage(supabase, msg)
-      }
-
-      // --- Zap Voice: sem pendentes nesta campanha+lead → conclui e libera IA ---
-      // (Nunca roda para Agenda avulsa: não há `zv_campaign_id`.)
-      if (msg.lead_id && msg.zv_campaign_id) {
-        const { data: prog, error: progErr } = await supabase
-          .from('lead_campaign_progress')
-          .select('id, status')
-          .eq('user_id', msg.user_id)
-          .eq('lead_id', msg.lead_id)
-          .eq('campaign_id', msg.zv_campaign_id)
-          .in('status', ['active', 'awaiting_last_send'])
-          .maybeSingle()
-        if (progErr) {
-          console.warn('[Agenda Suprema] Falha ao ler progress:', progErr.message)
-        }
-
-        const { count, error: cntErr } = await supabase
-          .from('scheduled_messages')
-          .select('id', { count: 'exact', head: true })
-          .eq('user_id', msg.user_id)
-          .eq('lead_id', msg.lead_id)
-          .eq('zv_campaign_id', msg.zv_campaign_id)
-          .in('status', ['pending', 'processing'])
-          .eq('is_active', true)
-
-        if (cntErr) {
-          console.warn('[Agenda Suprema] Falha ao checar fim do funil:', cntErr.message)
-        } else if ((count ?? 0) === 0) {
-          const st = prog && typeof (prog as { status?: unknown }).status === 'string'
-            ? String((prog as { status: string }).status)
-            : ''
-          const isAwaiting = st === 'awaiting_last_send'
-          const sentFunnelStep = isScheduledMessageZapVoiceFunnelStep(msg)
-          const noFollowUpQueued = queuedInline === null
-          const funnelJustFinished =
-            Boolean(prog) && sentFunnelStep && noFollowUpQueued && (isAwaiting || st === 'active')
-
-          if (!prog || isAwaiting || funnelJustFinished) {
-            const { error: compErr } = await supabase
-              .from('lead_campaign_completions')
-              .insert({
-                user_id: msg.user_id,
-                lead_id: msg.lead_id,
-                campaign_id: msg.zv_campaign_id,
-              })
-            if (compErr && compErr.code !== '23505') {
-              console.warn('[Agenda Suprema] Falha ao gravar completion:', compErr.message)
-            }
-            if (prog && (prog as { id?: string }).id) {
-              const { error: finErr } = await supabase
-                .from('lead_campaign_progress')
-                .update({
-                  status: 'completed',
-                  updated_at: new Date().toISOString(),
-                })
-                .eq('id', (prog as { id: string }).id)
-                .eq('user_id', msg.user_id)
-              if (finErr) {
-                console.warn('[Agenda Suprema] Falha ao marcar progress completed:', finErr.message)
-              }
-            }
-
-            await ensureLeadAiUnblockedAfterZvFunnelEnd(supabase, msg.user_id, msg.lead_id)
-            console.log('[Agenda Suprema] Campanha/funil Zap Voice OK — progress completed + IA reavaliada', {
-              lead_id: msg.lead_id,
-              zv_campaign_id: msg.zv_campaign_id,
-            })
-          }
-        }
       }
 
       if (queuedInline !== null) {

@@ -1242,6 +1242,20 @@ export async function checkAndSendScheduledMessages(
             break inner
           }
 
+          console.log('[worker] Evolution OK — sent no DB + funil/IA antes do chat CRM', {
+            sched_id: row.id,
+            lead_id: row.lead_id ?? null,
+            zv_campaign_id: row.zv_campaign_id ?? null,
+          })
+
+          if (isScheduledMessageZapVoiceFunnelStepRow(row)) {
+            queuedInline = await enqueueNextFunnelStepAfterSend(supabase, row)
+          }
+
+          await maybeFinalizeZapVoiceCampaignLead(supabase, row, {
+            funnelNextQueued: queuedInline !== null,
+          })
+
           if (
             !useRecurring &&
             isScheduledMessageAgendaOuAvulsaRow(row)
@@ -1287,14 +1301,6 @@ export async function checkAndSendScheduledMessages(
                 .eq('user_id', row.user_id)
             }
           }
-
-          if (isScheduledMessageZapVoiceFunnelStepRow(row)) {
-            queuedInline = await enqueueNextFunnelStepAfterSend(supabase, row)
-          }
-
-          await maybeFinalizeZapVoiceCampaignLead(supabase, row, {
-            funnelNextQueued: queuedInline !== null,
-          })
 
           processed += 1
 

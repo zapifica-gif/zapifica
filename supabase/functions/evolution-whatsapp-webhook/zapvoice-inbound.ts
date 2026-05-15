@@ -176,6 +176,98 @@ export async function countLeadZvProgressBlockingAi(
   return { count, error: null }
 }
 
+/**
+ * Auto-cura (Edge): `ai_paused_for_zv_dispatch` presa no lead sem funil ZV real nem fila pendente
+ * (ex.: worker não rodou / não atualizou após `completed`). Corrige `leads` e retorna `true`
+ * para a IA seguir. Se ainda há progresso em campanha ativa ou mensagens ZV na fila, retorna `false`.
+ * Em erro de leitura das contagens, retorna `false` (conservador — não libera por dúvida).
+ */
+export async function trySelfHealStaleZvDispatchPause(
+  supabase: SupabaseClient,
+  userId: string,
+  leadId: string,
+  logLabel = '[ZV self-heal]',
+): Promise<boolean> {
+  const [{ count: pend, error: pe }, progBlocking] = await Promise.all([
+    supabase
+      .from('scheduled_messages')
+      .select('id', { count: 'exact', head: true })
+      .eq('user_id', userId)
+      .eq('lead_id', leadId)
+      .not('zv_campaign_id', 'is', null)
+      .in('status', ['pending', 'processing'])
+      .eq('is_active', true),
+    countLeadZvProgressBlockingAi(supabase, userId, leadId),
+  ])
+
+  const pendExact = pend ?? 0
+  const progExact = progBlocking.count
+  const progErrMsg = progBlocking.error?.message ?? null
+  const pendErrMsg = pe?.message ?? null
+
+  console.log(`${logLabel} snapshot`, {
+    lead_id: leadId,
+    user_id: userId,
+    scheduled_zv_pending_or_processing_count: pendExact,
+    scheduled_zv_count_error: pendErrMsg,
+    lead_campaign_progress_blocking_count: progExact,
+    progress_count_error: progErrMsg,
+  })
+
+  if (pe || progBlocking.error) {
+    console.warn(
+      `${logLabel} abort: checagem incompleta (não cura)`,
+      pendErrMsg ?? progErrMsg,
+    )
+    return false
+  }
+  if (pendExact !== 0 || progExact !== 0) {
+    console.log(`${logLabel} abort: ainda há fila ou funil bloqueante`, {
+      lead_id: leadId,
+      pend_exact: pendExact,
+      prog_blocking_exact: progExact,
+    })
+    return false
+  }
+
+  const { data: row, error: leErr } = await supabase
+    .from('leads')
+    .select('ai_paused_for_zv_dispatch')
+    .eq('id', leadId)
+    .eq('user_id', userId)
+    .maybeSingle()
+  if (leErr || !row) {
+    if (leErr) console.warn(`${logLabel} abort: read lead`, leErr.message)
+    return false
+  }
+  const flagOn = (row as { ai_paused_for_zv_dispatch?: boolean | null }).ai_paused_for_zv_dispatch === true
+  console.log(`${logLabel} lead flag ai_paused_for_zv_dispatch`, {
+    lead_id: leadId,
+    ai_paused_for_zv_dispatch: flagOn,
+  })
+  if (!flagOn) {
+    console.log(`${logLabel} ok: flag já false — IA não precisa de UPDATE`)
+    return true
+  }
+
+  const { error: ue } = await supabase
+    .from('leads')
+    .update({
+      ai_paused_for_zv_dispatch: false,
+      funnel_locked_until: null,
+    })
+    .eq('id', leadId)
+    .eq('user_id', userId)
+  if (ue) {
+    console.warn(`${logLabel} abort: falha no UPDATE leads`, ue.message)
+    return false
+  }
+  console.log(`${logLabel} UPDATE ok: ai_paused_for_zv_dispatch=false, funnel_locked_until=null`, {
+    lead_id: leadId,
+  })
+  return true
+}
+
 /** Libera a IA do lead se não há mais Zap Voice pendente/processando nem progresso ativo. */
 async function maybeReleaseLeadZvAiDispatchPause(
   supabase: SupabaseClient,

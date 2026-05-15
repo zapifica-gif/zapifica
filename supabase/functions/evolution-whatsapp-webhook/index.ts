@@ -7,7 +7,11 @@
 
 import { serve } from 'https://deno.land/std@0.168.0/http/server.ts'
 import { createClient, SupabaseClient } from 'https://esm.sh/@supabase/supabase-js@2'
-import { processZapVoiceInbound, countLeadZvProgressBlockingAi } from './zapvoice-inbound.ts'
+import {
+  processZapVoiceInbound,
+  countLeadZvProgressBlockingAi,
+  trySelfHealStaleZvDispatchPause,
+} from './zapvoice-inbound.ts'
 import {
   extractQuotedTextFromMessage,
   fetchBase64FromEvolutionApi,
@@ -1499,19 +1503,41 @@ serve(async (req) => {
       if (aiErr) {
         console.error('[IA] Falha ao ler ai_enabled do lead:', aiErr.message)
       } else {
-        const enabled = (leadAi as LeadAiRow | null)?.ai_enabled !== false
+        let leadAiRow = leadAi as typeof leadAi & {
+          ai_paused_for_zv_dispatch?: boolean | null
+          funnel_locked_until?: string | null
+        }
         const zvDispatchPaused =
-          (leadAi as { ai_paused_for_zv_dispatch?: boolean | null } | null)
-            ?.ai_paused_for_zv_dispatch === true
+          leadAiRow?.ai_paused_for_zv_dispatch === true
         if (zvDispatchPaused) {
-          console.log(
-            '[IA] Zap Voice em disparo para este lead — ignorando resposta automática.',
-            { leadId: crmLeadId },
+          const selfHealed = await trySelfHealStaleZvDispatchPause(
+            supabase,
+            userId,
+            crmLeadId,
+            '[IA][self-heal]',
           )
-          skipped.push(`zv_dispatch_pause:${item.msgId}`)
-          continue
+          if (!selfHealed) {
+            console.log(
+              '[IA] Zap Voice em disparo para este lead — ignorando resposta automática.',
+              { leadId: crmLeadId },
+            )
+            skipped.push(`zv_dispatch_pause:${item.msgId}`)
+            continue
+          }
+          const { data: refLead, error: refErr } = await supabase
+            .from('leads')
+            .select(
+              'id, ai_enabled, funnel_locked_until, name, phone, ai_paused_until, ai_paused_for_zv_dispatch',
+            )
+            .eq('id', crmLeadId)
+            .eq('user_id', userId)
+            .maybeSingle()
+          if (!refErr && refLead) {
+            leadAiRow = refLead as typeof leadAiRow
+          }
         }
 
+        const enabled = (leadAiRow as LeadAiRow | null)?.ai_enabled !== false
         const zvProg = await countLeadZvProgressBlockingAi(supabase, userId, crmLeadId)
         if (!zvProg.error && zvProg.count > 0) {
           console.log('[IA] Funil Zap Voice ativo neste lead — ignorando IA.', {
@@ -1543,7 +1569,7 @@ serve(async (req) => {
           continue
         }
 
-        const lockedUntil = (leadAi as LeadFunnelLockRow | null)?.funnel_locked_until ?? null
+        const lockedUntil = (leadAiRow as LeadFunnelLockRow | null)?.funnel_locked_until ?? null
         if (lockedUntil) {
           const t = new Date(lockedUntil).getTime()
           if (!Number.isNaN(t) && Date.now() < t) {
@@ -1555,7 +1581,7 @@ serve(async (req) => {
           }
         }
 
-        const pauseRawLead = (leadAi as { ai_paused_until?: unknown } | null)?.ai_paused_until
+        const pauseRawLead = (leadAiRow as { ai_paused_until?: unknown } | null)?.ai_paused_until
         if (isAiPausedUntilActive(pauseRawLead)) {
           console.log('[IA] Human handoff — ai_paused_until ativo, ignorando resposta automática.', {
             leadId: crmLeadId,
@@ -1639,7 +1665,7 @@ serve(async (req) => {
                 histAsc as { sender_type: string; message_body: string | null }[],
               )
 
-            const leadNameRow = leadAi as LeadAiNameRow | null
+            const leadNameRow = leadAiRow as LeadAiNameRow | null
             const clientFirstName = extractClientFirstNameForAi(
               leadNameRow?.name,
               phoneDigits,
@@ -1674,12 +1700,20 @@ serve(async (req) => {
                 continue
               }
               if (gateRecheck?.ai_paused_for_zv_dispatch === true) {
-                console.log(
-                  '[IA] Zap Voice (recheck antes do LLM) — ignorando resposta automática.',
-                  { leadId: crmLeadId },
+                const okSelfHeal = await trySelfHealStaleZvDispatchPause(
+                  supabase,
+                  userId,
+                  crmLeadId,
+                  '[IA][self-heal pre-LLM]',
                 )
-                skipped.push(`zv_dispatch_pause_recheck:${item.msgId}`)
-                continue
+                if (!okSelfHeal) {
+                  console.log(
+                    '[IA] Zap Voice (recheck antes do LLM) — ignorando resposta automática.',
+                    { leadId: crmLeadId },
+                  )
+                  skipped.push(`zv_dispatch_pause_recheck:${item.msgId}`)
+                  continue
+                }
               }
             }
 
