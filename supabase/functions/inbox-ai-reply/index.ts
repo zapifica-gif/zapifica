@@ -10,11 +10,12 @@
 //      do tenant, aborta antes do delay/LLM (return 'campaign_trigger_reserved').
 //      Prioridade de negócio: funil/campanha > override `ai_enabled` no CRM.
 //   2) Delay aleatório de 5–6 s: dá ao webhook do funil tempo para gravar progresso.
-//   3) HARD LOCK: progresso ativo, ai_paused_for_zv_dispatch, fila ZV pendente
-//      ou última mensagem com ai_suppressed — sempre respeitados (idem).
+//   3) HARD LOCK: progresso ativo, ai_paused_for_zv_dispatch, fila ZV pendente.
+//      Mensagem com `ai_suppressed` por Zap Voice/funil não aborta na entrada: a inbox
+//      revalida (race + self-heal) e pode limpar o carimbo em `chat_messages` antes do LLM.
 //      Self-healing: se `ai_paused_for_zv_dispatch` estiver true sem funil ZV real
 //      nem fila pendente, a Edge corrige `leads` e segue com o DeepSeek (6 leituras,
-//      2s entre falhas ≈10s; re-poll de progresso/fila antes do self-heal quando pause ZV ativo).
+//      2s entre falhas ≈10s; re-poll de progresso/fila quando pause ZV ou carimbo ZV no payload).
 //
 // Secrets obrigatórios:
 //   * DEEPSEEK_API_KEY
@@ -96,6 +97,8 @@ type ChatMessageRow = {
   content_type: string
   message_body: string | null
   ai_suppressed?: boolean | null
+  /** Motivo gravado pelo evolution-whatsapp-webhook (ex.: fluxo_em_andamento). */
+  ai_suppress_reason?: string | null
   created_at: string
   /** Preenchido pelo webhook Evolution — validado contra o dono do lead. */
   evolution_instance_name?: string | null
@@ -528,6 +531,29 @@ function extractEvolutionMessageId(data: unknown): string | null {
   return null
 }
 
+/** Carimbo `ai_suppressed` colocado pelo webhook por Zap Voice/funil — a inbox pode revalidar e limpar. */
+function isZvRevalidatableWebhookSuppress(
+  suppressed: boolean | null | undefined,
+  reason: string | null | undefined,
+): boolean {
+  if (suppressed !== true) return false
+  if (reason == null || String(reason).trim() === '') return true
+  const r = String(reason).toLowerCase()
+  if (r.includes('human') || r.includes('modera') || r.includes('spam')) return false
+  return (
+    r.includes('funnel') ||
+    r.includes('fluxo') ||
+    r.includes('zapvoice') ||
+    r.includes('zap_voice') ||
+    r.includes('zv') ||
+    r.includes('lead_in_funnel') ||
+    r.includes('trigger') ||
+    r.includes('advance') ||
+    r.includes('avanc') ||
+    r.includes('conclu')
+  )
+}
+
 async function sendEvolutionText(
   baseUrl: string,
   apiKey: string,
@@ -565,6 +591,18 @@ async function runPipeline(
   evolutionUrl: string,
   evolutionKey: string,
 ): Promise<Record<string, unknown>> {
+  const webhookZvSuppressCarimbo = isZvRevalidatableWebhookSuppress(
+    triggerRow.ai_suppressed,
+    triggerRow.ai_suppress_reason,
+  )
+  console.log('[inbox-ai-reply] runPipeline início', {
+    lead_id: triggerRow.lead_id,
+    message_id: triggerRow.id,
+    ai_suppressed: triggerRow.ai_suppressed ?? null,
+    ai_suppress_reason: triggerRow.ai_suppress_reason ?? null,
+    webhook_Zv_rerevalidate: webhookZvSuppressCarimbo,
+  })
+
   const ingestInstance = (triggerRow.evolution_instance_name ?? '').trim()
   if (!ingestInstance) {
     return {
@@ -676,8 +714,8 @@ async function runPipeline(
     return { error: 'lead_after_delay: lead não encontrado' }
   }
 
-  /** Pause por disparo ZV: permite re-poll de progresso/fila antes de hard-block (race pós-última etapa). */
-  const zvDispatchRaceSignal = leadZv.ai_paused_for_zv_dispatch === true
+  const zvDispatchRaceSignal =
+    leadZv.ai_paused_for_zv_dispatch === true || webhookZvSuppressCarimbo
 
   let progBlockRes = await countLeadZvProgressBlockingAiInbox(
     supabase,
@@ -780,7 +818,7 @@ async function runPipeline(
 
   const { data: lastMsg, error: lastErr } = await supabase
     .from('chat_messages')
-    .select('id, ai_suppressed, created_at')
+    .select('id, ai_suppressed, ai_suppress_reason, created_at')
     .eq('lead_id', triggerRow.lead_id)
     .order('created_at', { ascending: false })
     .limit(1)
@@ -788,9 +826,37 @@ async function runPipeline(
   if (lastErr) {
     return { error: `last_msg: ${lastErr.message}` }
   }
-  const last = lastMsg as { id?: string; ai_suppressed?: boolean | null } | null
-  if (last?.ai_suppressed === true) {
+  const last = lastMsg as {
+    id?: string
+    ai_suppressed?: boolean | null
+    ai_suppress_reason?: string | null
+  } | null
+  const lastIsTriggerWithZvCarimbo =
+    webhookZvSuppressCarimbo &&
+    Boolean(triggerRow.id) &&
+    last?.id === triggerRow.id
+  const lastBlocksIa = last?.ai_suppressed === true && !lastIsTriggerWithZvCarimbo
+  if (lastBlocksIa) {
     return { ok: true, ignored: 'hard_lock_last_message_suppressed', lead_id: triggerRow.lead_id }
+  }
+
+  if (lastIsTriggerWithZvCarimbo && triggerRow.id) {
+    const { error: unsupErr } = await supabase
+      .from('chat_messages')
+      .update({
+        ai_suppressed: false,
+        ai_suppress_reason: null,
+      })
+      .eq('id', triggerRow.id)
+      .eq('lead_id', triggerRow.lead_id)
+    if (unsupErr) {
+      console.warn('[inbox-ai-reply] falha ao limpar ai_suppressed pós-revalidação:', unsupErr.message)
+    } else {
+      console.log('[inbox-ai-reply] carimbo webhook ZV removido — seguindo para LLM', {
+        message_id: triggerRow.id,
+        lead_id: triggerRow.lead_id,
+      })
+    }
   }
 
   const lockedUntilIso = (leadGate.funnel_locked_until ?? null)?.trim?.() ?? null
@@ -904,7 +970,7 @@ async function runPipeline(
     }
   }
 
-  const zvRacePreSignal = pre?.ai_paused_for_zv_dispatch === true
+  const zvRacePreSignal = pre?.ai_paused_for_zv_dispatch === true || webhookZvSuppressCarimbo
 
   let progPreRes: Awaited<ReturnType<typeof countLeadZvProgressBlockingAiInbox>>
   let pendPre: number
@@ -1170,6 +1236,13 @@ serve(async (req) => {
     typeof record.evolution_instance_name === 'string'
       ? record.evolution_instance_name.trim()
       : ''
+  const suppressReasonRaw =
+    typeof record.ai_suppress_reason === 'string'
+      ? record.ai_suppress_reason.trim()
+      : record.ai_suppress_reason == null
+        ? null
+        : String(record.ai_suppress_reason).trim() || null
+
   const triggerRow: ChatMessageRow = {
     id: typeof record.id === 'string' ? record.id : '',
     lead_id: typeof record.lead_id === 'string' ? record.lead_id : '',
@@ -1177,16 +1250,13 @@ serve(async (req) => {
     content_type: typeof record.content_type === 'string' ? record.content_type : 'text',
     message_body: typeof record.message_body === 'string' ? record.message_body : null,
     ai_suppressed: boolValue(record.ai_suppressed) ?? null,
+    ai_suppress_reason: suppressReasonRaw,
     created_at: typeof record.created_at === 'string' ? record.created_at : new Date().toISOString(),
     evolution_instance_name: evoInstRaw || null,
   }
   if (!triggerRow.lead_id) {
     return jsonResponse({ error: 'record.lead_id em falta' }, 400)
   }
-  if (triggerRow.ai_suppressed === true) {
-    return jsonResponse({ ok: true, ignored: 'ai_suppressed_on_message', lead_id: triggerRow.lead_id })
-  }
-
   const supabase = createClient(supabaseUrl, serviceKey, {
     auth: { persistSession: false, autoRefreshToken: false, detectSessionInUrl: false },
   })
